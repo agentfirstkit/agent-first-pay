@@ -1,0 +1,32 @@
+services:
+  afpay:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+      args:
+        FEATURES: "${FEATURES:-btc-core,ln-phoenixd,cashu,redb,mcp,rest,exchange-rate}"
+        INSTALL_PHOENIXD: "${INSTALL_PHOENIXD:-true}"
+        INSTALL_BITCOIND: "${INSTALL_BITCOIND:-true}"
+    environment:
+      AFPAY_MODE: "${AFPAY_MODE:-rest}"
+      AFPAY_PORT: "${AFPAY_PORT:-9401}"
+      AFPAY_REST_API_KEY: "${AFPAY_REST_API_KEY:-}"
+      AFPAY_RPC_SECRET: "${AFPAY_RPC_SECRET:-}"
+      ENABLE_PHOENIXD: "${ENABLE_PHOENIXD:-true}"
+      ENABLE_BITCOIND: "${ENABLE_BITCOIND:-true}"
+      BTC_NETWORK: "${BTC_NETWORK:-signet}"
+      BTC_RPC_PORT: "${BTC_RPC_PORT:-18332}"
+      AFPAY_DATA_DIR: /data/afpay
+      BITCOIND_DATADIR: /data/bitcoind
+      PHOENIXD_DATADIR: /data/phoenixd
+    ports:
+      - "${AFPAY_PORT:-9401}:${AFPAY_PORT:-9401}"
+    volumes:
+      - afpay-data:/data/afpay
+      - bitcoind-data:/data/bitcoind
+      - phoenixd-data:/data/phoenixd
+
+volumes:
+  afpay-data:
+  bitcoind-data:
+  phoenixd-data:
