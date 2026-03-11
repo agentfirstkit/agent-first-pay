@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::config::VERSION;
 use crate::handler::{self, App};
 use crate::types::*;
+use agent_first_data::RedactionPolicy;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,12 +36,19 @@ async fn drain_outputs(_app: &App, rx: &Mutex<mpsc::Receiver<Output>>) -> CallTo
     let mut outputs = vec![];
     let mut guard = rx.lock().await;
     while let Ok(msg) = guard.try_recv() {
-        outputs.push(serde_json::to_value(&msg).unwrap_or(Value::Null));
+        let value = serde_json::to_value(&msg).unwrap_or(Value::Null);
+        let rendered = crate::output_fmt::render_value_with_policy(
+            &value,
+            agent_first_data::OutputFormat::Json,
+        );
+        let normalized = serde_json::from_str::<Value>(&rendered).unwrap_or(Value::Null);
+        outputs.push(normalized);
     }
     drop(guard);
 
     let result = json!({"events": outputs});
-    let text = agent_first_data::output_json(&result);
+    // Per-event redaction policy has already been applied above.
+    let text = agent_first_data::output_json_with(&result, RedactionPolicy::RedactionNone);
     CallToolResult::success(vec![Content::text(text)])
 }
 

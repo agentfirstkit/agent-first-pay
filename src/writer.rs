@@ -1,12 +1,12 @@
 use crate::types::Output;
-use agent_first_data::{OutputFormat, RedactionPolicy};
+use agent_first_data::OutputFormat;
 use std::io::Write;
 use tokio::sync::mpsc;
 
 pub async fn writer_task(mut rx: mpsc::Receiver<Output>, format: OutputFormat) {
     while let Some(output) = rx.recv().await {
         let value = serde_json::to_value(output).unwrap_or(serde_json::Value::Null);
-        let rendered = render_value_with_policy(&value, format);
+        let rendered = crate::output_fmt::render_value_with_policy(&value, format);
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -15,16 +15,6 @@ pub async fn writer_task(mut rx: mpsc::Receiver<Output>, format: OutputFormat) {
             let _ = out.write_all(b"\n");
         }
         let _ = out.flush();
-    }
-}
-
-fn render_value_with_policy(value: &serde_json::Value, format: OutputFormat) -> String {
-    if format == OutputFormat::Json
-        && value.get("code").and_then(|v| v.as_str()) == Some("wallet_seed")
-    {
-        agent_first_data::output_json_with(value, RedactionPolicy::RedactionNone)
-    } else {
-        agent_first_data::cli_output(value, format)
     }
 }
 
@@ -39,7 +29,7 @@ mod tests {
             "mnemonic_secret": "raw secret",
             "trace": {"duration_ms": 0}
         });
-        let rendered = render_value_with_policy(&value, OutputFormat::Json);
+        let rendered = crate::output_fmt::render_value_with_policy(&value, OutputFormat::Json);
         assert!(rendered.contains("\"mnemonic_secret\":\"raw secret\""));
     }
 
@@ -50,7 +40,7 @@ mod tests {
             "mnemonic_secret": "raw secret",
             "trace": {"duration_ms": 0}
         });
-        let rendered = render_value_with_policy(&value, OutputFormat::Json);
+        let rendered = crate::output_fmt::render_value_with_policy(&value, OutputFormat::Json);
         assert!(rendered.contains("\"mnemonic_secret\":\"***\""));
     }
 }

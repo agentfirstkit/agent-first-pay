@@ -1,5 +1,6 @@
 pub mod config;
 pub mod handler;
+pub mod output_fmt;
 pub mod provider;
 #[cfg(feature = "rest")]
 pub mod rest;

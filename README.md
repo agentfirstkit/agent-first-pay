@@ -78,7 +78,9 @@ PostgreSQL uses `pg_advisory_xact_lock` for spend limit concurrency safety. When
 ## Install
 
 ```bash
-cargo install --path .
+brew install cmnspore/tap/afpay   # macOS/Linux
+scoop bucket add cmnspore https://github.com/cmnspore/scoop-bucket && scoop install afpay  # Windows
+cargo install agent-first-pay     # any platform
 ```
 
 Binary: `afpay`
