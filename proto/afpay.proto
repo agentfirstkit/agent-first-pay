@@ -1,0 +1,16 @@
+syntax = "proto3";
+package afpay;
+
+service AfPay {
+  rpc Call (EncryptedRequest) returns (EncryptedResponse);
+}
+
+message EncryptedRequest {
+  bytes nonce = 1;       // 12 bytes
+  bytes ciphertext = 2;  // AES-256-GCM(key, zstd(JSON Input))
+}
+
+message EncryptedResponse {
+  bytes nonce = 1;       // 12 bytes
+  bytes ciphertext = 2;  // AES-256-GCM(key, zstd(JSON Output[]))
+}

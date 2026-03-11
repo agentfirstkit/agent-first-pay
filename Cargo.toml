@@ -1,0 +1,129 @@
+[package]
+name = "agent-first-pay"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin on-chain), send/receive, spend limits, REST/RPC/MCP modes"
+license = "MIT"
+repository = "https://github.com/cmnspore/agent-first-pay"
+readme = "README.md"
+keywords = ["cryptocurrency", "micropayment", "cashu", "lightning", "bitcoin"]
+categories = ["cryptography::cryptocurrencies", "command-line-utilities"]
+
+[features]
+default = [
+    "redb",
+    "postgres",
+    "mcp",
+    "interactive",
+    "cashu",
+    "ln-nwc",
+    "ln-phoenixd",
+    "ln-lnbits",
+    "sol",
+    "evm",
+    "btc-esplora",
+    "exchange-rate",
+]
+redb = ["dep:redb", "dep:fs2", "dep:cdk-redb"]
+postgres = ["dep:sqlx", "dep:cdk-postgres"]
+mcp = ["dep:rmcp", "dep:schemars"]
+exchange-rate = ["dep:reqwest"]
+ln-nwc = ["dep:nostr-wallet-connect"]
+ln-phoenixd = ["dep:reqwest"]
+ln-lnbits = ["dep:reqwest"]
+sol = [
+    "dep:reqwest",
+    "dep:solana-sdk",
+    "dep:solana-system-interface",
+    "dep:bs58",
+    "dep:base64",
+    "dep:wincode",
+    "dep:bip39",
+    "dep:spl-token",
+    "dep:spl-associated-token-account",
+]
+evm = [
+    "dep:alloy",
+    "dep:reqwest",
+    "dep:bip39",
+]
+btc-esplora = [
+    "dep:bdk_wallet",
+    "dep:bdk_esplora",
+    "dep:bip39",
+    "dep:reqwest",
+]
+btc-core = [
+    "dep:bdk_wallet",
+    "dep:bdk_bitcoind_rpc",
+    "dep:bip39",
+]
+btc-electrum = [
+    "dep:bdk_wallet",
+    "dep:bdk_electrum",
+    "dep:bip39",
+]
+cashu = ["dep:cdk", "dep:bip39"]
+interactive = ["dep:rustyline", "dep:qrcode"]
+rest = ["dep:axum", "dep:tower-http"]
+
+[[bin]]
+name = "afpay"
+path = "src/main.rs"
+
+[dependencies]
+agent-first-data = "0.6"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+redb = { version = "3", optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json"], optional = true }
+
+nostr-wallet-connect = { package = "nwc", version = "0.44", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form", "query"], optional = true }
+bs58 = { version = "0.5", optional = true }
+solana-sdk = { version = "4", optional = true }
+solana-system-interface = { version = "3.1", features = ["wincode"], optional = true }
+base64 = { version = "0.22", optional = true }
+wincode = { version = "0.4", optional = true }
+
+alloy = { version = "1.7", default-features = false, features = ["provider-http", "signers", "signer-local", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
+bdk_wallet = { version = "2", default-features = false, features = ["std", "keys-bip39"], optional = true }
+bdk_esplora = { version = "0.22", default-features = false, features = ["async-https-rustls", "tokio"], optional = true }
+bdk_bitcoind_rpc = { version = "0.22", optional = true }
+bdk_electrum = { version = "0.23", default-features = false, features = ["use-rustls"], optional = true }
+aes-gcm = "0.10"
+bip39 = { version = "2", default-features = false, optional = true }
+cdk = { version = "0.15", default-features = false, features = ["wallet"], optional = true }
+cdk-redb = { version = "0.15", optional = true }
+cdk-postgres = { version = "0.15", optional = true }
+fs2 = { version = "0.4", optional = true }
+rmcp = { version = "1.1", features = ["macros", "server", "transport-io"], optional = true }
+schemars = { version = "1", optional = true }
+getrandom = "0.4"
+hex = "0.4"
+lightning-invoice = "0.34"
+prost = "0.14"
+rustyline = { version = "17", optional = true }
+qrcode = { version = "0.14", optional = true }
+sha2 = "0.10"
+zstd = "0.13"
+shell-words = "1"
+toml = "1.0"
+tonic = "0.14"
+tonic-prost = "0.14"
+spl-token = { version = "9", features = ["no-entrypoint"], optional = true }
+spl-associated-token-account = { version = "8", features = ["no-entrypoint"], optional = true }
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+
+[build-dependencies]
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
