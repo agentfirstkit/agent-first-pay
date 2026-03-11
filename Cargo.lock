@@ -60,9 +60,9 @@ dependencies = [
 
 [[package]]
 name = "agent-first-data"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14cc74e38c6c7d4e2105138c0dd3e73b2780ea84f07f94e2c413327aa404d5b3"
+checksum = "57e5a4327a0ff6fd19222ca5941efcde81132b0b7a90bff0b5b2761c7faabd23"
 dependencies = [
  "chrono",
  "serde_json",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agent-first-pay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "agent-first-data",

@@ -17,6 +17,7 @@ mod handler;
 mod interactive;
 #[cfg(feature = "mcp")]
 mod mcp;
+mod output_fmt;
 mod provider;
 #[cfg(feature = "rest")]
 pub mod rest;
@@ -29,7 +30,7 @@ mod writer;
 #[cfg(feature = "mcp")]
 use rmcp::ServiceExt;
 
-use agent_first_data::{OutputFormat, RedactionPolicy};
+use agent_first_data::OutputFormat;
 use cli::Mode;
 use handler::App;
 use provider::remote;
@@ -426,11 +427,7 @@ fn log_event_enabled(log: &[String], event: &str) -> bool {
 
 fn emit_output(out: &Output, format: OutputFormat) {
     let value = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
-    let rendered = if format == OutputFormat::Json && matches!(out, Output::WalletSeed { .. }) {
-        agent_first_data::output_json_with(&value, RedactionPolicy::RedactionNone)
-    } else {
-        agent_first_data::cli_output(&value, format)
-    };
+    let rendered = output_fmt::render_value_with_policy(&value, format);
     println!("{rendered}");
 }
 

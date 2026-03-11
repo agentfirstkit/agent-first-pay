@@ -135,7 +135,7 @@ pub fn emit_remote_outputs(
                 }
             }
         }
-        let rendered = agent_first_data::cli_output(value, format);
+        let rendered = crate::output_fmt::render_value_with_policy(value, format);
         println!("{rendered}");
     }
     had_error

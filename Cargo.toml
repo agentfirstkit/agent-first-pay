@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-pay"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin on-chain), send/receive, spend limits, REST/RPC/MCP modes"
 license = "MIT"
@@ -72,7 +72,7 @@ name = "afpay"
 path = "src/main.rs"
 
 [dependencies]
-agent-first-data = "0.6"
+agent-first-data = "0.7.0"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

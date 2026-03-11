@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/MCP/RPC/REST modes",
@@ -10,15 +10,18 @@
     "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, MCP mode for agent integration, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
   "mutations": [
-    "Add incremental transaction history sync that pulls only new on-chain events since the last stored cursor, enabling efficient polling without re-downloading full history on each agent restart",
-    "Add REST API server mode exposing payment operations over HTTP for multi-client agent coordination without per-process wallet state",
-    "Add Docker deployment package with supervisord, nginx, and phoenixd integration for self-hosted agent payment infrastructure",
-    "Fix Cashu and Lightning audit flows to correctly track pending/settled state during proof redemption and payment routing",
-    "Add Bitcoin on-chain history tracking with UTXO-level transaction records, enabling agents to query full inbound/outbound BTC history",
-    "Add EVM and Solana receive-wait flows with configurable polling, allowing agents to block until a specific payment is confirmed"
+    "Centralize output rendering policy into a shared output_fmt module, eliminating duplicated render_value_with_policy logic that previously existed independently in writer.rs and interactive.rs",
+    "Fix redaction policy not being applied when wallet_seed events are emitted through the remote output path, which previously bypassed the policy and could expose unredacted secrets in some output modes",
+    "Fix MCP drain_outputs to apply per-event redaction policy before assembling the events array, ensuring wallet_seed mnemonic handling is consistent with CLI and pipe modes",
+    "Update agent-first-data dependency to 0.7.0, which adds YAML and plain-text output format support"
   ],
   "license": "MIT",
-  "bonds": [],
+  "bonds": [
+    {
+      "relation": "spawned_from",
+      "uri": "cmn://cmn.dev/b3.Fz9JVu8Z5vUwzNuPZXscSEahZ2YY8cEL5SkqMXFisNp5"
+    }
+  ],
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
     "exclude_names": [

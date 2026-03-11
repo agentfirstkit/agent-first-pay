@@ -4,7 +4,7 @@ use crate::handler::{self, App};
 use crate::provider::remote;
 use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
-use agent_first_data::{OutputFormat, RedactionPolicy};
+use agent_first_data::OutputFormat;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -682,18 +682,8 @@ fn write_qr_svg_file(data_dir: &str, kind: &str, payload: &str) -> Result<String
 
 fn emit(output: &Output, format: OutputFormat) {
     let value = serde_json::to_value(output).unwrap_or(serde_json::Value::Null);
-    let text = render_value_with_policy(&value, format);
+    let text = crate::output_fmt::render_value_with_policy(&value, format);
     println!("{text}");
-}
-
-fn render_value_with_policy(value: &serde_json::Value, format: OutputFormat) -> String {
-    if format == OutputFormat::Json
-        && value.get("code").and_then(|v| v.as_str()) == Some("wallet_seed")
-    {
-        agent_first_data::output_json_with(value, RedactionPolicy::RedactionNone)
-    } else {
-        agent_first_data::cli_output(value, format)
-    }
 }
 
 fn log_matches(filters: &[String], event: &str) -> bool {
@@ -909,7 +899,10 @@ fn emit_qr_saved_message(
             "trace": {"duration_ms": 0},
         }),
     };
-    println!("{}", render_value_with_policy(&value, output_format));
+    println!(
+        "{}",
+        crate::output_fmt::render_value_with_policy(&value, output_format)
+    );
 }
 
 fn emit_remote_outputs_with_qr(
@@ -927,7 +920,10 @@ fn emit_remote_outputs_with_qr(
                 }
             }
         }
-        println!("{}", render_value_with_policy(value, format));
+        println!(
+            "{}",
+            crate::output_fmt::render_value_with_policy(value, format)
+        );
         maybe_save_qr_svg_from_remote_value(value, data_dir, format, should_write_qr_svg_file);
     }
 }
