@@ -1,10 +1,15 @@
 # ── Build stage ──
-FROM rust:1.86-bookworm AS builder
+FROM rust:1.94-bookworm AS builder
 
 ARG FEATURES="btc-esplora,cashu,ln-nwc,redb,mcp,rest,exchange-rate"
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY proto/ proto/
 COPY src/ src/
 COPY tests/ tests/
 
@@ -16,6 +21,7 @@ FROM debian:bookworm-slim
 
 ARG INSTALL_PHOENIXD=false
 ARG INSTALL_BITCOIND=false
+ARG PHOENIXD_VERSION=0.7.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         supervisor ca-certificates curl \
@@ -29,10 +35,10 @@ RUN if [ "$INSTALL_PHOENIXD" = "true" ]; then \
         if [ "$ARCH" = "x86_64" ]; then ARCH="linux-x64"; \
         elif [ "$ARCH" = "aarch64" ]; then ARCH="linux-arm64"; \
         else echo "unsupported arch: $ARCH" && exit 1; fi && \
-        curl -fsSL "https://github.com/nicoletyy/phoenixd/releases/download/v0.5.1/phoenix-0.5.1-${ARCH}.zip" -o /tmp/phoenixd.zip && \
+        curl -fsSL "https://github.com/ACINQ/phoenixd/releases/download/v${PHOENIXD_VERSION}/phoenixd-${PHOENIXD_VERSION}-${ARCH}.zip" -o /tmp/phoenixd.zip && \
         apt-get update && apt-get install -y --no-install-recommends unzip && \
         unzip /tmp/phoenixd.zip -d /tmp/phoenixd && \
-        cp /tmp/phoenixd/phoenix-*/phoenixd /usr/local/bin/ && \
+        cp /tmp/phoenixd/phoenixd-*/phoenixd /usr/local/bin/ && \
         chmod +x /usr/local/bin/phoenixd && \
         rm -rf /tmp/phoenixd /tmp/phoenixd.zip && \
         apt-get purge -y unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*; \
@@ -52,13 +58,13 @@ RUN if [ "$INSTALL_BITCOIND" = "true" ]; then \
     fi
 
 # Supervisor config
-COPY docker/supervisord.conf /etc/supervisor/supervisord.conf
-COPY docker/conf.d/ /etc/supervisor/conf.d/
+COPY container/docker/supervisord.conf /etc/supervisor/supervisord.conf
+COPY container/docker/conf.d/ /etc/supervisor/conf.d/
 
 # Entrypoint + setup script
-COPY docker/entrypoint.sh /entrypoint.sh
-COPY docker/docker-setup.sh /docker-setup.sh
-RUN chmod +x /entrypoint.sh /docker-setup.sh
+COPY container/docker/entrypoint.sh /entrypoint.sh
+COPY container/docker/container-setup.sh /container-setup.sh
+RUN chmod +x /entrypoint.sh /container-setup.sh
 
 ENV AFPAY_MODE=rest \
     AFPAY_DATA_DIR=/data/afpay \

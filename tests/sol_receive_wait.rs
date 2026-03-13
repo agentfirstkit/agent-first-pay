@@ -203,6 +203,7 @@ async fn sol_receive_wait_min_confirmations_accepts_finalized_without_depth_valu
             wait_until_paid: true,
             wait_timeout_s: Some(2),
             wait_poll_interval_ms: Some(1),
+            wait_sync_limit: None,
             write_qr_svg_file: false,
             min_confirmations: Some(6),
         },

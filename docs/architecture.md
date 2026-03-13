@@ -218,51 +218,57 @@ Same as RPC mode:
 | `is_local_only()` operations | Rejected with HTTP 403 |
 | Authentication | Bearer token or X-API-Key header |
 
-### Docker Deployment
+### Container Deployment
 
-The `docker/` directory provides a single-container deployment using supervisord. The `AFPAY_MODE` environment variable selects the afpay run mode (`rest`, `rpc`, or `mcp`):
+The `container/docker/` directory provides the canonical single-container deployment using supervisord. The `container/apple-container/` directory adds a macOS-specific Apple Container CLI launcher that reuses the same Dockerfile and runtime defaults. The `AFPAY_MODE` environment variable selects the afpay run mode (`rest`, `rpc`, or `mcp`):
 
 ```
 supervisord
   ├─ [priority=10] bitcoind (optional)
   ├─ [priority=10] phoenixd (optional)
   ├─ [priority=20] afpay --mode $AFPAY_MODE
-  └─ [priority=30] docker-setup.sh (one-shot, REST mode only: auto-creates wallets)
+  └─ [priority=30] container-setup.sh (one-shot, REST mode only: auto-creates wallets)
 ```
 
 | Layer | Variable | Default | Description |
 |-------|----------|---------|-------------|
 | Build | `FEATURES` | `btc-core,ln-phoenixd,cashu,redb,mcp,rest,exchange-rate` | cargo --features |
-| Build | `INSTALL_PHOENIXD` | `false` | Install phoenixd binary |
+| Build | `INSTALL_PHOENIXD` | `true` | Install phoenixd binary |
 | Build | `INSTALL_BITCOIND` | `false` | Install bitcoind binary |
 | Runtime | `AFPAY_MODE` | `rest` | afpay run mode: `rest`, `rpc`, `mcp` |
 | Runtime | `AFPAY_PORT` | `9401` | Listen port (rest/rpc; ignored for mcp) |
 | Runtime | `AFPAY_REST_API_KEY` | auto-generated | REST Bearer token (rest mode) |
 | Runtime | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret (rpc mode) |
-| Runtime | `ENABLE_PHOENIXD` | `false` | Start phoenixd process |
+| Runtime | `ENABLE_PHOENIXD` | `true` | Start phoenixd process |
 | Runtime | `ENABLE_BITCOIND` | `false` | Start bitcoind process |
+| Runtime | `BTC_NETWORK` | `mainnet` | bitcoind network |
+| Runtime | `BTC_RPC_PORT` | `8332` | bitcoind RPC port |
+| Runtime | `BTC_PRUNE_MB` | `550` | bitcoind prune target in MiB (`0` disables pruning) |
 
 Secrets are auto-generated on first run and persisted to the data volume. The entrypoint prints connection info (endpoint + secret/key) to stdout on startup.
 
 ```bash
 # REST mode (default) — curl-accessible
-docker compose up --build
+docker compose -f container/docker/compose.yaml up --build
 
 # RPC mode — for afpay CLI clients
-AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
 
 # MCP mode — stdio for AI agents
-AFPAY_MODE=mcp docker compose up --build
+AFPAY_MODE=mcp docker compose -f container/docker/compose.yaml up --build
 ```
 
 All commands work with Podman — replace `docker compose` with `podman compose`:
 
 ```bash
-podman compose up --build
-AFPAY_MODE=rpc AFPAY_PORT=9400 podman compose up --build
+podman compose -f container/docker/compose.yaml up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 podman compose -f container/docker/compose.yaml up --build
+
+# macOS Apple Container CLI launcher
+./container/apple-container/up.sh
 
 # Or build and run without compose
-podman build -t afpay -f docker/Dockerfile .
+podman build -t afpay -f container/docker/Dockerfile .
 podman run -d --name afpay -p 9401:9401 \
   -v afpay-data:/data/afpay -v bitcoind-data:/data/bitcoind -v phoenixd-data:/data/phoenixd \
   -e AFPAY_MODE=rest afpay

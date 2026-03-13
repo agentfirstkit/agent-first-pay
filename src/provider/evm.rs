@@ -9,6 +9,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use async_trait::async_trait;
 use bip39::Mnemonic;
+use std::collections::{HashMap, HashSet};
 
 fn evm_wallet_summary(meta: WalletMetadata, address: String) -> WalletSummary {
     WalletSummary {
@@ -555,6 +556,389 @@ impl EvmProvider {
             last_error.unwrap_or_default()
         )))
     }
+
+    async fn get_transaction_input_raw(
+        &self,
+        endpoints: &[String],
+        tx_hash: &str,
+    ) -> Result<Option<Vec<u8>>, PayError> {
+        let mut last_error: Option<String> = None;
+        for endpoint in endpoints {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getTransactionByHash",
+                "params": [tx_hash],
+                "id": 1
+            });
+            match self.http_client.post(endpoint).json(&body).send().await {
+                Ok(resp) => {
+                    let text = resp.text().await.unwrap_or_default();
+                    let parsed: serde_json::Value = serde_json::from_str(&text)
+                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                    if let Some(err) = parsed.get("error") {
+                        last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
+                        continue;
+                    }
+                    let result = parsed.get("result");
+                    if result.is_none() || result == Some(&serde_json::Value::Null) {
+                        return Ok(None);
+                    }
+                    let tx: EvmTxByHash = serde_json::from_value(
+                        result.cloned().unwrap_or_default(),
+                    )
+                    .map_err(|e| PayError::NetworkError(format!("parse transaction: {e}")))?;
+                    let input = tx.input.as_deref().unwrap_or("0x");
+                    return Ok(Some(decode_hex_data_bytes(input)?));
+                }
+                Err(e) => {
+                    last_error = Some(format!("endpoint={endpoint}: {e}"));
+                }
+            }
+        }
+        Err(PayError::NetworkError(format!(
+            "eth_getTransactionByHash failed: {}",
+            last_error.unwrap_or_default()
+        )))
+    }
+
+    async fn get_block_with_transactions_raw(
+        &self,
+        endpoints: &[String],
+        block_number: u64,
+    ) -> Result<Option<EvmBlockByNumber>, PayError> {
+        let block_hex = format!("0x{block_number:x}");
+        let mut last_error: Option<String> = None;
+        for endpoint in endpoints {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockByNumber",
+                "params": [block_hex, true],
+                "id": 1
+            });
+            match self.http_client.post(endpoint).json(&body).send().await {
+                Ok(resp) => {
+                    let text = resp.text().await.unwrap_or_default();
+                    let parsed: serde_json::Value = serde_json::from_str(&text)
+                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                    if let Some(err) = parsed.get("error") {
+                        last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
+                        continue;
+                    }
+                    let result = parsed.get("result");
+                    if result.is_none() || result == Some(&serde_json::Value::Null) {
+                        return Ok(None);
+                    }
+                    let block: EvmBlockByNumber =
+                        serde_json::from_value(result.cloned().unwrap_or_default())
+                            .map_err(|e| PayError::NetworkError(format!("parse block: {e}")))?;
+                    return Ok(Some(block));
+                }
+                Err(e) => {
+                    last_error = Some(format!("endpoint={endpoint}: {e}"));
+                }
+            }
+        }
+        Err(PayError::NetworkError(format!(
+            "eth_getBlockByNumber failed: {}",
+            last_error.unwrap_or_default()
+        )))
+    }
+
+    async fn get_block_timestamp_raw(
+        &self,
+        endpoints: &[String],
+        block_number: u64,
+    ) -> Result<Option<u64>, PayError> {
+        let block_hex = format!("0x{block_number:x}");
+        let mut last_error: Option<String> = None;
+        for endpoint in endpoints {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockByNumber",
+                "params": [block_hex, false],
+                "id": 1
+            });
+            match self.http_client.post(endpoint).json(&body).send().await {
+                Ok(resp) => {
+                    let text = resp.text().await.unwrap_or_default();
+                    let parsed: serde_json::Value = serde_json::from_str(&text)
+                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                    if let Some(err) = parsed.get("error") {
+                        last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
+                        continue;
+                    }
+                    let result = parsed.get("result");
+                    if result.is_none() || result == Some(&serde_json::Value::Null) {
+                        return Ok(None);
+                    }
+                    let header: EvmBlockHeader = serde_json::from_value(
+                        result.cloned().unwrap_or_default(),
+                    )
+                    .map_err(|e| PayError::NetworkError(format!("parse block header: {e}")))?;
+                    return Ok(header.timestamp.as_deref().and_then(parse_hex_u64));
+                }
+                Err(e) => {
+                    last_error = Some(format!("endpoint={endpoint}: {e}"));
+                }
+            }
+        }
+        Err(PayError::NetworkError(format!(
+            "eth_getBlockByNumber(timestamp) failed: {}",
+            last_error.unwrap_or_default()
+        )))
+    }
+
+    async fn get_erc20_transfer_logs_to_address(
+        &self,
+        endpoints: &[String],
+        token_contract: &str,
+        from_block: u64,
+        to_block: u64,
+        recipient: &str,
+    ) -> Result<Vec<EvmLogEntry>, PayError> {
+        if from_block > to_block {
+            return Ok(vec![]);
+        }
+        let recipient_topic = address_topic(recipient)
+            .ok_or_else(|| PayError::InvalidAmount("invalid evm recipient address".to_string()))?;
+        let from_hex = format!("0x{from_block:x}");
+        let to_hex = format!("0x{to_block:x}");
+
+        let mut last_error: Option<String> = None;
+        for endpoint in endpoints {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getLogs",
+                "params": [{
+                    "fromBlock": from_hex,
+                    "toBlock": to_hex,
+                    "address": token_contract,
+                    "topics": [
+                        ERC20_TRANSFER_EVENT_TOPIC,
+                        serde_json::Value::Null,
+                        recipient_topic
+                    ]
+                }],
+                "id": 1
+            });
+            match self.http_client.post(endpoint).json(&body).send().await {
+                Ok(resp) => {
+                    let text = resp.text().await.unwrap_or_default();
+                    let parsed: serde_json::Value = serde_json::from_str(&text)
+                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                    if let Some(err) = parsed.get("error") {
+                        last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
+                        continue;
+                    }
+                    let result = parsed.get("result").cloned().unwrap_or_default();
+                    let logs: Vec<EvmLogEntry> = serde_json::from_value(result)
+                        .map_err(|e| PayError::NetworkError(format!("parse logs: {e}")))?;
+                    return Ok(logs);
+                }
+                Err(e) => {
+                    last_error = Some(format!("endpoint={endpoint}: {e}"));
+                }
+            }
+        }
+        Err(PayError::NetworkError(format!(
+            "eth_getLogs failed: {}",
+            last_error.unwrap_or_default()
+        )))
+    }
+
+    async fn sync_receive_records_from_chain(
+        &self,
+        ctx: ReceiveSyncContext<'_>,
+        known_txids: &mut HashSet<String>,
+    ) -> Result<HistorySyncStats, PayError> {
+        let mut stats = HistorySyncStats::default();
+        let scan_limit = ctx.limit.max(1);
+        let latest_block = self.get_block_number_raw(ctx.endpoints).await?;
+        let lookback_blocks = (scan_limit as u64).saturating_mul(4).clamp(32, 2048);
+        let start_block = latest_block.saturating_sub(lookback_blocks.saturating_sub(1));
+        let now = wallet::now_epoch_seconds();
+        let normalized_wallet = normalize_address(ctx.wallet_address)
+            .ok_or_else(|| PayError::InvalidAmount("invalid evm wallet address".to_string()))?;
+        let mut memo_cache: HashMap<String, Option<String>> = HashMap::new();
+        let mut block_ts_cache: HashMap<u64, u64> = HashMap::new();
+
+        for block_number in (start_block..=latest_block).rev() {
+            if stats.records_added >= scan_limit {
+                break;
+            }
+            let Some(block) = self
+                .get_block_with_transactions_raw(ctx.endpoints, block_number)
+                .await?
+            else {
+                continue;
+            };
+            let block_timestamp = block
+                .timestamp
+                .as_deref()
+                .and_then(parse_hex_u64)
+                .unwrap_or(now);
+            block_ts_cache.insert(block_number, block_timestamp);
+
+            for tx in block.transactions {
+                stats.records_scanned = stats.records_scanned.saturating_add(1);
+                if stats.records_added >= scan_limit {
+                    break;
+                }
+                let Some(tx_hash) = tx.hash else {
+                    continue;
+                };
+                if known_txids.contains(&tx_hash) {
+                    continue;
+                }
+                let Some(to_addr) = tx.to.as_deref().and_then(normalize_address) else {
+                    continue;
+                };
+                if to_addr != normalized_wallet {
+                    continue;
+                }
+                let Some(value_wei) = tx.value.as_deref().and_then(parse_hex_u256) else {
+                    continue;
+                };
+                if value_wei.is_zero() {
+                    continue;
+                }
+                let amount_gwei: u64 = (value_wei / U256::from(1_000_000_000u64))
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                if amount_gwei == 0 {
+                    continue;
+                }
+                let memo = tx
+                    .input
+                    .as_deref()
+                    .and_then(|input| decode_hex_data_bytes(input).ok())
+                    .and_then(|input| decode_afpay_memo_payload(&input));
+                let record = HistoryRecord {
+                    transaction_id: tx_hash.clone(),
+                    wallet: ctx.wallet_id.to_string(),
+                    network: Network::Evm,
+                    direction: Direction::Receive,
+                    amount: Amount {
+                        value: amount_gwei,
+                        token: "gwei".to_string(),
+                    },
+                    status: TxStatus::Confirmed,
+                    onchain_memo: memo,
+                    local_memo: None,
+                    remote_addr: tx.from.as_deref().and_then(normalize_address),
+                    preimage: None,
+                    created_at_epoch_s: block_timestamp,
+                    confirmed_at_epoch_s: Some(block_timestamp),
+                    fee: None,
+                };
+                let _ = transaction::append_transaction_record(&self.data_dir, &record);
+                known_txids.insert(tx_hash);
+                stats.records_added = stats.records_added.saturating_add(1);
+            }
+        }
+
+        let mut tracked_tokens: Vec<(String, String)> = tokens::evm_known_tokens(ctx.chain_id)
+            .iter()
+            .map(|token| (token.symbol.to_string(), token.address.to_ascii_lowercase()))
+            .collect();
+        for ct in ctx.custom_tokens {
+            tracked_tokens.push((
+                ct.symbol.to_ascii_lowercase(),
+                ct.address.to_ascii_lowercase(),
+            ));
+        }
+        let mut seen_contracts = HashSet::new();
+        tracked_tokens.retain(|(_, contract)| seen_contracts.insert(contract.clone()));
+
+        for (symbol, contract) in tracked_tokens {
+            if stats.records_added >= scan_limit {
+                break;
+            }
+            let logs = self
+                .get_erc20_transfer_logs_to_address(
+                    ctx.endpoints,
+                    &contract,
+                    start_block,
+                    latest_block,
+                    &normalized_wallet,
+                )
+                .await?;
+            stats.records_scanned = stats.records_scanned.saturating_add(logs.len());
+            for log in logs {
+                if stats.records_added >= scan_limit {
+                    break;
+                }
+                let Some(tx_hash) = log.transaction_hash else {
+                    continue;
+                };
+                if known_txids.contains(&tx_hash) {
+                    continue;
+                }
+                let Some(data_hex) = log.data.as_deref() else {
+                    continue;
+                };
+                let Some(amount_raw) = parse_hex_u256(data_hex) else {
+                    continue;
+                };
+                if amount_raw.is_zero() {
+                    continue;
+                }
+                let amount_value: u64 = amount_raw.try_into().unwrap_or(u64::MAX);
+                let block_number = log
+                    .block_number
+                    .as_deref()
+                    .and_then(parse_hex_u64)
+                    .unwrap_or(latest_block);
+                let block_timestamp = if let Some(ts) = block_ts_cache.get(&block_number) {
+                    *ts
+                } else {
+                    let ts = self
+                        .get_block_timestamp_raw(ctx.endpoints, block_number)
+                        .await?
+                        .unwrap_or(now);
+                    block_ts_cache.insert(block_number, ts);
+                    ts
+                };
+                let memo = if let Some(cached) = memo_cache.get(&tx_hash) {
+                    cached.clone()
+                } else {
+                    let decoded = match self
+                        .get_transaction_input_raw(ctx.endpoints, &tx_hash)
+                        .await?
+                    {
+                        Some(input) => decode_afpay_memo_payload(&input),
+                        None => None,
+                    };
+                    memo_cache.insert(tx_hash.clone(), decoded.clone());
+                    decoded
+                };
+                let remote_addr = log.topics.get(1).and_then(|t| topic_to_address(t));
+                let record = HistoryRecord {
+                    transaction_id: tx_hash.clone(),
+                    wallet: ctx.wallet_id.to_string(),
+                    network: Network::Evm,
+                    direction: Direction::Receive,
+                    amount: Amount {
+                        value: amount_value,
+                        token: symbol.clone(),
+                    },
+                    status: TxStatus::Confirmed,
+                    onchain_memo: memo,
+                    local_memo: None,
+                    remote_addr,
+                    preimage: None,
+                    created_at_epoch_s: block_timestamp,
+                    confirmed_at_epoch_s: Some(block_timestamp),
+                    fee: None,
+                };
+                let _ = transaction::append_transaction_record(&self.data_dir, &record);
+                known_txids.insert(tx_hash);
+                stats.records_added = stats.records_added.saturating_add(1);
+            }
+        }
+
+        Ok(stats)
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -567,6 +951,61 @@ struct EvmTxReceipt {
     gas_used: Option<String>,
     #[serde(default, rename = "effectiveGasPrice")]
     effective_gas_price: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EvmTxByHash {
+    #[serde(default)]
+    input: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EvmBlockByNumber {
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    transactions: Vec<EvmBlockTransaction>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EvmBlockHeader {
+    #[serde(default)]
+    timestamp: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EvmBlockTransaction {
+    #[serde(default)]
+    hash: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EvmLogEntry {
+    #[serde(default, rename = "transactionHash")]
+    transaction_hash: Option<String>,
+    #[serde(default, rename = "blockNumber")]
+    block_number: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    topics: Vec<String>,
+}
+
+struct ReceiveSyncContext<'a> {
+    wallet_id: &'a str,
+    endpoints: &'a [String],
+    chain_id: u64,
+    wallet_address: &'a str,
+    custom_tokens: &'a [wallet::CustomToken],
+    limit: usize,
 }
 
 impl EvmTxReceipt {
@@ -590,6 +1029,9 @@ impl EvmTxReceipt {
 
 // ERC-20 transfer(address,uint256) function selector
 const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+const ERC20_TRANSFER_EVENT_TOPIC: &str =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const AFPAY_EVM_MEMO_PREFIX: &[u8] = b"afpay:memo:v1:";
 
 fn encode_erc20_transfer(to: Address, amount: U256) -> Vec<u8> {
     let mut data = Vec::with_capacity(68);
@@ -615,11 +1057,85 @@ fn normalize_onchain_memo(onchain_memo: Option<&str>) -> Result<Option<Vec<u8>>,
     Ok(Some(memo_bytes.to_vec()))
 }
 
+fn encode_afpay_memo_payload(memo_bytes: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(AFPAY_EVM_MEMO_PREFIX.len() + memo_bytes.len());
+    payload.extend_from_slice(AFPAY_EVM_MEMO_PREFIX);
+    payload.extend_from_slice(memo_bytes);
+    payload
+}
+
 fn append_memo_payload(mut data: Vec<u8>, memo_bytes: Option<&[u8]>) -> Vec<u8> {
     if let Some(memo) = memo_bytes {
-        data.extend_from_slice(memo);
+        data.extend_from_slice(&encode_afpay_memo_payload(memo));
     }
     data
+}
+
+fn decode_afpay_memo_payload(input_data: &[u8]) -> Option<String> {
+    let memo_slice = if input_data.starts_with(&ERC20_TRANSFER_SELECTOR) {
+        if input_data.len() <= 68 {
+            return None;
+        }
+        &input_data[68..]
+    } else {
+        input_data
+    };
+    let payload = memo_slice.strip_prefix(AFPAY_EVM_MEMO_PREFIX)?;
+    if payload.is_empty() {
+        return None;
+    }
+    String::from_utf8(payload.to_vec()).ok()
+}
+
+fn decode_hex_data_bytes(raw: &str) -> Result<Vec<u8>, PayError> {
+    let trimmed = raw.trim();
+    let hex_data = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    if hex_data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !hex_data.len().is_multiple_of(2) {
+        return Err(PayError::NetworkError(
+            "invalid tx input hex length".to_string(),
+        ));
+    }
+    hex::decode(hex_data).map_err(|e| PayError::NetworkError(format!("invalid tx input hex: {e}")))
+}
+
+fn parse_hex_u64(raw: &str) -> Option<u64> {
+    let hex = raw.strip_prefix("0x").unwrap_or(raw);
+    u64::from_str_radix(hex, 16).ok()
+}
+
+fn parse_hex_u256(raw: &str) -> Option<U256> {
+    let hex = raw.strip_prefix("0x").unwrap_or(raw);
+    U256::from_str_radix(hex, 16).ok()
+}
+
+fn normalize_address(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let body = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))?;
+    if body.len() != 40 || !body.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("0x{}", body.to_ascii_lowercase()))
+}
+
+fn address_topic(address: &str) -> Option<String> {
+    let normalized = normalize_address(address)?;
+    let body = normalized.strip_prefix("0x")?;
+    Some(format!("0x{:0>64}", body))
+}
+
+fn topic_to_address(topic: &str) -> Option<String> {
+    let body = topic
+        .strip_prefix("0x")
+        .or_else(|| topic.strip_prefix("0X"))?;
+    if body.len() != 64 || !body.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    normalize_address(&format!("0x{}", &body[24..]))
 }
 
 fn receipt_status(receipt: &EvmTxReceipt) -> TxStatus {
@@ -878,6 +1394,7 @@ impl PayProvider for EvmProvider {
         let chain_id = Self::chain_id_for_wallet(&meta);
         let transfer_target = Self::parse_transfer_target(to, chain_id)?;
         let memo_bytes = normalize_onchain_memo(onchain_memo)?;
+        let memo_payload = memo_bytes.as_deref().map(encode_afpay_memo_payload);
 
         let signer = Self::wallet_signer(&meta)?;
 
@@ -909,11 +1426,11 @@ impl PayProvider for EvmProvider {
                     .input(call_data.into());
                 provider.send_transaction(tx).await
             } else {
-                // Native ETH transfer (memo is raw calldata bytes)
+                // Native ETH transfer (memo is afpay-prefixed calldata bytes)
                 let mut tx = alloy::rpc::types::TransactionRequest::default()
                     .to(transfer_target.recipient_address)
                     .value(transfer_target.amount_wei);
-                if let Some(ref memo) = memo_bytes {
+                if let Some(ref memo) = memo_payload {
                     tx = tx.input(memo.clone().into());
                 }
                 provider.send_transaction(tx).await
@@ -1164,15 +1681,40 @@ impl PayProvider for EvmProvider {
         })
     }
 
+    async fn history_onchain_memo(
+        &self,
+        wallet: &str,
+        transaction_id: &str,
+    ) -> Result<Option<String>, PayError> {
+        let resolved = self.resolve_wallet_id(wallet)?;
+        let meta = self.load_evm_wallet(&resolved)?;
+        let endpoints = Self::rpc_endpoints_for_wallet(&meta)?;
+        let Some(input_data) = self
+            .get_transaction_input_raw(&endpoints, transaction_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(decode_afpay_memo_payload(&input_data))
+    }
+
     async fn history_sync(&self, wallet: &str, limit: usize) -> Result<HistorySyncStats, PayError> {
         let resolved = self.resolve_wallet_id(wallet)?;
-        let _ = self.load_evm_wallet(&resolved)?;
+        let meta = self.load_evm_wallet(&resolved)?;
+        let endpoints = Self::rpc_endpoints_for_wallet(&meta)?;
+        let chain_id = Self::chain_id_for_wallet(&meta);
+        let wallet_address = Self::wallet_address(&meta)?;
         let local_records =
             transaction::load_wallet_transaction_records(&self.data_dir, &resolved)?;
+        let mut known_txids: HashSet<String> = local_records
+            .iter()
+            .filter(|record| record.network == Network::Evm)
+            .map(|record| record.transaction_id.clone())
+            .collect();
         let pending_ids: Vec<String> = local_records
-            .into_iter()
+            .iter()
             .filter(|record| record.network == Network::Evm && record.status == TxStatus::Pending)
-            .map(|record| record.transaction_id)
+            .map(|record| record.transaction_id.clone())
             .take(limit)
             .collect();
 
@@ -1200,6 +1742,27 @@ impl PayProvider for EvmProvider {
                 }
             }
         }
+
+        let incoming = self
+            .sync_receive_records_from_chain(
+                ReceiveSyncContext {
+                    wallet_id: &resolved,
+                    endpoints: &endpoints,
+                    chain_id,
+                    wallet_address: &wallet_address,
+                    custom_tokens: meta.custom_tokens.as_deref().unwrap_or_default(),
+                    limit,
+                },
+                &mut known_txids,
+            )
+            .await?;
+        stats.records_scanned = stats
+            .records_scanned
+            .saturating_add(incoming.records_scanned);
+        stats.records_added = stats.records_added.saturating_add(incoming.records_added);
+        stats.records_updated = stats
+            .records_updated
+            .saturating_add(incoming.records_updated);
 
         Ok(stats)
     }
@@ -1292,8 +1855,45 @@ mod tests {
             U256::from(42u64),
         );
         let with_memo = append_memo_payload(encoded.clone(), Some(b"memo"));
-        assert_eq!(with_memo.len(), encoded.len() + 4);
-        assert!(with_memo.ends_with(b"memo"));
+        assert_eq!(
+            with_memo.len(),
+            encoded.len() + AFPAY_EVM_MEMO_PREFIX.len() + 4
+        );
+        assert!(with_memo.ends_with(b"afpay:memo:v1:memo"));
+    }
+
+    #[test]
+    fn decode_afpay_memo_payload_supports_native_and_erc20_inputs() {
+        let native = encode_afpay_memo_payload(b"order:abc");
+        assert_eq!(
+            decode_afpay_memo_payload(&native),
+            Some("order:abc".to_string())
+        );
+
+        let erc20 = append_memo_payload(
+            encode_erc20_transfer(
+                "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                    .parse()
+                    .expect("address"),
+                U256::from(42u64),
+            ),
+            Some(b"order:def"),
+        );
+        assert_eq!(
+            decode_afpay_memo_payload(&erc20),
+            Some("order:def".to_string())
+        );
+
+        let legacy = append_memo_payload(
+            encode_erc20_transfer(
+                "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                    .parse()
+                    .expect("address"),
+                U256::from(42u64),
+            ),
+            None,
+        );
+        assert_eq!(decode_afpay_memo_payload(&legacy), None);
     }
 
     #[test]

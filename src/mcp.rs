@@ -274,6 +274,9 @@ struct ReceiveParams {
     /// Poll interval for wait_until_paid (milliseconds)
     #[serde(default)]
     wait_poll_interval_ms: Option<u64>,
+    /// Max records scanned per poll when resolving tx id during wait (evm/btc)
+    #[serde(default)]
+    wait_sync_limit: Option<usize>,
     /// Minimum confirmations before considering paid
     #[serde(default)]
     min_confirmations: Option<u32>,
@@ -552,6 +555,7 @@ impl AfpayMcp {
             wait_until_paid: false,
             wait_timeout_s: None,
             wait_poll_interval_ms: None,
+            wait_sync_limit: None,
             write_qr_svg_file: false,
             min_confirmations: None,
         };
@@ -761,6 +765,7 @@ impl AfpayMcp {
             wait_until_paid: p.wait_until_paid,
             wait_timeout_s: p.wait_timeout_s,
             wait_poll_interval_ms: p.wait_poll_interval_ms,
+            wait_sync_limit: p.wait_sync_limit,
             write_qr_svg_file: false,
             min_confirmations: p.min_confirmations,
         };

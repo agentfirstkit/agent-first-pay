@@ -538,6 +538,7 @@ impl PayProvider for RemoteProvider {
                 wait_until_paid: false,
                 wait_timeout_s: None,
                 wait_poll_interval_ms: None,
+                wait_sync_limit: None,
                 write_qr_svg_file: false,
                 min_confirmations: None,
             })

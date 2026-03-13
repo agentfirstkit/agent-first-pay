@@ -206,6 +206,15 @@ pub trait PayProvider: Send + Sync {
         offset: usize,
     ) -> Result<Vec<HistoryRecord>, PayError>;
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError>;
+    /// Optional provider-specific on-chain memo decoding for a transaction.
+    /// Returns `Ok(None)` when memo cannot be decoded or is absent.
+    async fn history_onchain_memo(
+        &self,
+        _wallet: &str,
+        _transaction_id: &str,
+    ) -> Result<Option<String>, PayError> {
+        Ok(None)
+    }
     async fn history_sync(&self, wallet: &str, limit: usize) -> Result<HistorySyncStats, PayError> {
         let items = self.history_list(wallet, limit, 0).await?;
         Ok(HistorySyncStats {

@@ -277,6 +277,9 @@ enum PayCommand {
         /// Poll interval in milliseconds for --wait
         #[arg(long = "wait-poll-interval-ms")]
         wait_poll_interval_ms: Option<u64>,
+        /// Max history records scanned per poll when resolving tx id (evm/btc wait path)
+        #[arg(long = "wait-sync-limit")]
+        wait_sync_limit: Option<usize>,
         /// Write receive QR payload to an SVG file
         #[arg(long = "qr-svg-file")]
         qr_svg_file: bool,
@@ -717,6 +720,9 @@ enum BtcCommand {
         /// Poll interval in milliseconds for --wait
         #[arg(long = "wait-poll-interval-ms")]
         wait_poll_interval_ms: Option<u64>,
+        /// Max history records scanned per poll when resolving tx id
+        #[arg(long = "wait-sync-limit")]
+        wait_sync_limit: Option<usize>,
     },
     /// Check balance
     #[command(hide = true)]
@@ -1541,6 +1547,7 @@ fn unified_receive_to_input(
     wait: bool,
     wait_timeout_s: Option<u64>,
     wait_poll_interval_ms: Option<u64>,
+    wait_sync_limit: Option<usize>,
     qr_svg_file: bool,
     ln_quote_id: Option<String>,
     min_confirmations: Option<u32>,
@@ -1563,9 +1570,25 @@ fn unified_receive_to_input(
         });
     }
 
-    // Validate --wait-timeout-s / --wait-poll-interval-ms require --wait
-    if !wait && (wait_timeout_s.is_some() || wait_poll_interval_ms.is_some()) {
-        return Err("--wait-timeout-s and --wait-poll-interval-ms require --wait".into());
+    // Validate wait knobs require --wait
+    if !wait
+        && (wait_timeout_s.is_some()
+            || wait_poll_interval_ms.is_some()
+            || wait_sync_limit.is_some())
+    {
+        return Err(
+            "--wait-timeout-s, --wait-poll-interval-ms, and --wait-sync-limit require --wait"
+                .into(),
+        );
+    }
+
+    // Validate --wait-sync-limit supports evm/btc only.
+    if wait_sync_limit.is_some() {
+        if let Some(ref n) = network {
+            if !matches!(n, CliNetwork::Evm | CliNetwork::Btc) {
+                return Err("--wait-sync-limit is only supported for evm and btc networks".into());
+            }
+        }
     }
 
     // Validate --min-confirmations requires --wait and sol/evm network
@@ -1610,6 +1633,7 @@ fn unified_receive_to_input(
                 wait_until_paid: wait,
                 wait_timeout_s,
                 wait_poll_interval_ms,
+                wait_sync_limit,
                 write_qr_svg_file: qr_svg_file,
                 min_confirmations,
             });
@@ -1650,6 +1674,7 @@ fn unified_receive_to_input(
                     wait_until_paid: wait,
                     wait_timeout_s,
                     wait_poll_interval_ms,
+                    wait_sync_limit: None,
                     write_qr_svg_file: qr_svg_file,
                     min_confirmations: None,
                 })
@@ -1681,6 +1706,7 @@ fn unified_receive_to_input(
                 wait_until_paid: wait,
                 wait_timeout_s,
                 wait_poll_interval_ms,
+                wait_sync_limit: None,
                 write_qr_svg_file: qr_svg_file,
                 min_confirmations: None,
             })
@@ -1709,6 +1735,7 @@ fn unified_receive_to_input(
                 wait_until_paid: wait,
                 wait_timeout_s,
                 wait_poll_interval_ms,
+                wait_sync_limit: None,
                 write_qr_svg_file: qr_svg_file,
                 min_confirmations,
             })
@@ -1719,18 +1746,6 @@ fn unified_receive_to_input(
             }
             if let Some(ref t) = token {
                 validate_token_not_contract(t)?;
-            }
-            if wait
-                && onchain_memo
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-                    .is_some()
-            {
-                return Err(
-                    "--onchain-memo is not yet supported for evm receive --wait; use --amount"
-                        .into(),
-                );
             }
             if wait && amount.is_none() {
                 return Err("--wait for evm receive requires --amount".into());
@@ -1747,6 +1762,7 @@ fn unified_receive_to_input(
                 wait_until_paid: wait,
                 wait_timeout_s,
                 wait_poll_interval_ms,
+                wait_sync_limit,
                 write_qr_svg_file: false,
                 min_confirmations,
             })
@@ -1770,6 +1786,7 @@ fn unified_receive_to_input(
                 wait_until_paid: wait,
                 wait_timeout_s,
                 wait_poll_interval_ms,
+                wait_sync_limit,
                 write_qr_svg_file: false,
                 min_confirmations: None,
             })
@@ -1956,6 +1973,7 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
             wait,
             wait_timeout_s,
             wait_poll_interval_ms,
+            wait_sync_limit,
             qr_svg_file,
             ln_quote_id,
             min_confirmations,
@@ -1969,6 +1987,7 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
             wait,
             wait_timeout_s,
             wait_poll_interval_ms,
+            wait_sync_limit,
             qr_svg_file,
             ln_quote_id,
             min_confirmations,
@@ -2219,6 +2238,7 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
                 wait_until_paid,
                 wait_timeout_s,
                 wait_poll_interval_ms,
+                wait_sync_limit: None,
                 write_qr_svg_file: qr_svg_file,
                 min_confirmations: None,
             })
@@ -2397,6 +2417,7 @@ fn ln_command_to_input(cmd: LnCommand, id: &str) -> Result<Input, String> {
             wait_until_paid,
             wait_timeout_s,
             wait_poll_interval_ms,
+            wait_sync_limit: None,
             write_qr_svg_file: qr_svg_file,
             min_confirmations: None,
         }),
@@ -2490,6 +2511,7 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
             wait_until_paid: wait,
             wait_timeout_s,
             wait_poll_interval_ms,
+            wait_sync_limit: None,
             write_qr_svg_file: qr_svg_file,
             min_confirmations,
         }),
@@ -2571,18 +2593,6 @@ fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
             wait_poll_interval_ms,
             min_confirmations,
         } => {
-            if wait
-                && onchain_memo
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-                    .is_some()
-            {
-                return Err(
-                    "--onchain-memo is not yet supported for evm receive --wait; use --amount"
-                        .into(),
-                );
-            }
             if wait {
                 return Err(
                     "evm receive --wait requires --amount; use unified receive command".into(),
@@ -2597,6 +2607,7 @@ fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
                 wait_until_paid: wait,
                 wait_timeout_s,
                 wait_poll_interval_ms,
+                wait_sync_limit: None,
                 write_qr_svg_file: false,
                 min_confirmations,
             })
@@ -2679,6 +2690,7 @@ fn btc_command_to_input(cmd: BtcCommand, id: &str) -> Result<Input, String> {
             wait,
             wait_timeout_s,
             wait_poll_interval_ms,
+            wait_sync_limit,
         } => Ok(Input::Receive {
             id: id.to_string(),
             wallet: wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
@@ -2688,6 +2700,7 @@ fn btc_command_to_input(cmd: BtcCommand, id: &str) -> Result<Input, String> {
             wait_until_paid: wait,
             wait_timeout_s,
             wait_poll_interval_ms,
+            wait_sync_limit,
             write_qr_svg_file: false,
             min_confirmations: None,
         }),
@@ -3862,8 +3875,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_unified_receive_evm_wait_memo_rejected() {
-        let err = parse_subcommand(
+    fn parse_unified_receive_evm_wait_sync_limit() {
+        let input = parse_subcommand(
+            &[
+                "receive",
+                "--network",
+                "evm",
+                "--wait",
+                "--amount",
+                "1000000",
+                "--token",
+                "native",
+                "--wait-sync-limit",
+                "1234",
+            ],
+            "t_ur_mc2c",
+        )
+        .expect("unified evm receive --wait-sync-limit should parse");
+        match input {
+            Input::Receive {
+                network,
+                wait_until_paid,
+                wait_sync_limit,
+                ..
+            } => {
+                assert_eq!(network, Some(Network::Evm));
+                assert!(wait_until_paid);
+                assert_eq!(wait_sync_limit, Some(1234));
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unified_receive_evm_wait_with_onchain_memo() {
+        let input = parse_subcommand(
             &[
                 "receive",
                 "--network",
@@ -3876,11 +3922,22 @@ mod tests {
             ],
             "t_ur_mc2a",
         )
-        .expect_err("evm receive --wait should reject onchain memo matching");
-        assert!(
-            err.contains("not yet supported"),
-            "error should mention unsupported onchain memo matching: {err}"
-        );
+        .expect("evm receive --wait with onchain memo should parse");
+        match input {
+            Input::Receive {
+                network,
+                wait_until_paid,
+                onchain_memo,
+                amount,
+                ..
+            } => {
+                assert_eq!(network, Some(Network::Evm));
+                assert!(wait_until_paid);
+                assert_eq!(onchain_memo.as_deref(), Some("order:abc"));
+                assert_eq!(amount.expect("amount").value, 100);
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
     }
 
     #[test]
@@ -3931,6 +3988,51 @@ mod tests {
         assert!(
             err.contains("only supported for sol and evm"),
             "error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_unified_receive_wait_sync_limit_requires_wait() {
+        let err = parse_subcommand(
+            &[
+                "receive",
+                "--network",
+                "btc",
+                "--amount",
+                "1000",
+                "--wait-sync-limit",
+                "900",
+            ],
+            "t_ur_mc5",
+        )
+        .expect_err("--wait-sync-limit without --wait should error");
+        assert!(
+            err.contains("--wait-sync-limit"),
+            "error should mention wait-sync-limit requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_unified_receive_wait_sync_limit_rejects_sol() {
+        let err = parse_subcommand(
+            &[
+                "receive",
+                "--network",
+                "sol",
+                "--wait",
+                "--amount",
+                "1",
+                "--token",
+                "native",
+                "--wait-sync-limit",
+                "128",
+            ],
+            "t_ur_mc6",
+        )
+        .expect_err("--wait-sync-limit for sol should error");
+        assert!(
+            err.contains("only supported for evm and btc"),
+            "error should mention supported networks: {err}"
         );
     }
 

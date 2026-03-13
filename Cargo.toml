@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-pay"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin on-chain), send/receive, spend limits, REST/RPC/MCP modes"
 license = "MIT"

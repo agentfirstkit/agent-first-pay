@@ -181,6 +181,12 @@ afpay receive --wallet evm-base --wait --amount 1000000000000 --token native
 afpay send --wallet evm-base --to <address> --amount 1000000 --token usdc
 afpay receive --wallet evm-base --wait --amount 1000000 --token usdc
 
+# Optional: match afpay-encoded on-chain memo while waiting (amount is still required)
+afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --onchain-memo "order:abc"
+
+# Optional: increase per-poll history scan window when waiting (default 500, clamp 1..5000)
+afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --wait-sync-limit 1500
+
 # Custom ERC-20 token (register first, then use by symbol)
 afpay wallet config token-add --wallet evm-base --symbol dai --address 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb --decimals 18
 afpay send --wallet evm-base --to <address> --amount 1000000 --token dai
@@ -208,6 +214,9 @@ afpay receive --network btc
 # Optional: wait for incoming funds (exact amount match)
 afpay receive --network btc --amount 1000 --wait --wait-timeout-s 120 --wait-poll-interval-ms 1000
 
+# Optional: increase per-poll history scan window when waiting (default 500, clamp 1..5000)
+afpay receive --network btc --amount 1000 --wait --wait-sync-limit 1500
+
 # Send (amount in satoshis)
 afpay send --network btc --to tb1q... --amount 5000
 
@@ -220,6 +229,8 @@ afpay wallet create --network btc --btc-network mainnet --btc-esplora-url https:
 afpay balance --network btc
 afpay history status --transaction-id <txid>
 ```
+
+`receive --wait` for EVM/BTC emits on-chain transaction IDs in `history_status.transaction_id`, so they can be re-queried with `history status --transaction-id ...`.
 
 BTC backend options are validated at wallet creation time:
 
@@ -293,29 +304,47 @@ afpay limit list
 | REST API (Docker-friendly) | HTTP `POST /v1/afpay` with Bearer auth, no client needed |
 | Depends on agent-first-data | Output formatting, `_secret` redaction, OutputFormat enum |
 
-## Docker / Podman
+## Containers
+
+Container assets now live under `container/`:
+
+- `container/docker/` — canonical Docker/Podman image, compose stack, and supervisor config
+- `container/apple-container/` — Apple `container` CLI workflow for macOS that reuses the same Dockerfile
 
 Single-container deployment with supervisord (afpay + optional phoenixd + optional bitcoind). Works with both Docker and Podman — all commands are interchangeable (`docker` ↔ `podman`, `docker compose` ↔ `podman compose`):
 
 ```bash
 # REST mode (default) — curl-accessible
-docker compose -f docker/docker-compose.yml up --build
-podman compose -f docker/docker-compose.yml up --build   # equivalent
+docker compose -f container/docker/compose.yaml up --build
+podman compose -f container/docker/compose.yaml up --build   # equivalent
+
+# macOS + Apple Container CLI workflow
+./container/apple-container/up.sh
 
 # RPC mode
-AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f docker/docker-compose.yml up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 ./container/apple-container/up.sh
 
 # MCP mode
-AFPAY_MODE=mcp docker compose -f docker/docker-compose.yml up --build
+AFPAY_MODE=mcp docker compose -f container/docker/compose.yaml up --build
+AFPAY_MODE=mcp ./container/apple-container/up.sh
+
+# Optional local bitcoind (pruned mainnet)
+ENABLE_BITCOIND=true INSTALL_BITCOIND=true docker compose -f container/docker/compose.yaml up --build
+ENABLE_BITCOIND=true ./container/apple-container/up.sh
+
+# Backup / restore container data
+./container/apple-container/backup.sh
+CONTAINER_RUNTIME=docker ./container/docker/backup.sh
 
 # Podman without compose — build and run directly
-podman build -t afpay -f docker/Dockerfile .
+podman build -t afpay -f container/docker/Dockerfile .
 podman run -d --name afpay -p 9401:9401 \
   -v afpay-data:/data/afpay -v bitcoind-data:/data/bitcoind -v phoenixd-data:/data/phoenixd \
   -e AFPAY_MODE=rest afpay
 ```
 
-`AFPAY_MODE` selects `rest`/`rpc`/`mcp`. Secrets auto-generated on first run and persisted to volumes. See [Architecture](docs/architecture.md) for full variable reference.
+`AFPAY_MODE` selects `rest`/`rpc`/`mcp`. Secrets auto-generated on first run and persisted to volumes. `bitcoind` is disabled by default; when enabled it runs pruned `mainnet` with `BTC_PRUNE_MB=550`. See [container/README.md](container/README.md) for backup and restore scripts, [container/apple-container/README.md](container/apple-container/README.md) for the Apple Container CLI flow, and [Architecture](docs/architecture.md) for the full variable reference.
 
 ## Testing
 

@@ -1,7 +1,7 @@
 #![cfg(feature = "redb")]
 
 use agent_first_pay::handler::{dispatch, App};
-use agent_first_pay::provider::{PayError, PayProvider};
+use agent_first_pay::provider::{HistorySyncStats, PayError, PayProvider};
 use agent_first_pay::store::wallet::{self, WalletMetadata};
 use agent_first_pay::store::{create_storage_backend, PayStore};
 use agent_first_pay::types::{
@@ -14,13 +14,40 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 struct MockBtcWaitProvider {
+    wallet_id: String,
+    tx_id: String,
     balance_calls: AtomicUsize,
+    sync_calls: AtomicUsize,
 }
 
 impl MockBtcWaitProvider {
-    fn new() -> Self {
+    fn new(wallet_id: String) -> Self {
         Self {
+            wallet_id,
+            tx_id: "btc_wait_chain_txid_001".to_string(),
             balance_calls: AtomicUsize::new(0),
+            sync_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn incoming_record(&self) -> HistoryRecord {
+        HistoryRecord {
+            transaction_id: self.tx_id.clone(),
+            wallet: self.wallet_id.clone(),
+            network: Network::Btc,
+            direction: Direction::Receive,
+            amount: Amount {
+                value: 500,
+                token: "sats".to_string(),
+            },
+            status: TxStatus::Pending,
+            onchain_memo: Some(self.tx_id.clone()),
+            local_memo: None,
+            remote_addr: None,
+            preimage: None,
+            created_at_epoch_s: wallet::now_epoch_seconds(),
+            confirmed_at_epoch_s: None,
+            fee: None,
         }
     }
 }
@@ -118,13 +145,35 @@ impl PayProvider for MockBtcWaitProvider {
         _limit: usize,
         _offset: usize,
     ) -> Result<Vec<HistoryRecord>, PayError> {
-        Ok(vec![])
+        if self.sync_calls.load(Ordering::SeqCst) == 0 {
+            Ok(vec![])
+        } else {
+            Ok(vec![self.incoming_record()])
+        }
     }
 
-    async fn history_status(&self, _transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        Err(PayError::NotImplemented(
-            "history_status not used in this test".to_string(),
-        ))
+    async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
+        if transaction_id != self.tx_id {
+            return Err(PayError::WalletNotFound(format!(
+                "transaction {transaction_id} not found"
+            )));
+        }
+        Ok(HistoryStatusInfo {
+            transaction_id: self.tx_id.clone(),
+            status: TxStatus::Pending,
+            confirmations: Some(0),
+            preimage: None,
+            item: Some(self.incoming_record()),
+        })
+    }
+
+    async fn history_sync(
+        &self,
+        _wallet: &str,
+        _limit: usize,
+    ) -> Result<HistorySyncStats, PayError> {
+        self.sync_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(HistorySyncStats::default())
     }
 }
 
@@ -163,8 +212,10 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
 
     let (tx, mut rx) = mpsc::channel::<Output>(32);
     let mut app = App::new(config, tx, Some(true), Some(store.clone()));
-    app.providers
-        .insert(Network::Btc, Box::new(MockBtcWaitProvider::new()));
+    app.providers.insert(
+        Network::Btc,
+        Box::new(MockBtcWaitProvider::new(wallet_id.clone())),
+    );
 
     dispatch(
         &app,
@@ -180,6 +231,7 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
             wait_until_paid: true,
             wait_timeout_s: Some(2),
             wait_poll_interval_ms: Some(1),
+            wait_sync_limit: None,
             write_qr_svg_file: false,
             min_confirmations: None,
         },
@@ -230,12 +282,9 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
 
     assert!(saw_receive_info, "expected receive_info output");
     let tx_id = history_tx_id.expect("expected history_status output");
-    let stored = store
-        .find_transaction_record_by_id(&tx_id)
-        .unwrap()
-        .expect("btc wait should persist a history record");
-    assert_eq!(stored.network, Network::Btc);
-    assert_eq!(stored.direction, Direction::Receive);
-    assert_eq!(stored.status, TxStatus::Pending);
-    assert_eq!(stored.amount.value, 500);
+    assert_eq!(tx_id, "btc_wait_chain_txid_001");
+    assert!(
+        !tx_id.starts_with("btc_recv_"),
+        "btc wait should emit on-chain txid, got synthetic id {tx_id}"
+    );
 }

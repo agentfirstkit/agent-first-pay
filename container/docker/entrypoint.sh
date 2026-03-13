@@ -103,9 +103,35 @@ fi
 if [ "$ENABLE_BITCOIND" = "true" ]; then
     BTC_RPC_USER="afpay"
     BTC_RPC_PASS="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+    BTC_NETWORK="${BTC_NETWORK:-mainnet}"
+    BTC_PRUNE_MB="${BTC_PRUNE_MB:-550}"
+    case "$BTC_NETWORK" in
+        mainnet)
+            BTC_NETWORK_CONFIG=""
+            ;;
+        signet)
+            BTC_NETWORK_CONFIG="signet=1"
+            ;;
+        *)
+            echo "ERROR: unsupported BTC_NETWORK=${BTC_NETWORK} (expected: mainnet or signet)"
+            exit 1
+            ;;
+    esac
+    case "$BTC_PRUNE_MB" in
+        ''|*[!0-9]*)
+            echo "ERROR: BTC_PRUNE_MB must be a non-negative integer"
+            exit 1
+            ;;
+    esac
+    if [ "$BTC_PRUNE_MB" -gt 0 ]; then
+        BTC_PRUNE_CONFIG="prune=${BTC_PRUNE_MB}"
+    else
+        BTC_PRUNE_CONFIG=""
+    fi
     cat > "${BITCOIND_DATADIR}/bitcoin.conf" <<EOF
 server=1
-${BTC_NETWORK:+signet=1}
+${BTC_NETWORK_CONFIG}
+${BTC_PRUNE_CONFIG}
 rpcuser=${BTC_RPC_USER}
 rpcpassword=${BTC_RPC_PASS}
 rpcbind=127.0.0.1
@@ -128,7 +154,7 @@ storage_backend = "redb"
 EOF
 fi
 
-# ── 4. write env file for docker-setup.sh ──
+# ── 4. write env file for container-setup.sh ──
 cat > /tmp/afpay-env.sh <<EOF
 AFPAY_DATA_DIR=${AFPAY_DATA_DIR}
 AFPAY_REST_PORT=${AFPAY_PORT}
@@ -137,9 +163,10 @@ EOF
 
 if [ "$ENABLE_BITCOIND" = "true" ]; then
     cat >> /tmp/afpay-env.sh <<EOF
+BTC_NETWORK=${BTC_NETWORK}
 BTC_RPC_USER=${BTC_RPC_USER}
 BTC_RPC_PASS=${BTC_RPC_PASS}
-BTC_RPC_PORT=${BTC_RPC_PORT:-18332}
+BTC_RPC_PORT=${BTC_RPC_PORT:-8332}
 EOF
 fi
 

@@ -516,6 +516,8 @@ pub enum Input {
         #[serde(default)]
         wait_poll_interval_ms: Option<u64>,
         #[serde(default)]
+        wait_sync_limit: Option<usize>,
+        #[serde(default)]
         write_qr_svg_file: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_confirmations: Option<u32>,

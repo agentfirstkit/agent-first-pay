@@ -278,18 +278,18 @@ With `--wait`, must provide `--onchain-memo` or `--amount` to match incoming tra
 ### EVM Receive
 
 ```bash
-afpay receive --network evm [--wallet <w>] --token <native|usdc|symbol> [--wait [--onchain-memo <text> | --amount <n>]] [--wait-timeout-s <s>] [--wait-poll-interval-ms <ms>] [--min-confirmations <n>]
+afpay receive --network evm [--wallet <w>] --token <native|usdc|symbol> [--wait --amount <n> [--onchain-memo <text>]] [--wait-timeout-s <s>] [--wait-poll-interval-ms <ms>] [--wait-sync-limit <n>] [--min-confirmations <n>]
 ```
 
-Returns the wallet's receive address. With `--wait`, polls for matching incoming transaction. Use `--min-confirmations <n>` to require a minimum confirmation depth (e.g. `--min-confirmations 12` for EVM L1).
+Returns the wallet's receive address. With `--wait`, `--amount` is required and the command polls for matching incoming transactions. If `--onchain-memo` is provided, matching is limited to afpay-encoded EVM memos (`afpay:memo:v1:` payloads). The emitted `history_status.transaction_id` is an on-chain tx hash that can be queried again via `history status --transaction-id ...`. Use `--wait-sync-limit <n>` to control how many recent history records are scanned per poll while resolving the matched on-chain tx hash (default `500`, clamped to `1..5000`). Use `--min-confirmations <n>` to require a minimum confirmation depth (e.g. `--min-confirmations 12` for EVM L1).
 
 ### Bitcoin Receive
 
 ```bash
-afpay receive --network btc [--wallet <w>] [--amount <sats>] [--wait [--wait-timeout-s <s>] [--wait-poll-interval-ms <ms>]]
+afpay receive --network btc [--wallet <w>] [--amount <sats>] [--wait [--wait-timeout-s <s>] [--wait-poll-interval-ms <ms>] [--wait-sync-limit <n>]]
 ```
 
-Returns the next unused receive address. With `--wait`, polls wallet balance deltas via the configured backend (Esplora, Bitcoin Core RPC, or Electrum) and emits a `history_status` event when funds arrive.
+Returns the next unused receive address. With `--wait`, polls wallet balance deltas via the configured backend (Esplora, Bitcoin Core RPC, or Electrum) and emits a `history_status` event when funds arrive. The emitted `history_status.transaction_id` is an on-chain BTC txid. Use `--wait-sync-limit <n>` to control how many recent history records are scanned per poll while resolving the matched txid (default `500`, clamped to `1..5000`).
 
 If `--amount` is provided, only an incoming delta matching that amount is accepted.
 
@@ -884,20 +884,25 @@ JSON array of `Output` objects (same schema as pipe mode):
 afpay --mode rest --rest-listen 0.0.0.0:9401 --rest-api-key "my-secret-key" --data-dir ~/.afpay
 ```
 
-### Docker / Podman
+### Containers
 
-The container image supports all three server modes via the `AFPAY_MODE` environment variable. All commands work with both Docker and Podman — replace `docker` with `podman`:
+The canonical container assets now live under `container/docker/`, and the macOS Apple Container CLI workflow lives under `container/apple-container/`. The image supports all three server modes via the `AFPAY_MODE` environment variable. All commands work with both Docker and Podman — replace `docker` with `podman`:
 
 ```bash
 # REST mode (default) — curl-accessible, auto-generates API key
-docker compose up --build
-podman compose up --build   # equivalent
+docker compose -f container/docker/compose.yaml up --build
+podman compose -f container/docker/compose.yaml up --build   # equivalent
+
+# macOS + Apple Container CLI workflow
+./container/apple-container/up.sh
 
 # RPC mode — for afpay CLI clients
-AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 ./container/apple-container/up.sh
 
 # MCP mode — stdio
-AFPAY_MODE=mcp docker compose up --build
+AFPAY_MODE=mcp docker compose -f container/docker/compose.yaml up --build
+AFPAY_MODE=mcp ./container/apple-container/up.sh
 ```
 
 | Variable | Default | Description |
@@ -907,14 +912,17 @@ AFPAY_MODE=mcp docker compose up --build
 | `AFPAY_REST_API_KEY` | auto-generated | REST Bearer token |
 | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret |
 | `ENABLE_PHOENIXD` | `true` | Start phoenixd |
-| `ENABLE_BITCOIND` | `true` | Start bitcoind |
+| `ENABLE_BITCOIND` | `false` | Start bitcoind |
+| `BTC_PRUNE_MB` | `550` | bitcoind prune target in MiB (`0` disables pruning) |
 
 Secrets are auto-generated on first run and persisted to the data volume. Connection info is printed to stdout on startup. The auto-setup script (wallet creation for bitcoind/phoenixd) only runs in REST mode.
+
+To enable the local bundled `bitcoind` in Docker/Podman compose, set both `ENABLE_BITCOIND=true` and `INSTALL_BITCOIND=true`. When enabled, it defaults to pruned `mainnet` mode.
 
 Podman without compose:
 
 ```bash
-podman build -t afpay -f docker/Dockerfile .
+podman build -t afpay -f container/docker/Dockerfile .
 podman run -d --name afpay -p 9401:9401 \
   -v afpay-data:/data/afpay -v bitcoind-data:/data/bitcoind -v phoenixd-data:/data/phoenixd \
   -e AFPAY_MODE=rest afpay
@@ -923,7 +931,7 @@ podman exec -it afpay supervisorctl status
 podman logs afpay
 ```
 
-See `docker/` for the full setup with supervisord, phoenixd, and bitcoind.
+See `container/docker/` for the full setup with supervisord, phoenixd, and bitcoind, and `container/apple-container/` for the macOS Apple Container CLI launcher.
 
 ---
 
@@ -996,6 +1004,39 @@ PostgreSQL tables (auto-created):
 | `spend_reservations` | Spend reservations (JSONB, BIGSERIAL id) |
 | `spend_events` | Confirmed spend events (JSONB) |
 | `exchange_rate_cache` | Exchange rate quotes (JSONB, keyed by pair) |
+
+## Backup and Restore
+
+For container deployments, the recovery-critical data is split across `afpay` and optional external backends:
+
+- `/data/afpay` stores the embedded `redb` state by default, including wallet metadata, transaction history, spend limits, and recovery mnemonics for afpay-managed Cashu, BTC, Solana, and EVM wallets.
+- LN wallets backed by `nwc` or `lnbits` do not have a mnemonic export; their backend credentials are stored inside `/data/afpay`.
+- `phoenixd` is an external wallet. Back up `/data/phoenixd/.phoenix/` for `seed.dat`, `phoenix.conf`, and Phoenix database state.
+- Local `bitcoind` data is optional for recovery and can usually be resynced. It is not included by default in the container backup scripts.
+
+Container helper scripts:
+
+```bash
+# Apple container bind-mounted data
+./container/apple-container/backup.sh
+./container/apple-container/restore.sh /path/to/afpay-apple-backup.tar.gz
+
+# Docker / Podman named volumes
+CONTAINER_RUNTIME=docker ./container/docker/backup.sh
+CONTAINER_RUNTIME=docker ./container/docker/restore.sh /path/to/afpay-docker-backup.tar.gz
+```
+
+Set `INCLUDE_BITCOIND=true` if you also want to archive the local `bitcoind` data.
+
+If you use `storage_backend = "postgres"`, these scripts are not enough by themselves. You must also back up PostgreSQL because wallet metadata, seed secrets, transaction history, and spend accounting live in the database instead of local `.redb` files.
+
+For mnemonic-based local wallets, you can also export recovery words directly from afpay (local mode only):
+
+```bash
+afpay --data-dir /data/afpay wallet dangerously-show-seed --wallet <wallet_id>
+```
+
+This works for afpay-managed Cashu, BTC, Solana, and EVM wallets. It does not export `phoenixd` seed material.
 
 ---
 

@@ -20,7 +20,7 @@ use crate::store::lock;
 use crate::store::wallet;
 use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,6 +30,7 @@ use tokio::time::sleep;
 
 const DEFAULT_WAIT_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_WAIT_POLL_INTERVAL_MS: u64 = 1000;
+const DEFAULT_WAIT_SYNC_LIMIT: usize = 500;
 
 pub struct App {
     pub config: RwLock<RuntimeConfig>,
@@ -734,12 +735,15 @@ pub async fn dispatch(app: &App, input: Input) {
             wait_until_paid,
             wait_timeout_s,
             wait_poll_interval_ms,
+            wait_sync_limit,
             write_qr_svg_file: _,
             min_confirmations,
         } => {
             let start = Instant::now();
-            let wait_requested =
-                wait_until_paid || wait_timeout_s.is_some() || wait_poll_interval_ms.is_some();
+            let wait_requested = wait_until_paid
+                || wait_timeout_s.is_some()
+                || wait_poll_interval_ms.is_some()
+                || wait_sync_limit.is_some();
             emit_log(
                 app,
                 "wallet",
@@ -753,6 +757,7 @@ pub async fn dispatch(app: &App, input: Input) {
                     "wait_until_paid": wait_requested,
                     "wait_timeout_s": wait_timeout_s,
                     "wait_poll_interval_ms": wait_poll_interval_ms,
+                    "wait_sync_limit": wait_sync_limit,
                 }),
             )
             .await;
@@ -871,6 +876,9 @@ pub async fn dispatch(app: &App, input: Input) {
                         .await;
                         return;
                     }
+                    let sync_limit = wait_sync_limit
+                        .unwrap_or(DEFAULT_WAIT_SYNC_LIMIT)
+                        .clamp(1, 5000);
 
                     if target_network == Network::Sol {
                         let memo_to_watch = onchain_memo
@@ -1053,28 +1061,15 @@ pub async fn dispatch(app: &App, input: Input) {
                         return;
                     }
 
-                    // EVM: poll balance deltas for incoming deposits.
+                    // EVM: poll balance deltas, then resolve matched on-chain tx hash from history.
                     if target_network == Network::Evm {
-                        if onchain_memo
+                        let memo_to_watch = onchain_memo
                             .as_deref()
                             .map(str::trim)
                             .filter(|text| !text.is_empty())
-                            .is_some()
-                        {
-                            emit_error_hint(
-                                &app.writer,
-                                Some(id),
-                                &PayError::InvalidAmount(
-                                    "evm receive --wait does not support --onchain-memo matching"
-                                        .to_string(),
-                                ),
-                                start,
-                                Some("pass --amount to match incoming transfers"),
-                            )
-                            .await;
-                            return;
-                        }
+                            .map(str::to_owned);
                         let amount_to_watch = amount.as_ref().map(|a| a.value);
+                        let token_to_watch = amount.as_ref().map(|a| a.token.to_ascii_lowercase());
 
                         if amount_to_watch.is_none() {
                             emit_error_hint(
@@ -1089,8 +1084,23 @@ pub async fn dispatch(app: &App, input: Input) {
                             .await;
                             return;
                         }
+                        let wait_criteria = if let Some(ref memo) = memo_to_watch {
+                            format!("amount {} and memo '{memo}'", amount_to_watch.unwrap_or(0))
+                        } else {
+                            format!("amount {}", amount_to_watch.unwrap_or(0))
+                        };
 
-                        // Snapshot current balance before polling
+                        // Snapshot known receives so we only match newly arrived transactions.
+                        let mut known_receive_ids: HashSet<String> =
+                            match provider.history_list(&wallet_for_call, 1000, 0).await {
+                                Ok(items) => items
+                                    .into_iter()
+                                    .filter(|item| item.direction == Direction::Receive)
+                                    .map(|item| item.transaction_id)
+                                    .collect(),
+                                Err(_) => HashSet::new(),
+                            };
+
                         let initial_balance = match provider.balance(&wallet_for_call).await {
                             Ok(b) => b,
                             Err(e) => {
@@ -1100,271 +1110,232 @@ pub async fn dispatch(app: &App, input: Input) {
                         };
 
                         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-                        loop {
+                        'evm_wait: loop {
                             sleep(Duration::from_millis(poll_interval_ms)).await;
                             if Instant::now() >= deadline {
-                                let criteria = format!("amount {}", amount_to_watch.unwrap_or(0));
                                 emit_error(
                                     &app.writer,
                                     Some(id),
                                     &PayError::NetworkError(format!(
-                                        "wait timeout after {timeout_secs}s: no incoming evm deposit matching {criteria}"
+                                        "wait timeout after {timeout_secs}s: no incoming evm deposit matching {wait_criteria}"
                                     )),
                                     start,
                                 )
                                 .await;
                                 break;
                             }
-                            match provider.balance(&wallet_for_call).await {
-                                Ok(current) => {
-                                    // Check native balance increase
-                                    let native_increase =
-                                        current.confirmed.saturating_sub(initial_balance.confirmed);
-                                    // Check token balance increases
-                                    let mut token_increase: Option<(String, u64)> = None;
-                                    for (key, &cur_val) in &current.additional {
-                                        let init_val = initial_balance
-                                            .additional
-                                            .get(key)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        if cur_val > init_val {
-                                            token_increase =
-                                                Some((key.clone(), cur_val - init_val));
-                                            break;
-                                        }
+
+                            let current = match provider.balance(&wallet_for_call).await {
+                                Ok(current) => current,
+                                Err(e) if e.retryable() => continue,
+                                Err(e) => {
+                                    emit_error(&app.writer, Some(id), &e, start).await;
+                                    break;
+                                }
+                            };
+
+                            let native_increase =
+                                current.confirmed.saturating_sub(initial_balance.confirmed);
+                            let token_increase =
+                                current.additional.iter().find_map(|(key, &cur)| {
+                                    let init =
+                                        initial_balance.additional.get(key).copied().unwrap_or(0);
+                                    (cur > init).then_some((key.clone(), cur - init))
+                                });
+                            if native_increase == 0 && token_increase.is_none() {
+                                continue;
+                            }
+
+                            let observed_value = token_increase
+                                .as_ref()
+                                .map(|(_, delta)| *delta)
+                                .unwrap_or(native_increase);
+                            if let Some(expected) = amount_to_watch {
+                                if observed_value != expected {
+                                    continue;
+                                }
+                            }
+
+                            match provider.history_sync(&wallet_for_call, sync_limit).await {
+                                Ok(_)
+                                | Err(PayError::NotImplemented(_))
+                                | Err(PayError::WalletNotFound(_)) => {}
+                                Err(e) if e.retryable() => continue,
+                                Err(e) => {
+                                    emit_error(&app.writer, Some(id), &e, start).await;
+                                    break;
+                                }
+                            }
+
+                            let recent = match provider
+                                .history_list(&wallet_for_call, sync_limit, 0)
+                                .await
+                            {
+                                Ok(items) => items,
+                                Err(e) if e.retryable() => continue,
+                                Err(e) => {
+                                    emit_error(&app.writer, Some(id), &e, start).await;
+                                    break;
+                                }
+                            };
+
+                            let mut matched: Option<HistoryRecord> = None;
+                            let mut memo_lookup_error: Option<PayError> = None;
+                            for item in recent.into_iter() {
+                                if item.direction != Direction::Receive {
+                                    continue;
+                                }
+                                if known_receive_ids.contains(&item.transaction_id) {
+                                    continue;
+                                }
+                                if let Some(expected) = amount_to_watch {
+                                    if item.amount.value != expected {
+                                        continue;
                                     }
-
-                                    if native_increase > 0 || token_increase.is_some() {
-                                        let (amount_value, amount_unit) =
-                                            if let Some((token_key, delta)) = token_increase {
-                                                (delta, token_key)
-                                            } else {
-                                                (native_increase, current.unit.clone())
-                                            };
-
-                                        // Match expected amount exactly.
-                                        if let Some(expected) = amount_to_watch {
-                                            if amount_value != expected {
-                                                continue;
+                                }
+                                if let Some(expected_token) = token_to_watch.as_deref() {
+                                    if !evm_receive_token_matches(
+                                        expected_token,
+                                        &item.amount.token,
+                                    ) {
+                                        continue;
+                                    }
+                                }
+                                if let Some(expected_memo) = memo_to_watch.as_deref() {
+                                    let mut memo_matches =
+                                        item.onchain_memo.as_deref() == Some(expected_memo);
+                                    if !memo_matches {
+                                        match provider
+                                            .history_onchain_memo(
+                                                &wallet_for_call,
+                                                &item.transaction_id,
+                                            )
+                                            .await
+                                        {
+                                            Ok(Some(chain_memo)) => {
+                                                memo_matches = chain_memo == expected_memo;
+                                            }
+                                            Ok(None)
+                                            | Err(PayError::NotImplemented(_))
+                                            | Err(PayError::WalletNotFound(_)) => {}
+                                            Err(e) if e.retryable() => continue 'evm_wait,
+                                            Err(e) => {
+                                                memo_lookup_error = Some(e);
+                                                break;
                                             }
                                         }
+                                    }
+                                    if !memo_matches {
+                                        continue;
+                                    }
+                                }
+                                matched = Some(item);
+                                break;
+                            }
+                            if let Some(e) = memo_lookup_error {
+                                emit_error(&app.writer, Some(id), &e, start).await;
+                                break;
+                            }
+                            let Some(item) = matched else {
+                                continue;
+                            };
 
-                                        // If min_confirmations requested, find the on-chain tx and wait for depth
-                                        if let Some(min_conf) = min_confirmations {
-                                            // Find the most recent incoming transaction via history_list
-                                            let chain_tx_id = match provider
-                                                .history_list(&wallet_for_call, 20, 0)
-                                                .await
-                                            {
-                                                Ok(items) => items
-                                                    .into_iter()
-                                                    .find(|i| {
-                                                        i.direction == Direction::Receive
-                                                            && i.amount.value == amount_value
-                                                    })
-                                                    .map(|i| i.transaction_id),
-                                                Err(_) => None,
-                                            };
-                                            if let Some(ref ctxid) = chain_tx_id {
-                                                // Poll history_status until enough confirmations or timeout
-                                                loop {
-                                                    match provider.history_status(ctxid).await {
-                                                        Ok(status_info) => {
-                                                            let confs = status_info
-                                                                .confirmations
-                                                                .unwrap_or(0);
-                                                            if confs >= min_conf {
-                                                                let record = HistoryRecord {
-                                                                    transaction_id: ctxid.clone(),
-                                                                    wallet: wallet_for_call.clone(),
-                                                                    network: Network::Evm,
-                                                                    direction: Direction::Receive,
-                                                                    amount: Amount {
-                                                                        value: amount_value,
-                                                                        token: amount_unit.clone(),
-                                                                    },
-                                                                    status: TxStatus::Confirmed,
-                                                                    onchain_memo: None,
-                                                                    local_memo: None,
-                                                                    remote_addr: None,
-                                                                    preimage: None,
-                                                                    created_at_epoch_s:
-                                                                        wallet::now_epoch_seconds(),
-                                                                    confirmed_at_epoch_s: Some(
-                                                                        wallet::now_epoch_seconds(),
-                                                                    ),
-                                                                    fee: None,
-                                                                };
-                                                                if let Some(s) = &app.store {
-                                                                    let _ = s
-                                                                        .append_transaction_record(
-                                                                            &record,
-                                                                        );
-                                                                }
-                                                                let _ = app
-                                                                    .writer
-                                                                    .send(Output::HistoryStatus {
-                                                                        id,
-                                                                        transaction_id: ctxid
-                                                                            .clone(),
-                                                                        status: TxStatus::Confirmed,
-                                                                        confirmations: Some(confs),
-                                                                        preimage: None,
-                                                                        item: Some(record),
-                                                                        trace: trace_from(start),
-                                                                    })
-                                                                    .await;
-                                                                break;
-                                                            }
-                                                            if Instant::now() >= deadline {
-                                                                let criteria = format!(
-                                                                    "amount {}",
-                                                                    amount_to_watch.unwrap_or(0)
-                                                                );
-                                                                emit_error(
-                                                                    &app.writer,
-                                                                    Some(id),
-                                                                    &PayError::NetworkError(format!(
-                                                                        "wait timeout after {timeout_secs}s: evm transaction {ctxid} matching {criteria} has {confs}/{min_conf} confirmations",
-                                                                    )),
-                                                                    start,
-                                                                )
-                                                                .await;
-                                                                break;
-                                                            }
-                                                            sleep(Duration::from_millis(
-                                                                poll_interval_ms,
-                                                            ))
-                                                            .await;
-                                                        }
-                                                        Err(e) if e.retryable() => {
-                                                            if Instant::now() >= deadline {
-                                                                emit_error(
-                                                                    &app.writer,
-                                                                    Some(id),
-                                                                    &e,
-                                                                    start,
-                                                                )
-                                                                .await;
-                                                                break;
-                                                            }
-                                                            sleep(Duration::from_millis(
-                                                                poll_interval_ms,
-                                                            ))
-                                                            .await;
-                                                        }
-                                                        Err(e) => {
-                                                            emit_error(
-                                                                &app.writer,
-                                                                Some(id),
-                                                                &e,
-                                                                start,
-                                                            )
-                                                            .await;
-                                                            break;
-                                                        }
+                            known_receive_ids.insert(item.transaction_id.clone());
+                            if let Some(min_conf) = min_confirmations {
+                                loop {
+                                    match provider.history_status(&item.transaction_id).await {
+                                        Ok(status_info) => {
+                                            let confs =
+                                                status_info.confirmations.unwrap_or_else(|| {
+                                                    if status_info.status == TxStatus::Confirmed {
+                                                        min_conf
+                                                    } else {
+                                                        0
                                                     }
-                                                }
-                                            } else {
-                                                // Could not find on-chain tx; fall back to recording without confirmations
-                                                let tx_id = format!(
-                                                    "evm_recv_{}",
-                                                    wallet::now_epoch_seconds()
-                                                );
-                                                let record = HistoryRecord {
-                                                    transaction_id: tx_id.clone(),
-                                                    wallet: wallet_for_call.clone(),
-                                                    network: Network::Evm,
-                                                    direction: Direction::Receive,
-                                                    amount: Amount {
-                                                        value: amount_value,
-                                                        token: amount_unit,
-                                                    },
-                                                    status: TxStatus::Confirmed,
-                                                    onchain_memo: None,
-                                                    local_memo: None,
-                                                    remote_addr: None,
-                                                    preimage: None,
-                                                    created_at_epoch_s: wallet::now_epoch_seconds(),
-                                                    confirmed_at_epoch_s: Some(
-                                                        wallet::now_epoch_seconds(),
-                                                    ),
-                                                    fee: None,
-                                                };
-                                                if let Some(s) = &app.store {
-                                                    let _ = s.append_transaction_record(&record);
-                                                }
+                                                });
+                                            if confs >= min_conf {
                                                 let _ = app
                                                     .writer
                                                     .send(Output::HistoryStatus {
                                                         id,
-                                                        transaction_id: tx_id,
-                                                        status: TxStatus::Confirmed,
-                                                        confirmations: None,
-                                                        preimage: None,
-                                                        item: Some(record),
+                                                        transaction_id: status_info.transaction_id,
+                                                        status: status_info.status,
+                                                        confirmations: Some(confs),
+                                                        preimage: status_info.preimage,
+                                                        item: status_info.item.or(Some(item)),
                                                         trace: trace_from(start),
                                                     })
                                                     .await;
+                                                break 'evm_wait;
                                             }
-                                        } else {
-                                            let tx_id =
-                                                format!("evm_recv_{}", wallet::now_epoch_seconds());
-                                            let record = HistoryRecord {
-                                                transaction_id: tx_id.clone(),
-                                                wallet: wallet_for_call.clone(),
-                                                network: Network::Evm,
-                                                direction: Direction::Receive,
-                                                amount: Amount {
-                                                    value: amount_value,
-                                                    token: amount_unit,
-                                                },
-                                                status: TxStatus::Confirmed,
-                                                onchain_memo: None,
-                                                local_memo: None,
-                                                remote_addr: None,
-                                                preimage: None,
-                                                created_at_epoch_s: wallet::now_epoch_seconds(),
-                                                confirmed_at_epoch_s: Some(
-                                                    wallet::now_epoch_seconds(),
-                                                ),
-                                                fee: None,
-                                            };
-                                            if let Some(s) = &app.store {
-                                                let _ = s.append_transaction_record(&record);
-                                            }
-                                            let _ = app
-                                                .writer
-                                                .send(Output::HistoryStatus {
-                                                    id,
-                                                    transaction_id: tx_id,
-                                                    status: TxStatus::Confirmed,
-                                                    confirmations: None,
-                                                    preimage: None,
-                                                    item: Some(record),
-                                                    trace: trace_from(start),
-                                                })
+                                            if Instant::now() >= deadline {
+                                                emit_error(
+                                                    &app.writer,
+                                                    Some(id),
+                                                    &PayError::NetworkError(format!(
+                                                        "wait timeout after {timeout_secs}s: evm transaction {tx} matching {wait_criteria} has {confs}/{min_conf} confirmations",
+                                                        tx = item.transaction_id
+                                                    )),
+                                                    start,
+                                                )
                                                 .await;
+                                                break 'evm_wait;
+                                            }
+                                            sleep(Duration::from_millis(poll_interval_ms)).await;
                                         }
-                                        break;
+                                        Err(e) if e.retryable() => {
+                                            if Instant::now() >= deadline {
+                                                emit_error(&app.writer, Some(id), &e, start).await;
+                                                break 'evm_wait;
+                                            }
+                                            sleep(Duration::from_millis(poll_interval_ms)).await;
+                                        }
+                                        Err(e) => {
+                                            emit_error(&app.writer, Some(id), &e, start).await;
+                                            break 'evm_wait;
+                                        }
                                     }
                                 }
-                                Err(e) if e.retryable() => {
-                                    // transient error, keep polling
-                                }
-                                Err(e) => {
-                                    emit_error(&app.writer, Some(id), &e, start).await;
-                                    break;
+                            } else {
+                                match provider.history_status(&item.transaction_id).await {
+                                    Ok(status_info) => {
+                                        let _ = app
+                                            .writer
+                                            .send(Output::HistoryStatus {
+                                                id,
+                                                transaction_id: status_info.transaction_id,
+                                                status: status_info.status,
+                                                confirmations: status_info.confirmations,
+                                                preimage: status_info.preimage,
+                                                item: status_info.item.or(Some(item)),
+                                                trace: trace_from(start),
+                                            })
+                                            .await;
+                                        break;
+                                    }
+                                    Err(e) if e.retryable() => continue,
+                                    Err(e) => {
+                                        emit_error(&app.writer, Some(id), &e, start).await;
+                                        break;
+                                    }
                                 }
                             }
                         }
                         return;
                     }
 
-                    // BTC: poll wallet balance deltas for incoming deposits.
+                    // BTC: poll balance deltas, then resolve matched on-chain txid from history.
                     if target_network == Network::Btc {
                         let amount_to_watch = amount.as_ref().map(|a| a.value).filter(|v| *v > 0);
+                        let mut known_receive_ids: HashSet<String> =
+                            match provider.history_list(&wallet_for_call, 1000, 0).await {
+                                Ok(items) => items
+                                    .into_iter()
+                                    .filter(|item| item.direction == Direction::Receive)
+                                    .map(|item| item.transaction_id)
+                                    .collect(),
+                                Err(_) => HashSet::new(),
+                            };
                         let initial_balance = match provider.balance(&wallet_for_call).await {
                             Ok(b) => b,
                             Err(e) => {
@@ -1394,82 +1365,88 @@ pub async fn dispatch(app: &App, input: Input) {
                                 break;
                             }
 
-                            match provider.balance(&wallet_for_call).await {
-                                Ok(current) => {
-                                    let confirmed_delta =
-                                        current.confirmed.saturating_sub(initial_balance.confirmed);
-                                    let pending_delta =
-                                        current.pending.saturating_sub(initial_balance.pending);
-                                    let observed_delta =
-                                        confirmed_delta.saturating_add(pending_delta);
-                                    if observed_delta == 0 {
-                                        continue;
-                                    }
-                                    if let Some(expected) = amount_to_watch {
-                                        if observed_delta != expected {
-                                            continue;
-                                        }
-                                    }
+                            let current = match provider.balance(&wallet_for_call).await {
+                                Ok(current) => current,
+                                Err(e) if e.retryable() => continue,
+                                Err(e) => {
+                                    emit_error(&app.writer, Some(id), &e, start).await;
+                                    break;
+                                }
+                            };
+                            let confirmed_delta =
+                                current.confirmed.saturating_sub(initial_balance.confirmed);
+                            let pending_delta =
+                                current.pending.saturating_sub(initial_balance.pending);
+                            let observed_delta = confirmed_delta.saturating_add(pending_delta);
+                            if observed_delta == 0 {
+                                continue;
+                            }
+                            if let Some(expected) = amount_to_watch {
+                                if observed_delta != expected {
+                                    continue;
+                                }
+                            }
 
-                                    let status = if confirmed_delta > 0 {
-                                        TxStatus::Confirmed
-                                    } else {
-                                        TxStatus::Pending
-                                    };
-                                    let now = wallet::now_epoch_seconds();
-                                    let tx_id = format!("btc_recv_{now}");
-                                    let record = HistoryRecord {
-                                        transaction_id: tx_id.clone(),
-                                        wallet: wallet_for_call.clone(),
-                                        network: Network::Btc,
-                                        direction: Direction::Receive,
-                                        amount: Amount {
-                                            value: amount_to_watch.unwrap_or(observed_delta),
-                                            token: current.unit.clone(),
-                                        },
-                                        status,
-                                        onchain_memo: onchain_memo.clone(),
-                                        local_memo: None,
-                                        remote_addr: None,
-                                        preimage: None,
-                                        created_at_epoch_s: now,
-                                        confirmed_at_epoch_s: if status == TxStatus::Confirmed {
-                                            Some(now)
-                                        } else {
-                                            None
-                                        },
-                                        fee: None,
-                                    };
-                                    if let Some(s) = &app.store {
-                                        if s.find_transaction_record_by_id(&tx_id)
-                                            .ok()
-                                            .flatten()
-                                            .is_none()
-                                        {
-                                            let _ = s.append_transaction_record(&record);
-                                        }
+                            match provider.history_sync(&wallet_for_call, sync_limit).await {
+                                Ok(_)
+                                | Err(PayError::NotImplemented(_))
+                                | Err(PayError::WalletNotFound(_)) => {}
+                                Err(e) if e.retryable() => continue,
+                                Err(e) => {
+                                    emit_error(&app.writer, Some(id), &e, start).await;
+                                    break;
+                                }
+                            }
+
+                            let recent = match provider
+                                .history_list(&wallet_for_call, sync_limit, 0)
+                                .await
+                            {
+                                Ok(items) => items,
+                                Err(e) if e.retryable() => continue,
+                                Err(e) => {
+                                    emit_error(&app.writer, Some(id), &e, start).await;
+                                    break;
+                                }
+                            };
+
+                            let matched = recent.into_iter().find(|item| {
+                                if item.direction != Direction::Receive {
+                                    return false;
+                                }
+                                if known_receive_ids.contains(&item.transaction_id) {
+                                    return false;
+                                }
+                                if let Some(expected) = amount_to_watch {
+                                    if item.amount.value != expected {
+                                        return false;
                                     }
+                                }
+                                true
+                            });
+
+                            let Some(item) = matched else {
+                                continue;
+                            };
+
+                            known_receive_ids.insert(item.transaction_id.clone());
+                            match provider.history_status(&item.transaction_id).await {
+                                Ok(status_info) => {
                                     let _ = app
                                         .writer
                                         .send(Output::HistoryStatus {
                                             id,
-                                            transaction_id: tx_id,
-                                            status,
-                                            confirmations: Some(if status == TxStatus::Confirmed {
-                                                1
-                                            } else {
-                                                0
-                                            }),
-                                            preimage: None,
-                                            item: Some(record),
+                                            transaction_id: status_info.transaction_id,
+                                            status: status_info.status,
+                                            confirmations: status_info.confirmations,
+                                            preimage: status_info.preimage,
+                                            item: status_info.item.or(Some(item)),
                                             trace: trace_from(start),
                                         })
                                         .await;
                                     break;
                                 }
-                                Err(e) if e.retryable() => {
-                                    // Transient network error, keep polling until timeout.
-                                }
+                                Err(e) if e.retryable() => continue,
                                 Err(e) => {
                                     emit_error(&app.writer, Some(id), &e, start).await;
                                     break;
@@ -2906,6 +2883,21 @@ fn get_provider(
 fn looks_like_bip39_mnemonic(secret: &str) -> bool {
     let words = secret.split_whitespace().count();
     words == 12 || words == 24
+}
+
+fn evm_receive_token_matches(expected: &str, observed: &str) -> bool {
+    let expected = expected.trim().to_ascii_lowercase();
+    let observed = observed.trim().to_ascii_lowercase();
+    if expected == "native" {
+        return observed == "native" || observed == "gwei" || observed == "wei";
+    }
+    if observed == expected {
+        return true;
+    }
+    if let Some(stripped) = observed.strip_suffix("_base_units") {
+        return stripped == expected;
+    }
+    false
 }
 
 async fn emit_error(
