@@ -1,7 +1,7 @@
 # ── Build stage ──
 FROM rust:1.94-bookworm AS builder
 
-ARG FEATURES="btc-esplora,cashu,ln-nwc,redb,mcp,rest,exchange-rate"
+ARG FEATURES="btc-esplora,cashu,ln-phoenixd,redb,rest,exchange-rate"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         protobuf-compiler \

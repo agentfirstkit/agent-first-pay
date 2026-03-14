@@ -1,7 +1,7 @@
 use crate::provider::{HistorySyncStats, PayError, PayProvider};
 use crate::spend::tokens;
-use crate::store::transaction;
 use crate::store::wallet::{self, WalletMetadata};
+use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
@@ -10,6 +10,7 @@ use alloy::signers::local::PrivateKeySigner;
 use async_trait::async_trait;
 use bip39::Mnemonic;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 fn evm_wallet_summary(meta: WalletMetadata, address: String) -> WalletSummary {
     WalletSummary {
@@ -26,8 +27,9 @@ fn evm_wallet_summary(meta: WalletMetadata, address: String) -> WalletSummary {
 }
 
 pub struct EvmProvider {
-    data_dir: String,
+    _data_dir: String,
     http_client: reqwest::Client,
+    store: Arc<StorageBackend>,
 }
 
 const INVALID_EVM_WALLET_ADDRESS: &str = "invalid:evm-wallet-secret";
@@ -51,10 +53,11 @@ struct EvmTransferTarget {
 }
 
 impl EvmProvider {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(data_dir: &str, store: Arc<StorageBackend>) -> Self {
         Self {
-            data_dir: data_dir.to_string(),
+            _data_dir: data_dir.to_string(),
             http_client: reqwest::Client::new(),
+            store,
         }
     }
 
@@ -124,7 +127,7 @@ impl EvmProvider {
     }
 
     fn load_evm_wallet(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
-        let meta = wallet::load_wallet_metadata(&self.data_dir, wallet_id)?;
+        let meta = self.store.load_wallet_metadata(wallet_id)?;
         if meta.network != Network::Evm {
             return Err(PayError::WalletNotFound(format!(
                 "wallet {wallet_id} is not an evm wallet"
@@ -135,7 +138,7 @@ impl EvmProvider {
 
     fn resolve_wallet_id(&self, wallet_id: &str) -> Result<String, PayError> {
         if wallet_id.is_empty() {
-            let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Evm))?;
+            let wallets = self.store.list_wallet_metadata(Some(Network::Evm))?;
             if wallets.len() == 1 {
                 return Ok(wallets[0].id.clone());
             }
@@ -831,7 +834,7 @@ impl EvmProvider {
                     confirmed_at_epoch_s: Some(block_timestamp),
                     fee: None,
                 };
-                let _ = transaction::append_transaction_record(&self.data_dir, &record);
+                let _ = self.store.append_transaction_record(&record);
                 known_txids.insert(tx_hash);
                 stats.records_added = stats.records_added.saturating_add(1);
             }
@@ -931,7 +934,7 @@ impl EvmProvider {
                     confirmed_at_epoch_s: Some(block_timestamp),
                     fee: None,
                 };
-                let _ = transaction::append_transaction_record(&self.data_dir, &record);
+                let _ = self.store.append_transaction_record(&record);
                 known_txids.insert(tx_hash);
                 stats.records_added = stats.records_added.saturating_add(1);
             }
@@ -1231,7 +1234,7 @@ impl PayProvider for EvmProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             error: None,
         };
-        wallet::save_wallet_metadata(&self.data_dir, &meta)?;
+        self.store.save_wallet_metadata(&meta)?;
 
         Ok(WalletInfo {
             id: wallet_id,
@@ -1255,11 +1258,11 @@ impl PayProvider for EvmProvider {
                 "wallet {wallet_id} has non-zero balance components ({component_list}); transfer funds first"
             )));
         }
-        wallet::delete_wallet_metadata(&self.data_dir, wallet_id)
+        self.store.delete_wallet_metadata(wallet_id)
     }
 
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Evm))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Evm))?;
         Ok(wallets
             .into_iter()
             .map(|meta| {
@@ -1288,7 +1291,7 @@ impl PayProvider for EvmProvider {
     }
 
     async fn balance_all(&self) -> Result<Vec<WalletBalanceItem>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Evm))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Evm))?;
         let mut items = Vec::with_capacity(wallets.len());
         for meta in wallets {
             let chain_id = Self::chain_id_for_wallet(&meta);
@@ -1510,7 +1513,7 @@ impl PayProvider for EvmProvider {
             confirmed_at_epoch_s: None,
             fee: fee_amount.clone(),
         };
-        let _ = transaction::append_transaction_record(&self.data_dir, &history);
+        let _ = self.store.append_transaction_record(&history);
 
         Ok(SendResult {
             wallet: resolved_wallet_id,
@@ -1585,7 +1588,7 @@ impl PayProvider for EvmProvider {
     ) -> Result<Vec<HistoryRecord>, PayError> {
         let resolved = self.resolve_wallet_id(wallet)?;
         let _ = self.load_evm_wallet(&resolved)?;
-        let all = transaction::load_wallet_transaction_records(&self.data_dir, &resolved)?;
+        let all = self.store.load_wallet_transaction_records(&resolved)?;
         let total = all.len();
         let start = offset.min(total);
         let end = (start + limit).min(total);
@@ -1596,8 +1599,7 @@ impl PayProvider for EvmProvider {
     }
 
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        let mut record =
-            transaction::find_transaction_record_by_id(&self.data_dir, transaction_id)?;
+        let mut record = self.store.find_transaction_record_by_id(transaction_id)?;
         let Some(existing) = record.as_ref() else {
             return Err(PayError::WalletNotFound(format!(
                 "transaction {transaction_id} not found"
@@ -1635,8 +1637,7 @@ impl PayProvider for EvmProvider {
                         };
                         if rec.status != status || rec.confirmed_at_epoch_s != confirmed_at_epoch_s
                         {
-                            let _ = transaction::update_transaction_record_status(
-                                &self.data_dir,
+                            let _ = self.store.update_transaction_record_status(
                                 transaction_id,
                                 status,
                                 confirmed_at_epoch_s,
@@ -1652,8 +1653,7 @@ impl PayProvider for EvmProvider {
                                 .map(|f| f.token != "gwei" || f.value != fee_gwei)
                                 .unwrap_or(true);
                             if update_fee {
-                                let _ = transaction::update_transaction_record_fee(
-                                    &self.data_dir,
+                                let _ = self.store.update_transaction_record_fee(
                                     transaction_id,
                                     fee_gwei,
                                     "gwei",
@@ -1704,8 +1704,7 @@ impl PayProvider for EvmProvider {
         let endpoints = Self::rpc_endpoints_for_wallet(&meta)?;
         let chain_id = Self::chain_id_for_wallet(&meta);
         let wallet_address = Self::wallet_address(&meta)?;
-        let local_records =
-            transaction::load_wallet_transaction_records(&self.data_dir, &resolved)?;
+        let local_records = self.store.load_wallet_transaction_records(&resolved)?;
         let mut known_txids: HashSet<String> = local_records
             .iter()
             .filter(|record| record.network == Network::Evm)
@@ -1725,7 +1724,7 @@ impl PayProvider for EvmProvider {
         };
 
         for txid in pending_ids {
-            let before = transaction::find_transaction_record_by_id(&self.data_dir, &txid)?;
+            let before = self.store.find_transaction_record_by_id(&txid)?;
             let status_info = self.history_status(&txid).await?;
             let after = status_info.item;
             if let (Some(before), Some(after)) = (before, after) {

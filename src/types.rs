@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 // ═══════════════════════════════════════════
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Ln,
@@ -99,14 +98,12 @@ pub enum TxStatus {
 // ═══════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct Amount {
     pub value: u64,
     pub token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LnWalletBackend {
     Nwc,
@@ -115,6 +112,10 @@ pub enum LnWalletBackend {
 }
 
 impl LnWalletBackend {
+    #[cfg_attr(
+        not(any(feature = "ln-nwc", feature = "ln-phoenixd", feature = "ln-lnbits")),
+        allow(dead_code)
+    )]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Nwc => "nwc",
@@ -125,7 +126,6 @@ impl LnWalletBackend {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum BtcBackend {
     Esplora,
@@ -134,6 +134,14 @@ pub enum BtcBackend {
 }
 
 impl BtcBackend {
+    #[cfg_attr(
+        not(any(
+            feature = "btc-esplora",
+            feature = "btc-core",
+            feature = "btc-electrum"
+        )),
+        allow(dead_code)
+    )]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Esplora => "esplora",
@@ -159,7 +167,6 @@ pub struct LnWalletCreateRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SpendScope {
     #[serde(alias = "all")]
@@ -173,7 +180,6 @@ fn default_spend_scope_network() -> SpendScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct SpendLimit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
@@ -269,11 +275,26 @@ impl BalanceInfo {
         }
     }
 
+    #[cfg_attr(not(feature = "ln-phoenixd"), allow(dead_code))]
     pub fn with_additional(mut self, key: impl Into<String>, value: u64) -> Self {
         self.additional.insert(key.into(), value);
         self
     }
 
+    #[cfg_attr(
+        not(any(
+            feature = "cashu",
+            feature = "ln-nwc",
+            feature = "ln-phoenixd",
+            feature = "ln-lnbits",
+            feature = "sol",
+            feature = "evm",
+            feature = "btc-esplora",
+            feature = "btc-core",
+            feature = "btc-electrum"
+        )),
+        allow(dead_code)
+    )]
     pub fn non_zero_components(&self) -> Vec<(String, u64)> {
         let mut components = Vec::new();
         if self.confirmed > 0 {
@@ -362,6 +383,7 @@ pub struct RestoreResult {
     pub unit: String,
 }
 
+#[cfg(feature = "interactive")]
 #[derive(Debug, Clone, Serialize)]
 pub struct CashuSendQuoteInfo {
     pub wallet: String,
@@ -1106,9 +1128,53 @@ where
     d.deserialize_option(LocalMemoVisitor)
 }
 
+/// Returns true if the string looks like a BOLT12 offer (`lno1…`),
+/// optionally with a `?amount=<sats>` suffix. Case-insensitive.
+pub fn is_bolt12_offer(s: &str) -> bool {
+    s.len() >= 4 && s[..4].eq_ignore_ascii_case("lno1")
+}
+
+/// Split a BOLT12 offer string into the raw offer and an optional amount-sats.
+/// Accepts `lno1...` or `lno1...?amount=1000`. Case-insensitive prefix detection.
+pub fn parse_bolt12_offer_parts(s: &str) -> (String, Option<u64>) {
+    if let Some(idx) = s.find("?amount=") {
+        let offer = s[..idx].to_string();
+        let amt = s[idx + 8..].parse::<u64>().ok();
+        (offer, amt)
+    } else {
+        (s.to_string(), None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bolt12_offer_detection() {
+        assert!(is_bolt12_offer("lno1qgsqvgjwcf6qqz9"));
+        assert!(is_bolt12_offer("lno1qgsqvgjwcf6qqz9?amount=1000"));
+        assert!(is_bolt12_offer("LNO1QGSQVGJWCF6QQZ9"));
+        assert!(is_bolt12_offer("Lno1MixedCase"));
+        assert!(!is_bolt12_offer("lnbc1qgsqvgjwcf6qqz9"));
+        assert!(!is_bolt12_offer("lno"));
+        assert!(!is_bolt12_offer(""));
+    }
+
+    #[test]
+    fn bolt12_offer_parts_parsing() {
+        let (offer, amt) = parse_bolt12_offer_parts("lno1abc123");
+        assert_eq!(offer, "lno1abc123");
+        assert_eq!(amt, None);
+
+        let (offer, amt) = parse_bolt12_offer_parts("lno1abc123?amount=500");
+        assert_eq!(offer, "lno1abc123");
+        assert_eq!(amt, Some(500));
+
+        let (offer, amt) = parse_bolt12_offer_parts("LNO1ABC?amount=42");
+        assert_eq!(offer, "LNO1ABC");
+        assert_eq!(amt, Some(42));
+    }
 
     #[test]
     fn local_only_checks() {

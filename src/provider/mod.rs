@@ -159,6 +159,7 @@ pub trait PayProvider: Send + Sync {
     ) -> Result<ReceiveInfo, PayError>;
     async fn receive_claim(&self, wallet: &str, quote_id: &str) -> Result<u64, PayError>;
 
+    #[cfg(feature = "interactive")]
     async fn cashu_send_quote(
         &self,
         _wallet: &str,

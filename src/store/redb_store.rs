@@ -98,6 +98,20 @@ impl PayStore for RedbStore {
         transaction::update_transaction_record_fee(&self.data_dir, tx_id, fee_value, fee_unit)
     }
 
+    fn update_transaction_record_status(
+        &self,
+        tx_id: &str,
+        status: crate::types::TxStatus,
+        confirmed_at_epoch_s: Option<u64>,
+    ) -> Result<(), PayError> {
+        transaction::update_transaction_record_status(
+            &self.data_dir,
+            tx_id,
+            status,
+            confirmed_at_epoch_s,
+        )
+    }
+
     fn drain_migration_log(&self) -> Vec<MigrationLog> {
         db::drain_migration_log()
     }

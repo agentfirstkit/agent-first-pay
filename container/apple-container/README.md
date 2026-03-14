@@ -30,7 +30,6 @@ container run --name afpay-apple ...
 
 ```bash
 AFPAY_MODE=rpc AFPAY_PORT=9400 ./container/apple-container/up.sh
-AFPAY_MODE=mcp ./container/apple-container/up.sh
 ENABLE_BITCOIND=true ./container/apple-container/up.sh
 ./container/apple-container/backup.sh
 ./container/apple-container/restore.sh ./container/apple-container/backups/afpay-apple-backup-YYYYMMDDTHHMMSSZ.tar.gz
@@ -41,7 +40,7 @@ ENABLE_BITCOIND=true ./container/apple-container/up.sh
 ## Notes
 
 - Apple `container` currently targets Apple silicon Macs and macOS 26+.
-- `up.sh` defaults to detached mode for `rest` and `rpc`, and attached mode for `mcp`.
+- `up.sh` defaults to detached mode.
 - `up.sh` builds for `linux/arm64` by default. Override with `AFPAY_APPLE_BUILD_PLATFORM=...` if needed.
 - `bitcoind` is disabled by default. Set `ENABLE_BITCOIND=true` to build and start a local `mainnet` node.
 - When enabled, `bitcoind` defaults to `BTC_NETWORK=mainnet`, `BTC_RPC_PORT=8332`, and `BTC_PRUNE_MB=550`. Set `BTC_PRUNE_MB=0` to disable pruning.

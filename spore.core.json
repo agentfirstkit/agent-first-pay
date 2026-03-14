@@ -2,23 +2,27 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
-  "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/MCP/RPC/REST modes",
+  "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/RPC/REST modes",
   "intent": [
-    "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, MCP mode for agent integration, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
+    "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
   "mutations": [
-    "Return real on-chain transaction IDs for EVM and BTC receive --wait flows by performing post-settle history sync, replacing synthetic wait IDs with actual chain tx hashes that agents can use for on-chain verification",
-    "Consolidate container deployment into Docker and Apple Container workflows with backup/restore scripts, enabling reproducible self-hosted setups on both Linux servers and macOS",
-    "Add LNbits backend integration test suite with 11 test cases against FakeWallet, verifying the previously untested lnbits Lightning provider path"
+    "Remove MCP mode (--mode mcp) and rmcp/schemars dependencies, simplifying the runtime to REST, RPC, pipe, and interactive modes",
+    "Split monolithic handler.rs (3171 LOC) into handler/ module directory with focused sub-modules (wallet, pay, history, limit, helpers), improving maintainability",
+    "Add dispatch_storage! macro to deduplicate 15 identical match-dispatch patterns in the storage backend layer",
+    "Add with_spend_reserve helper that unifies the reserve-execute-confirm/cancel spend-limit flow and logs cancel/confirm failures instead of silently ignoring them",
+    "Add FX quote staleness warning when exchange rate age exceeds 80% of TTL during USD spend-limit conversion",
+    "Add CommonSendArgs and CommonReceiveArgs shared clap structs to deduplicate CLI arg definitions across all five network subcommands",
+    "Remove ln-nwc and ln-lnbits from default feature flags, reducing default binary size and compile-time dependencies"
   ],
   "license": "MIT",
   "bonds": [
     {
       "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.JAjdJvwC2XDkNALXCk53MeDbgpsu8e1tBmxt8TQwJmMQ"
+      "uri": "cmn://cmn.dev/b3.AiLLXEv2TsvN9pcW2GyDA9Wt8ytaXpfx4unZMNjgysGx"
     }
   ],
   "tree": {

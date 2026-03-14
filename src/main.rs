@@ -15,8 +15,6 @@ mod config;
 mod handler;
 #[cfg(feature = "interactive")]
 mod interactive;
-#[cfg(feature = "mcp")]
-mod mcp;
 mod output_fmt;
 mod provider;
 #[cfg(feature = "rest")]
@@ -26,9 +24,6 @@ mod spend;
 mod store;
 mod types;
 mod writer;
-
-#[cfg(feature = "mcp")]
-use rmcp::ServiceExt;
 
 use agent_first_data::OutputFormat;
 use cli::Mode;
@@ -87,8 +82,6 @@ async fn main() {
     match mode {
         Mode::Cli(req) => run_cli(*req).await,
         Mode::Pipe(init) => run_pipe(init).await,
-        #[cfg(feature = "mcp")]
-        Mode::Mcp(init) => run_mcp(init).await,
         Mode::Interactive(_init) => {
             #[cfg(feature = "interactive")]
             {
@@ -346,64 +339,6 @@ async fn run_pipe(init: cli::PipeInit) {
         .await;
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-}
-
-#[cfg(feature = "mcp")]
-async fn run_mcp(init: cli::PipeInit) {
-    let cli::PipeInit {
-        output: _,
-        log,
-        data_dir,
-        startup_argv: _,
-        startup_args: _,
-        startup_requested: _,
-    } = init;
-
-    let resolved_dir = data_dir.unwrap_or_else(|| RuntimeConfig::default().data_dir);
-    let mut config = match RuntimeConfig::load_from_dir(&resolved_dir) {
-        Ok(c) => c,
-        Err(e) => {
-            emit_cli_error(&e, agent_first_data::OutputFormat::Json);
-            std::process::exit(1);
-        }
-    };
-    if !log.is_empty() {
-        config.log = log;
-    }
-
-    let startup_errors = handler::startup_provider_validation_errors(&config).await;
-    if !startup_errors.is_empty() {
-        for err in &startup_errors {
-            emit_output(err, agent_first_data::OutputFormat::Json);
-        }
-        std::process::exit(1);
-    }
-
-    let (tx, rx) = mpsc::channel::<Output>(OUTPUT_CHANNEL_CAPACITY);
-    let store = store::create_storage_backend(&config);
-    let app = Arc::new(App::new(config, tx, None, store));
-
-    let service = match mcp::AfpayMcp::new(app, rx)
-        .serve(rmcp::transport::stdio())
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            emit_cli_error(
-                &format!("MCP serve failed: {e}"),
-                agent_first_data::OutputFormat::Json,
-            );
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(e) = service.waiting().await {
-        emit_cli_error(
-            &format!("MCP server error: {e}"),
-            agent_first_data::OutputFormat::Json,
-        );
-        std::process::exit(1);
-    }
 }
 
 fn emit_cli_error(msg: &str, format: OutputFormat) {

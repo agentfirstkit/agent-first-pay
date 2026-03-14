@@ -4,7 +4,7 @@ services:
       context: ../../
       dockerfile: container/docker/Dockerfile
       args:
-        FEATURES: "${FEATURES:-btc-core,ln-phoenixd,cashu,redb,mcp,rest,exchange-rate}"
+        FEATURES: "${FEATURES:-btc-core,ln-phoenixd,cashu,redb,rest,exchange-rate}"
         INSTALL_PHOENIXD: "${INSTALL_PHOENIXD:-true}"
         INSTALL_BITCOIND: "${INSTALL_BITCOIND:-false}"
     environment:

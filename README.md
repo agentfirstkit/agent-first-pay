@@ -21,7 +21,7 @@ For remote operation, two server modes are available:
 
 ```
 # RPC mode — gRPC + AES-256-GCM PSK (process-to-process)
-afpay CLI / MCP / pipe
+afpay CLI / pipe
   │ gRPC (AES-256-GCM PSK)
   └──→ afpay --mode rpc (VPS)
 
@@ -40,7 +40,7 @@ See [Architecture](docs/architecture.md) for advanced multi-server deployment pa
 | Network | Unit | Token Support | Feature |
 |---------|------|---------------|---------|
 | Cashu | sats | — | `cashu` |
-| Lightning | sats | — | `ln-nwc` / `ln-phoenixd` / `ln-lnbits` |
+| Lightning | sats | — | `ln-phoenixd` (default) / `ln-lnbits` / `ln-nwc` |
 | Solana | lamports | USDC, USDT (SPL) | `sol` |
 | EVM chain | gwei | USDC, USDT (ERC-20) | `evm` |
 | Bitcoin | sats | — | `btc-esplora` / `btc-core` / `btc-electrum` |
@@ -97,7 +97,7 @@ afpay balance
 afpay --rpc-endpoint 10.0.1.5:9400 --rpc-secret "64-char-hex" balance
 ```
 
-Other modes: `--mode interactive` (REPL), `--mode pipe` (JSONL stdin/stdout), `--mode mcp` (MCP stdio, rmcp framework), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [Manual](docs/manual.md) for details.
+Other modes: `--mode interactive` (REPL), `--mode pipe` (JSONL stdin/stdout), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [Manual](docs/manual.md) for details.
 
 ## Quick Start
 
@@ -135,11 +135,17 @@ afpay wallet create --network ln --backend nwc --nwc-uri-secret "nostr+walletcon
 afpay wallet create --network ln --backend phoenixd --endpoint http://localhost:9740 --password-secret "hunter2"
 afpay wallet create --network ln --backend lnbits --endpoint https://legend.lnbits.com --admin-key-secret "abc123"
 
-# Receive (create invoice)
+# Receive — BOLT11 invoice (one-time, amount-specific)
 afpay receive --network ln --amount 500
 
-# Send (pay invoice)
+# Receive — BOLT12 offer (persistent, reusable — phoenixd only)
+afpay receive --network ln
+
+# Send — pay BOLT11 invoice
 afpay send --network ln --to lnbc1...
+
+# Send — pay BOLT12 offer (phoenixd only, --amount required)
+afpay send --network ln --to lno1... --amount 1000
 
 afpay balance --network ln
 ```
@@ -325,10 +331,6 @@ podman compose -f container/docker/compose.yaml up --build   # equivalent
 AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
 AFPAY_MODE=rpc AFPAY_PORT=9400 ./container/apple-container/up.sh
 
-# MCP mode
-AFPAY_MODE=mcp docker compose -f container/docker/compose.yaml up --build
-AFPAY_MODE=mcp ./container/apple-container/up.sh
-
 # Optional local bitcoind (pruned mainnet)
 ENABLE_BITCOIND=true INSTALL_BITCOIND=true docker compose -f container/docker/compose.yaml up --build
 ENABLE_BITCOIND=true ./container/apple-container/up.sh
@@ -344,7 +346,7 @@ podman run -d --name afpay -p 9401:9401 \
   -e AFPAY_MODE=rest afpay
 ```
 
-`AFPAY_MODE` selects `rest`/`rpc`/`mcp`. Secrets auto-generated on first run and persisted to volumes. `bitcoind` is disabled by default; when enabled it runs pruned `mainnet` with `BTC_PRUNE_MB=550`. See [container/README.md](container/README.md) for backup and restore scripts, [container/apple-container/README.md](container/apple-container/README.md) for the Apple Container CLI flow, and [Architecture](docs/architecture.md) for the full variable reference.
+`AFPAY_MODE` selects `rest` or `rpc`. Secrets auto-generated on first run and persisted to volumes. `bitcoind` is disabled by default; when enabled it runs pruned `mainnet` with `BTC_PRUNE_MB=550`. See [container/README.md](container/README.md) for backup and restore scripts, [container/apple-container/README.md](container/apple-container/README.md) for the Apple Container CLI flow, and [Architecture](docs/architecture.md) for the full variable reference.
 
 ## Testing
 

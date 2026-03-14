@@ -499,6 +499,7 @@ impl PayProvider for CashuProvider {
         Ok(total)
     }
 
+    #[cfg(feature = "interactive")]
     async fn cashu_send_quote(
         &self,
         wallet_id: &str,

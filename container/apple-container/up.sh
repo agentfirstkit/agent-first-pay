@@ -15,7 +15,7 @@ ENABLE_BITCOIND="${ENABLE_BITCOIND:-false}"
 BTC_NETWORK="${BTC_NETWORK:-mainnet}"
 BTC_RPC_PORT="${BTC_RPC_PORT:-8332}"
 BTC_PRUNE_MB="${BTC_PRUNE_MB:-550}"
-FEATURES="${FEATURES:-btc-core,ln-phoenixd,cashu,redb,mcp,rest,exchange-rate}"
+FEATURES="${FEATURES:-btc-core,ln-phoenixd,cashu,redb,rest,exchange-rate}"
 INSTALL_PHOENIXD="${INSTALL_PHOENIXD:-true}"
 if [ "${INSTALL_BITCOIND+set}" = "set" ]; then
     INSTALL_BITCOIND="${INSTALL_BITCOIND}"
@@ -31,11 +31,7 @@ fi
 
 case "$DETACH_MODE" in
     auto)
-        if [ "$AFPAY_MODE" = "mcp" ]; then
-            DETACH_MODE=false
-        else
-            DETACH_MODE=true
-        fi
+        DETACH_MODE=true
         ;;
     true|false)
         ;;
@@ -87,16 +83,12 @@ if [ -n "${AFPAY_RPC_SECRET:-}" ]; then
     set -- "$@" -e "AFPAY_RPC_SECRET=$AFPAY_RPC_SECRET"
 fi
 
-if [ "$AFPAY_MODE" != "mcp" ]; then
-    set -- "$@" -p "${AFPAY_HOST_IP}:${AFPAY_PORT}:${AFPAY_PORT}"
-fi
+set -- "$@" -p "${AFPAY_HOST_IP}:${AFPAY_PORT}:${AFPAY_PORT}"
 
 set -- "$@" "$IMAGE_NAME"
 
 printf 'Starting %s with Apple container CLI using image %s\n' "$CONTAINER_NAME" "$IMAGE_NAME"
 printf 'Build platform: %s\n' "$BUILD_PLATFORM"
-if [ "$AFPAY_MODE" != "mcp" ]; then
-    printf 'Listening on http://%s:%s\n' "$AFPAY_HOST_IP" "$AFPAY_PORT"
-fi
+printf 'Listening on http://%s:%s\n' "$AFPAY_HOST_IP" "$AFPAY_PORT"
 
 exec "$@"

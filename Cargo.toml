@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-pay"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin on-chain), send/receive, spend limits, REST/RPC/MCP modes"
+description = "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin on-chain), send/receive, spend limits, REST/RPC modes"
 license = "MIT"
 repository = "https://github.com/cmnspore/agent-first-pay"
 readme = "README.md"
@@ -13,12 +13,9 @@ categories = ["cryptography::cryptocurrencies", "command-line-utilities"]
 default = [
     "redb",
     "postgres",
-    "mcp",
     "interactive",
     "cashu",
-    "ln-nwc",
     "ln-phoenixd",
-    "ln-lnbits",
     "sol",
     "evm",
     "btc-esplora",
@@ -26,7 +23,6 @@ default = [
 ]
 redb = ["dep:redb", "dep:fs2", "dep:cdk-redb"]
 postgres = ["dep:sqlx", "dep:cdk-postgres"]
-mcp = ["dep:rmcp", "dep:schemars"]
 exchange-rate = ["dep:reqwest"]
 ln-nwc = ["dep:nostr-wallet-connect"]
 ln-phoenixd = ["dep:reqwest"]
@@ -100,8 +96,6 @@ cdk = { version = "0.15", default-features = false, features = ["wallet"], optio
 cdk-redb = { version = "0.15", optional = true }
 cdk-postgres = { version = "0.15", optional = true }
 fs2 = { version = "0.4", optional = true }
-rmcp = { version = "1.1", features = ["macros", "server", "transport-io"], optional = true }
-schemars = { version = "1", optional = true }
 getrandom = "0.4"
 hex = "0.4"
 lightning-invoice = "0.34"

@@ -61,6 +61,12 @@ pub trait PayStore: Send + Sync {
         fee_value: u64,
         fee_unit: &str,
     ) -> Result<(), PayError>;
+    fn update_transaction_record_status(
+        &self,
+        tx_id: &str,
+        status: crate::types::TxStatus,
+        confirmed_at_epoch_s: Option<u64>,
+    ) -> Result<(), PayError>;
 
     // Migration log
     fn drain_migration_log(&self) -> Vec<MigrationLog>;
@@ -79,124 +85,71 @@ pub enum StorageBackend {
     _None(std::convert::Infallible),
 }
 
-impl PayStore for StorageBackend {
-    fn save_wallet_metadata(&self, meta: &WalletMetadata) -> Result<(), PayError> {
-        match self {
+/// Dispatch a method call to the active storage backend variant.
+macro_rules! dispatch_storage {
+    ($self:expr, $method:ident $(, $arg:expr)*) => {
+        match $self {
             #[cfg(feature = "redb")]
-            Self::Redb(s) => s.save_wallet_metadata(meta),
+            Self::Redb(s) => s.$method($($arg),*),
             #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.save_wallet_metadata(meta),
+            Self::Postgres(s) => s.$method($($arg),*),
             Self::_None(n) => match *n {},
         }
     }
+}
+
+impl PayStore for StorageBackend {
+    fn save_wallet_metadata(&self, meta: &WalletMetadata) -> Result<(), PayError> {
+        dispatch_storage!(self, save_wallet_metadata, meta)
+    }
 
     fn load_wallet_metadata(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.load_wallet_metadata(wallet_id),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.load_wallet_metadata(wallet_id),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, load_wallet_metadata, wallet_id)
     }
 
     fn list_wallet_metadata(
         &self,
         network: Option<Network>,
     ) -> Result<Vec<WalletMetadata>, PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.list_wallet_metadata(network),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.list_wallet_metadata(network),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, list_wallet_metadata, network)
     }
 
     fn delete_wallet_metadata(&self, wallet_id: &str) -> Result<(), PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.delete_wallet_metadata(wallet_id),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.delete_wallet_metadata(wallet_id),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, delete_wallet_metadata, wallet_id)
     }
 
     fn wallet_directory_path(&self, wallet_id: &str) -> Result<PathBuf, PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.wallet_directory_path(wallet_id),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.wallet_directory_path(wallet_id),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, wallet_directory_path, wallet_id)
     }
 
     fn wallet_data_directory_path(&self, wallet_id: &str) -> Result<PathBuf, PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.wallet_data_directory_path(wallet_id),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.wallet_data_directory_path(wallet_id),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, wallet_data_directory_path, wallet_id)
     }
 
     fn wallet_data_directory_path_for_meta(&self, meta: &WalletMetadata) -> PathBuf {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.wallet_data_directory_path_for_meta(meta),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.wallet_data_directory_path_for_meta(meta),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, wallet_data_directory_path_for_meta, meta)
     }
 
     fn resolve_wallet_id(&self, id_or_label: &str) -> Result<String, PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.resolve_wallet_id(id_or_label),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.resolve_wallet_id(id_or_label),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, resolve_wallet_id, id_or_label)
     }
 
     fn append_transaction_record(&self, record: &HistoryRecord) -> Result<(), PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.append_transaction_record(record),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.append_transaction_record(record),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, append_transaction_record, record)
     }
 
     fn load_wallet_transaction_records(
         &self,
         wallet_id: &str,
     ) -> Result<Vec<HistoryRecord>, PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.load_wallet_transaction_records(wallet_id),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.load_wallet_transaction_records(wallet_id),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, load_wallet_transaction_records, wallet_id)
     }
 
     fn find_transaction_record_by_id(
         &self,
         tx_id: &str,
     ) -> Result<Option<HistoryRecord>, PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.find_transaction_record_by_id(tx_id),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.find_transaction_record_by_id(tx_id),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, find_transaction_record_by_id, tx_id)
     }
 
     fn update_transaction_record_memo(
@@ -204,13 +157,7 @@ impl PayStore for StorageBackend {
         tx_id: &str,
         memo: Option<&BTreeMap<String, String>>,
     ) -> Result<(), PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.update_transaction_record_memo(tx_id, memo),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.update_transaction_record_memo(tx_id, memo),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, update_transaction_record_memo, tx_id, memo)
     }
 
     fn update_transaction_record_fee(
@@ -219,23 +166,32 @@ impl PayStore for StorageBackend {
         fee_value: u64,
         fee_unit: &str,
     ) -> Result<(), PayError> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.update_transaction_record_fee(tx_id, fee_value, fee_unit),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.update_transaction_record_fee(tx_id, fee_value, fee_unit),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(
+            self,
+            update_transaction_record_fee,
+            tx_id,
+            fee_value,
+            fee_unit
+        )
+    }
+
+    fn update_transaction_record_status(
+        &self,
+        tx_id: &str,
+        status: crate::types::TxStatus,
+        confirmed_at_epoch_s: Option<u64>,
+    ) -> Result<(), PayError> {
+        dispatch_storage!(
+            self,
+            update_transaction_record_status,
+            tx_id,
+            status,
+            confirmed_at_epoch_s
+        )
     }
 
     fn drain_migration_log(&self) -> Vec<MigrationLog> {
-        match self {
-            #[cfg(feature = "redb")]
-            Self::Redb(s) => s.drain_migration_log(),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(s) => s.drain_migration_log(),
-            Self::_None(n) => match *n {},
-        }
+        dispatch_storage!(self, drain_migration_log)
     }
 }
 

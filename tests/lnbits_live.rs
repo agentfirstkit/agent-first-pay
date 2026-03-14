@@ -22,7 +22,10 @@
 
 use agent_first_pay::provider::ln::LnProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
+use agent_first_pay::store::redb_store::RedbStore;
+use agent_first_pay::store::StorageBackend;
 use agent_first_pay::types::{Amount, LnWalletBackend, LnWalletCreateRequest, Network};
+use std::sync::Arc;
 
 fn endpoint() -> String {
     std::env::var("LNBITS_ENDPOINT").unwrap_or_else(|_| "http://localhost:5001".to_string())
@@ -44,7 +47,10 @@ fn sats(value: u64) -> Amount {
 async fn setup() -> (tempfile::TempDir, LnProvider, String) {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = LnProvider::new(data_dir);
+    let provider = LnProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let ep = endpoint();
     let key = admin_key();
@@ -198,7 +204,10 @@ async fn lnbits_live_send_quote_invalid_invoice_fails() {
 async fn lnbits_live_wallet_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = LnProvider::new(data_dir);
+    let provider = LnProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(

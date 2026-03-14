@@ -3,7 +3,7 @@
 ## Install
 
 ```bash
-# Default build includes cashu + interactive + mcp
+# Default build includes cashu + interactive
 cargo install --path .
 ```
 
@@ -38,6 +38,35 @@ afpay receive --cashu-token "cashuBo2F..."
 
 # 7. Transaction history
 afpay history list --wallet w_1a2b3c4d
+```
+
+## 30-Second Walkthrough: Lightning
+
+```bash
+# 1. Create LN wallet (choose one backend)
+afpay wallet create --network ln --backend phoenixd --endpoint http://localhost:9740 --password-secret "hunter2"
+# Or: --backend nwc --nwc-uri-secret "nostr+walletconnect://..."
+# Or: --backend lnbits --endpoint https://legend.lnbits.com --admin-key-secret "abc123"
+
+# 2. Check balance
+afpay balance --network ln
+
+# 3. Receive — BOLT11 invoice (one-time, amount-specific)
+afpay receive --network ln --amount 500
+# → returns bolt11 invoice + payment_hash
+
+# 4. Receive — BOLT12 offer (persistent, reusable — phoenixd only)
+afpay receive --network ln
+# → returns lno1... offer string
+
+# 5. Send — pay BOLT11 invoice
+afpay send --network ln --to lnbc1...
+
+# 6. Send — pay BOLT12 offer (phoenixd only, --amount required)
+afpay send --network ln --to lno1... --amount 1000
+
+# 7. Transaction history
+afpay history list --network ln
 ```
 
 ## 30-Second Walkthrough: Solana
@@ -160,14 +189,6 @@ Send JSONL via stdin:
 ```
 
 One request per line, stdout outputs corresponding responses. Supports concurrency — multiple requests can be in-flight, matched by `id` field.
-
-## MCP Mode
-
-```bash
-afpay --mode mcp
-```
-
-Uses rmcp framework with MCP stdio transport. Exposes 32 tools covering all operations: `cashu_send`, `cashu_receive`, `wallet_create`, `balance`, `send`, `receive`, `history_list`, `limit_add`, etc. See [Manual](manual.md) for the full tool list.
 
 ## Spend Limits
 

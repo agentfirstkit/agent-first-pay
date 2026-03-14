@@ -99,6 +99,13 @@ struct PhoenixBalance {
     fee_credit_sat: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PhoenixOfferResponse {
+    #[serde(default)]
+    offer: String,
+}
+
 fn map_reqwest_err(e: reqwest::Error) -> PayError {
     PayError::NetworkError(format!("phoenixd: {e}"))
 }
@@ -236,6 +243,66 @@ impl LnBackend for PhoenixdBackend {
         let data: PhoenixBalance = resp.json().await.map_err(map_reqwest_err)?;
         Ok(BalanceInfo::new(data.balance_sat, 0, "sats")
             .with_additional("fee_credit_sats", data.fee_credit_sat))
+    }
+
+    async fn get_default_offer(&self) -> Result<String, PayError> {
+        let resp = self
+            .client
+            .get(self.url("/getoffer"))
+            .basic_auth("", Some(&self.password))
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(PayError::NetworkError(format!(
+                "phoenixd getoffer {status}: {body}"
+            )));
+        }
+        let data: PhoenixOfferResponse = resp.json().await.map_err(map_reqwest_err)?;
+        if data.offer.is_empty() {
+            return Err(PayError::NetworkError(
+                "phoenixd returned empty offer".to_string(),
+            ));
+        }
+        Ok(data.offer)
+    }
+
+    async fn pay_offer(
+        &self,
+        offer: &str,
+        amount_sats: u64,
+        message: Option<&str>,
+    ) -> Result<LnPayResult, PayError> {
+        let mut params = vec![
+            ("offer".to_string(), offer.to_string()),
+            ("amountSat".to_string(), amount_sats.to_string()),
+        ];
+        if let Some(msg) = message {
+            params.push(("message".to_string(), msg.to_string()));
+        }
+        let resp = self
+            .client
+            .post(self.url("/payoffer"))
+            .basic_auth("", Some(&self.password))
+            .form(&params)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(PayError::NetworkError(format!(
+                "phoenixd payoffer {status}: {body}"
+            )));
+        }
+        let data: PhoenixPayResponse = resp.json().await.map_err(map_reqwest_err)?;
+        Ok(LnPayResult {
+            confirmed_amount_sats: amount_sats,
+            fee_msats: Some(data.routing_fee_sat * 1000),
+            preimage: data.payment_preimage,
+        })
     }
 
     async fn list_payments(

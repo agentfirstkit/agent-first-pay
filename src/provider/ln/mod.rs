@@ -1,8 +1,9 @@
 use crate::provider::{HistorySyncStats, PayError, PayProvider};
-use crate::store::transaction;
 use crate::store::wallet::{self, WalletMetadata};
+use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 #[cfg(feature = "ln-lnbits")]
 mod lnbits;
@@ -38,6 +39,7 @@ pub(crate) enum LnPaymentStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum LnInvoiceStatus {
     Pending,
     Paid { confirmed_amount_sats: u64 },
@@ -79,6 +81,23 @@ pub(crate) trait LnBackend: Send + Sync {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<LnPaymentInfo>, PayError>;
+
+    async fn get_default_offer(&self) -> Result<String, PayError> {
+        Err(PayError::NotImplemented(
+            "bolt12 offers not supported by this backend".to_string(),
+        ))
+    }
+
+    async fn pay_offer(
+        &self,
+        _offer: &str,
+        _amount_sats: u64,
+        _message: Option<&str>,
+    ) -> Result<LnPayResult, PayError> {
+        Err(PayError::NotImplemented(
+            "bolt12 offers not supported by this backend".to_string(),
+        ))
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -101,13 +120,15 @@ fn ln_wallet_summary(m: &WalletMetadata) -> WalletSummary {
 }
 
 pub struct LnProvider {
-    data_dir: String,
+    _data_dir: String,
+    store: Arc<StorageBackend>,
 }
 
 impl LnProvider {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(data_dir: &str, store: Arc<StorageBackend>) -> Self {
         Self {
-            data_dir: data_dir.to_string(),
+            _data_dir: data_dir.to_string(),
+            store,
         }
     }
 
@@ -140,7 +161,7 @@ impl LnProvider {
     }
 
     fn load_ln_wallet(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
-        let meta = wallet::load_wallet_metadata(&self.data_dir, wallet_id)?;
+        let meta = self.store.load_wallet_metadata(wallet_id)?;
         if meta.network != Network::Ln {
             return Err(PayError::WalletNotFound(format!(
                 "{wallet_id} is not a ln wallet"
@@ -154,7 +175,7 @@ impl LnProvider {
         if !wallet_id.is_empty() {
             return Ok(wallet_id.to_string());
         }
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Ln))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Ln))?;
         wallets
             .first()
             .map(|w| w.id.clone())
@@ -356,7 +377,7 @@ impl PayProvider for LnProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             error: None,
         };
-        wallet::save_wallet_metadata(&self.data_dir, &meta)?;
+        self.store.save_wallet_metadata(&meta)?;
 
         Ok(WalletInfo {
             id,
@@ -383,12 +404,12 @@ impl PayProvider for LnProvider {
                 "wallet {wallet_id} has non-zero balance components ({component_list}); withdraw first"
             )));
         }
-        wallet::delete_wallet_metadata(&self.data_dir, wallet_id)?;
+        self.store.delete_wallet_metadata(wallet_id)?;
         Ok(())
     }
 
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Ln))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Ln))?;
         Ok(wallets.iter().map(ln_wallet_summary).collect())
     }
 
@@ -399,7 +420,7 @@ impl PayProvider for LnProvider {
     }
 
     async fn balance_all(&self) -> Result<Vec<WalletBalanceItem>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Ln))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Ln))?;
         let mut items = Vec::new();
         for meta in &wallets {
             let (balance, error) = match self.resolve_backend(meta) {
@@ -424,7 +445,7 @@ impl PayProvider for LnProvider {
         amount: Option<Amount>,
     ) -> Result<ReceiveInfo, PayError> {
         let resolved_wallet_id = if wallet_id.trim().is_empty() {
-            let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Ln))?;
+            let wallets = self.store.list_wallet_metadata(Some(Network::Ln))?;
             match wallets.len() {
                 0 => return Err(PayError::WalletNotFound("no ln wallet found".to_string())),
                 1 => wallets[0].id.clone(),
@@ -440,15 +461,27 @@ impl PayProvider for LnProvider {
 
         let meta = self.load_ln_wallet(&resolved_wallet_id)?;
         let backend = self.resolve_backend(&meta)?;
-        let amount_sats = amount.as_ref().map(|a| a.value).ok_or_else(|| {
-            PayError::InvalidAmount("amount-sats required for ln receive".to_string())
-        })?;
-        let result = backend.create_invoice(amount_sats, None).await?;
-        Ok(ReceiveInfo {
-            address: None,
-            invoice: Some(result.bolt11),
-            quote_id: Some(result.payment_hash),
-        })
+
+        match amount.as_ref().map(|a| a.value) {
+            Some(amount_sats) => {
+                // BOLT11: amount-specific one-time invoice
+                let result = backend.create_invoice(amount_sats, None).await?;
+                Ok(ReceiveInfo {
+                    address: None,
+                    invoice: Some(result.bolt11),
+                    quote_id: Some(result.payment_hash),
+                })
+            }
+            None => {
+                // BOLT12: persistent reusable offer (phoenixd only)
+                let offer = backend.get_default_offer().await?;
+                Ok(ReceiveInfo {
+                    address: Some(offer),
+                    invoice: None,
+                    quote_id: None,
+                })
+            }
+        }
     }
 
     async fn receive_claim(&self, wallet_id: &str, quote_id: &str) -> Result<u64, PayError> {
@@ -460,7 +493,11 @@ impl PayProvider for LnProvider {
             } => {
                 // Record a local receive tx once so tx_status/history remain consistent
                 // even when backend history APIs are unavailable.
-                if transaction::find_transaction_record_by_id(&self.data_dir, quote_id)?.is_none() {
+                if self
+                    .store
+                    .find_transaction_record_by_id(quote_id)?
+                    .is_none()
+                {
                     let now = wallet::now_epoch_seconds();
                     let record = HistoryRecord {
                         transaction_id: quote_id.to_string(),
@@ -480,7 +517,7 @@ impl PayProvider for LnProvider {
                         confirmed_at_epoch_s: Some(now),
                         fee: None,
                     };
-                    let _ = transaction::append_transaction_record(&self.data_dir, &record);
+                    let _ = self.store.append_transaction_record(&record);
                 }
                 Ok(confirmed_amount_sats)
             }
@@ -526,6 +563,12 @@ impl PayProvider for LnProvider {
         _mints: Option<&[String]>,
     ) -> Result<SendQuoteInfo, PayError> {
         let resolved = self.resolve_wallet_id(wallet_id)?;
+        if is_bolt12_offer(to) {
+            return Err(PayError::InvalidAmount(
+                "bolt12 offers do not embed an amount; pass --amount-sats when sending to an offer"
+                    .to_string(),
+            ));
+        }
         let amount_sats = parse_bolt11_amount_sats(to)?;
         let fee_estimate = (amount_sats / 100).max(1);
         Ok(SendQuoteInfo {
@@ -546,13 +589,29 @@ impl PayProvider for LnProvider {
         let resolved = self.resolve_wallet_id(wallet_id)?;
         let meta = self.load_ln_wallet(&resolved)?;
         let backend = self.resolve_backend(&meta)?;
-        // Use invoice payment_hash as transaction_id so tx_status can be correlated with backend records.
-        let transaction_id = parse_bolt11_payment_hash(to).unwrap_or_else(|_| {
-            // Fallback keeps behavior if backend accepted a non-standard invoice format.
-            wallet::generate_transaction_identifier().unwrap_or_else(|_| "tx_unknown".to_string())
-        });
 
-        let result = backend.pay_invoice(to, None).await?;
+        let result = if is_bolt12_offer(to) {
+            let (offer, amount_opt) = parse_bolt12_offer_parts(to);
+            let amount_sats = amount_opt.ok_or_else(|| {
+                PayError::InvalidAmount(
+                    "amount-sats is required when sending to a bolt12 offer (use --amount)"
+                        .to_string(),
+                )
+            })?;
+            backend.pay_offer(&offer, amount_sats, None).await?
+        } else {
+            backend.pay_invoice(to, None).await?
+        };
+
+        let transaction_id = if is_bolt12_offer(to) {
+            wallet::generate_transaction_identifier().unwrap_or_else(|_| "tx_unknown".to_string())
+        } else {
+            parse_bolt11_payment_hash(to).unwrap_or_else(|_| {
+                wallet::generate_transaction_identifier()
+                    .unwrap_or_else(|_| "tx_unknown".to_string())
+            })
+        };
+
         if result.confirmed_amount_sats == 0 {
             return Err(PayError::NetworkError(
                 "backend did not return confirmed payment amount".to_string(),
@@ -586,7 +645,7 @@ impl PayProvider for LnProvider {
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
         };
-        let _ = transaction::append_transaction_record(&self.data_dir, &record);
+        let _ = self.store.append_transaction_record(&record);
 
         Ok(SendResult {
             wallet: resolved,
@@ -644,14 +703,14 @@ impl PayProvider for LnProvider {
             }
         }
         // Fallback to local transaction log store
-        let all = transaction::load_wallet_transaction_records(&self.data_dir, wallet_id)?;
+        let all = self.store.load_wallet_transaction_records(wallet_id)?;
         let end = all.len().min(offset + limit);
         let start = all.len().min(offset);
         Ok(all[start..end].to_vec())
     }
 
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        match transaction::find_transaction_record_by_id(&self.data_dir, transaction_id)? {
+        match self.store.find_transaction_record_by_id(transaction_id)? {
             Some(rec) => Ok(HistoryStatusInfo {
                 transaction_id: rec.transaction_id.clone(),
                 status: rec.status,
@@ -661,7 +720,7 @@ impl PayProvider for LnProvider {
             }),
             None => {
                 // Backend fallback: scan LN wallets and query both invoice-status and payments.
-                let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Ln))?;
+                let wallets = self.store.list_wallet_metadata(Some(Network::Ln))?;
                 for w in &wallets {
                     let meta = self.load_ln_wallet(&w.id)?;
                     let backend = match self.resolve_backend(&meta) {
@@ -782,14 +841,15 @@ impl PayProvider for LnProvider {
                 None
             };
 
-            match transaction::find_transaction_record_by_id(&self.data_dir, &payment.payment_hash)?
+            match self
+                .store
+                .find_transaction_record_by_id(&payment.payment_hash)?
             {
                 Some(existing) => {
                     if existing.status != status
                         || existing.confirmed_at_epoch_s != confirmed_at_epoch_s
                     {
-                        let _ = transaction::update_transaction_record_status(
-                            &self.data_dir,
+                        let _ = self.store.update_transaction_record_status(
                             &payment.payment_hash,
                             status,
                             confirmed_at_epoch_s,
@@ -820,7 +880,7 @@ impl PayProvider for LnProvider {
                         confirmed_at_epoch_s,
                         fee: None,
                     };
-                    let _ = transaction::append_transaction_record(&self.data_dir, &record);
+                    let _ = self.store.append_transaction_record(&record);
                     stats.records_added = stats.records_added.saturating_add(1);
                 }
             }
@@ -864,5 +924,31 @@ mod tests {
     #[test]
     fn parse_bolt11_payment_hash_invalid() {
         assert!(parse_bolt11_payment_hash("not-an-invoice").is_err());
+    }
+
+    #[test]
+    fn bolt12_offer_detected_case_insensitive() {
+        assert!(is_bolt12_offer("lno1qgsqvgjwcf6qqz9"));
+        assert!(is_bolt12_offer("LNO1QGSQVGJWCF6QQZ9"));
+        assert!(is_bolt12_offer("lno1abc?amount=100"));
+        assert!(!is_bolt12_offer("lnbc1qgsq"));
+    }
+
+    #[test]
+    fn bolt12_offer_parts_split() {
+        let (offer, amt) = parse_bolt12_offer_parts("lno1abc?amount=500");
+        assert_eq!(offer, "lno1abc");
+        assert_eq!(amt, Some(500));
+
+        let (offer, amt) = parse_bolt12_offer_parts("lno1abc");
+        assert_eq!(offer, "lno1abc");
+        assert_eq!(amt, None);
+    }
+
+    #[test]
+    fn bolt12_not_bolt11() {
+        // bolt12 offers should not parse as bolt11
+        assert!(parse_bolt11_amount_sats("lno1abc").is_err());
+        assert!(parse_bolt11_payment_hash("lno1abc").is_err());
     }
 }

@@ -27,8 +27,6 @@ impl From<String> for CliError {
 pub enum Mode {
     Cli(Box<CliRequest>),
     Pipe(PipeInit),
-    #[cfg(feature = "mcp")]
-    Mcp(PipeInit),
     Interactive(InteractiveInit),
     Rpc(RpcInit),
     #[cfg(feature = "rest")]
@@ -94,6 +92,42 @@ fn memo_vec_to_map(v: Vec<(String, String)>) -> Option<BTreeMap<String, String>>
 }
 
 // ═══════════════════════════════════════════
+// Shared Arg Structs
+// ═══════════════════════════════════════════
+
+#[derive(clap::Args, Clone)]
+struct CommonSendArgs {
+    /// Source wallet ID (auto-selected if omitted)
+    #[arg(long)]
+    wallet: Option<String>,
+    /// On-chain memo (sent with the transaction)
+    #[arg(long = "onchain-memo")]
+    onchain_memo: Option<String>,
+    /// Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
+    #[arg(long = "local-memo", value_parser = parse_memo_kv)]
+    local_memo: Vec<(String, String)>,
+}
+
+#[derive(clap::Args, Clone)]
+struct CommonReceiveArgs {
+    /// Wallet ID (auto-selected if omitted)
+    #[arg(long)]
+    wallet: Option<String>,
+    /// Wait for payment / matching receive transaction
+    #[arg(long)]
+    wait: bool,
+    /// Timeout in seconds for --wait
+    #[arg(long = "wait-timeout-s")]
+    wait_timeout_s: Option<u64>,
+    /// Poll interval in milliseconds for --wait
+    #[arg(long = "wait-poll-interval-ms")]
+    wait_poll_interval_ms: Option<u64>,
+    /// Write receive QR payload to an SVG file
+    #[arg(long = "qr-svg-file", default_value_t = false)]
+    qr_svg_file: bool,
+}
+
+// ═══════════════════════════════════════════
 // Clap Definitions
 // ═══════════════════════════════════════════
 
@@ -101,8 +135,6 @@ fn memo_vec_to_map(v: Vec<(String, String)>) -> Option<BTreeMap<String, String>>
 enum RuntimeMode {
     Cli,
     Pipe,
-    #[cfg(feature = "mcp")]
-    Mcp,
     Interactive,
     Rpc,
     #[cfg(feature = "rest")]
@@ -297,18 +329,11 @@ enum CashuCommand {
     /// Send P2P cashu token (outputs token string; for Lightning, use send-to-ln)
     #[command(name = "send", hide = true)]
     Send {
-        /// Source wallet ID (auto-selected if omitted)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonSendArgs,
         /// Amount in sats (base units)
         #[arg(long)]
         amount: u64,
-        /// On-chain memo (sent with the transaction)
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
-        #[arg(long = "local-memo", value_parser = parse_memo_kv)]
-        local_memo: Vec<(String, String)>,
         /// Restrict to wallets on these mint URLs (tried in order)
         #[arg(long = "cashu-mint")]
         mint_url: Vec<String>,
@@ -328,40 +353,20 @@ enum CashuCommand {
     /// Send cashu to a Lightning invoice
     #[command(name = "send-to-ln", hide = true)]
     SendToLn {
-        /// Source wallet ID (auto-selected if omitted)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonSendArgs,
         /// Lightning invoice (bolt11)
         #[arg(long)]
         to: String,
-        /// On-chain memo
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Local bookkeeping annotation (repeatable: --local-memo key=value)
-        #[arg(long = "local-memo", value_parser = parse_memo_kv)]
-        local_memo: Vec<(String, String)>,
     },
     /// Create Lightning invoice to receive cashu from LN
     #[command(name = "receive-from-ln", hide = true)]
     ReceiveFromLn {
-        /// Wallet ID (omit to auto-select when exactly one cashu wallet exists)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonReceiveArgs,
         /// Amount in sats (base units)
         #[arg(long)]
         amount: Option<u64>,
-        /// Wait until invoice is paid and auto-claim
-        #[arg(long = "wait-until-paid")]
-        wait_until_paid: bool,
-        /// Timeout in seconds for wait-until-paid
-        #[arg(long = "wait-timeout-s")]
-        wait_timeout_s: Option<u64>,
-        /// Poll interval in milliseconds for wait-until-paid
-        #[arg(long = "wait-poll-interval-ms")]
-        wait_poll_interval_ms: Option<u64>,
-        /// Write invoice QR payload to an SVG file (interactive mode)
-        #[arg(long = "qr-svg-file", default_value_t = false)]
-        qr_svg_file: bool,
     },
     /// Claim minted tokens from a receive-from-ln quote
     #[command(name = "receive-from-ln-claim", hide = true)]
@@ -437,43 +442,26 @@ enum LnCommand {
         #[command(subcommand)]
         action: LnWalletAction,
     },
-    /// Pay a Lightning invoice
+    /// Pay a Lightning invoice or BOLT12 offer
     #[command(name = "send", hide = true)]
     Send {
-        /// Source wallet ID (auto-selected if omitted)
-        #[arg(long)]
-        wallet: Option<String>,
-        /// BOLT11 invoice to pay
+        #[command(flatten)]
+        common: CommonSendArgs,
+        /// BOLT11 invoice or BOLT12 offer (lno1…) to pay
         #[arg(long)]
         to: String,
-        /// On-chain memo (LN description)
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Local bookkeeping annotation (repeatable: --local-memo key=value)
-        #[arg(long = "local-memo", value_parser = parse_memo_kv)]
-        local_memo: Vec<(String, String)>,
+        /// Amount in sats (required for BOLT12 offers, rejected for BOLT11)
+        #[arg(long = "amount-sats")]
+        amount_sats: Option<u64>,
     },
-    /// Create a Lightning invoice to receive payment
+    /// Create a Lightning invoice (BOLT11) or get a reusable BOLT12 offer
     #[command(name = "receive", hide = true)]
     Receive {
-        /// Wallet ID (omit to auto-select when exactly one LN wallet exists)
+        #[command(flatten)]
+        common: CommonReceiveArgs,
+        /// Amount in sats (omit for BOLT12 offer)
         #[arg(long)]
-        wallet: Option<String>,
-        /// Amount in sats (base units)
-        #[arg(long)]
-        amount: u64,
-        /// Wait until invoice is paid and auto-claim
-        #[arg(long = "wait-until-paid")]
-        wait_until_paid: bool,
-        /// Timeout in seconds for wait-until-paid
-        #[arg(long = "wait-timeout-s")]
-        wait_timeout_s: Option<u64>,
-        /// Poll interval in milliseconds for wait-until-paid
-        #[arg(long = "wait-poll-interval-ms")]
-        wait_poll_interval_ms: Option<u64>,
-        /// Write invoice QR payload to an SVG file (interactive mode)
-        #[arg(long = "qr-svg-file", default_value_t = false)]
-        qr_svg_file: bool,
+        amount: Option<u64>,
     },
     /// Check invoice/payment status by transaction_id/payment_hash
     #[command(name = "invoice", hide = true)]
@@ -501,9 +489,8 @@ enum SolCommand {
     /// Send SOL or SPL token transfer
     #[command(name = "send", hide = true)]
     Send {
-        /// Source wallet ID (auto-selected if omitted)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonSendArgs,
         /// Recipient Solana address (base58)
         #[arg(long)]
         to: String,
@@ -513,34 +500,15 @@ enum SolCommand {
         /// Token: "native" for SOL, "usdc", "usdt", or SPL mint address
         #[arg(long)]
         token: String,
-        /// On-chain memo (SOL memo instruction)
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Local bookkeeping annotation (repeatable: --local-memo key=value)
-        #[arg(long = "local-memo", value_parser = parse_memo_kv)]
-        local_memo: Vec<(String, String)>,
     },
     /// Show wallet receive address
     #[command(name = "receive", hide = true)]
     Receive {
-        /// Wallet ID (omit to auto-select when exactly one sol wallet exists)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonReceiveArgs,
         /// On-chain memo to watch for (used with --wait)
         #[arg(long = "onchain-memo")]
         onchain_memo: Option<String>,
-        /// Wait for a matching receive transaction to appear
-        #[arg(long)]
-        wait: bool,
-        /// Timeout in seconds for --wait
-        #[arg(long = "wait-timeout-s")]
-        wait_timeout_s: Option<u64>,
-        /// Poll interval in milliseconds for --wait
-        #[arg(long = "wait-poll-interval-ms")]
-        wait_poll_interval_ms: Option<u64>,
-        /// Write receive address QR payload to an SVG file (interactive mode)
-        #[arg(long = "qr-svg-file", default_value_t = false)]
-        qr_svg_file: bool,
         /// Minimum confirmation depth before considering payment settled (requires --wait)
         #[arg(long = "min-confirmations")]
         min_confirmations: Option<u32>,
@@ -595,9 +563,8 @@ enum EvmCommand {
     /// Send native token or ERC-20 token transfer
     #[command(name = "send", hide = true)]
     Send {
-        /// Source wallet ID (auto-selected if omitted)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonSendArgs,
         /// Recipient address (0x...)
         #[arg(long)]
         to: String,
@@ -607,31 +574,15 @@ enum EvmCommand {
         /// Token: "native" for chain native, "usdc" or contract address for ERC-20
         #[arg(long)]
         token: String,
-        /// On-chain memo
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Local bookkeeping annotation (repeatable: --local-memo key=value)
-        #[arg(long = "local-memo", value_parser = parse_memo_kv)]
-        local_memo: Vec<(String, String)>,
     },
     /// Show wallet receive address
     #[command(name = "receive", hide = true)]
     Receive {
-        /// Wallet ID (omit to auto-select when exactly one evm wallet exists)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonReceiveArgs,
         /// On-chain memo to watch for (used with --wait)
         #[arg(long = "onchain-memo")]
         onchain_memo: Option<String>,
-        /// Wait for a matching receive transaction to appear
-        #[arg(long)]
-        wait: bool,
-        /// Timeout in seconds for --wait
-        #[arg(long = "wait-timeout-s")]
-        wait_timeout_s: Option<u64>,
-        /// Poll interval in milliseconds for --wait
-        #[arg(long = "wait-poll-interval-ms")]
-        wait_poll_interval_ms: Option<u64>,
         /// Minimum confirmation depth before considering payment settled (requires --wait)
         #[arg(long = "min-confirmations")]
         min_confirmations: Option<u32>,
@@ -689,37 +640,20 @@ enum BtcCommand {
     /// Send BTC on-chain
     #[command(name = "send", hide = true)]
     Send {
-        /// Source wallet ID (auto-selected if omitted)
-        #[arg(long)]
-        wallet: Option<String>,
+        #[command(flatten)]
+        common: CommonSendArgs,
         /// Recipient Bitcoin address (bc1.../tb1...)
         #[arg(long)]
         to: String,
         /// Amount in satoshis
         #[arg(long)]
         amount: u64,
-        /// On-chain memo (OP_RETURN is not supported; stored locally)
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Local bookkeeping annotation (repeatable: --local-memo key=value)
-        #[arg(long = "local-memo", value_parser = parse_memo_kv)]
-        local_memo: Vec<(String, String)>,
     },
     /// Show wallet receive address
     #[command(name = "receive", hide = true)]
     Receive {
-        /// Wallet ID (omit to auto-select when exactly one btc wallet exists)
-        #[arg(long)]
-        wallet: Option<String>,
-        /// Wait for a matching receive transaction to appear
-        #[arg(long)]
-        wait: bool,
-        /// Timeout in seconds for --wait
-        #[arg(long = "wait-timeout-s")]
-        wait_timeout_s: Option<u64>,
-        /// Poll interval in milliseconds for --wait
-        #[arg(long = "wait-poll-interval-ms")]
-        wait_poll_interval_ms: Option<u64>,
+        #[command(flatten)]
+        common: CommonReceiveArgs,
         /// Max history records scanned per poll when resolving tx id
         #[arg(long = "wait-sync-limit")]
         wait_sync_limit: Option<usize>,
@@ -1143,12 +1077,14 @@ struct SubcommandParser {
 
 /// Parse a subcommand from args (e.g. `["cashu", "send", "--amount-sats", "100"]`).
 /// Used by interactive mode to reuse CLI command definitions.
+#[cfg(any(feature = "interactive", test))]
 pub fn parse_subcommand(args: &[&str], id: &str) -> Result<Input, String> {
     let parsed = SubcommandParser::try_parse_from(args).map_err(|e| e.to_string())?;
     command_to_input(parsed.command, id)
 }
 
 /// Render clap help for the given args (e.g. `&["--help"]`, `&["cashu", "--help"]`).
+#[cfg(feature = "interactive")]
 pub fn subcommand_help(args: &[&str]) -> String {
     match SubcommandParser::try_parse_from(args) {
         Ok(_) => String::new(),
@@ -1182,24 +1118,6 @@ pub fn parse_args() -> Result<Mode, CliError> {
     match cli.mode {
         RuntimeMode::Pipe => {
             return Ok(Mode::Pipe(PipeInit {
-                output,
-                log,
-                data_dir: cli.data_dir,
-                startup_argv: raw.clone(),
-                startup_args,
-                startup_requested,
-            }));
-        }
-        #[cfg(feature = "mcp")]
-        RuntimeMode::Mcp => {
-            if output != OutputFormat::Json {
-                return Err(CliError {
-                    message: "--output is not supported in MCP mode (MCP uses JSONRPC transport)"
-                        .to_string(),
-                    hint: Some("remove --output or use --mode pipe instead".to_string()),
-                });
-            }
-            return Ok(Mode::Mcp(PipeInit {
                 output,
                 log,
                 data_dir: cli.data_dir,
@@ -1321,9 +1239,13 @@ fn validate_evm_address(to: &str) -> Result<(), String> {
 
 fn validate_bolt11(to: &str) -> Result<(), String> {
     let lower = to.to_lowercase();
-    if !lower.starts_with("lnbc") && !lower.starts_with("lntb") && !lower.starts_with("lnbcrt") {
+    if !lower.starts_with("lnbc")
+        && !lower.starts_with("lntb")
+        && !lower.starts_with("lnbcrt")
+        && !lower.starts_with("lno1")
+    {
         return Err(format!(
-            "invalid Lightning invoice '{to}': must start with lnbc, lntb, or lnbcrt"
+            "invalid Lightning invoice/offer '{to}': must start with lnbc, lntb, lnbcrt, or lno1"
         ));
     }
     Ok(())
@@ -1456,13 +1378,19 @@ fn unified_send_to_input(
             if !mint_url.is_empty() {
                 return Err("--cashu-mint is only supported for cashu".into());
             }
-            if amount.is_some() {
-                return Err(
-                    "--amount is not accepted for ln send; the invoice encodes the amount".into(),
-                );
-            }
-            let to = to.ok_or("--to is required for ln send (bolt11 invoice)")?;
+            let to = to.ok_or("--to is required for ln send (bolt11 invoice or bolt12 offer)")?;
             validate_bolt11(&to)?;
+            let to = if is_bolt12_offer(&to) {
+                let amt = amount.ok_or("--amount is required when sending to a bolt12 offer")?;
+                format!("{to}?amount={amt}")
+            } else {
+                if amount.is_some() {
+                    return Err(
+                        "--amount is not accepted for bolt11 ln send; the invoice encodes the amount".into(),
+                    );
+                }
+                to
+            };
             Ok(Input::Send {
                 id: id.to_string(),
                 wallet,
@@ -1693,13 +1621,12 @@ fn unified_receive_to_input(
             if cashu_token.is_some() {
                 return Err("--cashu-token is only supported for cashu receive".into());
             }
-            let amount = amount.ok_or("--amount is required for ln receive")?;
             Ok(Input::Receive {
                 id: id.to_string(),
                 wallet: wallet.unwrap_or_default(),
                 network: Some(Network::Ln),
-                amount: Some(Amount {
-                    value: amount,
+                amount: amount.map(|v| Amount {
+                    value: v,
                     token: "sats".to_string(),
                 }),
                 onchain_memo: None,
@@ -2158,17 +2085,15 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
 fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> {
     match cmd {
         CashuCommand::Send {
-            wallet,
+            common,
             amount,
-            onchain_memo,
-            local_memo,
             mint_url,
             to,
         } => {
             if to.is_some() {
                 return Err("cashu send generates a P2P cashu token — it does not send to an address. To pay a Lightning invoice, use: cashu send-to-ln --to <bolt11>".to_string());
             }
-            if onchain_memo.is_some() {
+            if common.onchain_memo.is_some() {
                 return Err(
                     "--onchain-memo is not supported for cashu; use --local-memo for bookkeeping"
                         .into(),
@@ -2176,13 +2101,13 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
             }
             Ok(Input::CashuSend {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()),
+                wallet: common.wallet.filter(|s| !s.is_empty()),
                 amount: Amount {
                     value: amount,
                     token: "sats".to_string(),
                 },
                 onchain_memo: None,
-                local_memo: memo_vec_to_map(local_memo),
+                local_memo: memo_vec_to_map(common.local_memo),
                 mints: if mint_url.is_empty() {
                     None
                 } else {
@@ -2195,13 +2120,8 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
             wallet: wallet.filter(|s| !s.is_empty()),
             token,
         }),
-        CashuCommand::SendToLn {
-            wallet,
-            to,
-            onchain_memo,
-            local_memo,
-        } => {
-            if onchain_memo.is_some() {
+        CashuCommand::SendToLn { common, to } => {
+            if common.onchain_memo.is_some() {
                 return Err(
                     "--onchain-memo is not supported for cashu; use --local-memo for bookkeeping"
                         .into(),
@@ -2209,37 +2129,30 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
             }
             Ok(Input::Send {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()),
+                wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Cashu),
                 to,
                 onchain_memo: None,
-                local_memo: memo_vec_to_map(local_memo),
+                local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
             })
         }
-        CashuCommand::ReceiveFromLn {
-            wallet,
-            amount,
-            wait_until_paid,
-            wait_timeout_s,
-            wait_poll_interval_ms,
-            qr_svg_file,
-        } => {
+        CashuCommand::ReceiveFromLn { common, amount } => {
             let resolved = amount.map(|v| Amount {
                 value: v,
                 token: "sats".to_string(),
             });
             Ok(Input::Receive {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
+                wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
                 network: Some(Network::Cashu),
                 amount: resolved,
                 onchain_memo: None,
-                wait_until_paid,
-                wait_timeout_s,
-                wait_poll_interval_ms,
+                wait_until_paid: common.wait,
+                wait_timeout_s: common.wait_timeout_s,
+                wait_poll_interval_ms: common.wait_poll_interval_ms,
                 wait_sync_limit: None,
-                write_qr_svg_file: qr_svg_file,
+                write_qr_svg_file: common.qr_svg_file,
                 min_confirmations: None,
             })
         }
@@ -2376,49 +2289,53 @@ fn ln_command_to_input(cmd: LnCommand, id: &str) -> Result<Input, String> {
             }),
         },
         LnCommand::Send {
-            wallet,
+            common,
             to,
-            onchain_memo,
-            local_memo,
+            amount_sats,
         } => {
-            if onchain_memo.is_some() {
+            if common.onchain_memo.is_some() {
                 return Err(
                     "--onchain-memo is not supported for ln; use --local-memo for bookkeeping"
                         .into(),
                 );
             }
             validate_bolt11(&to)?;
+            let to = if is_bolt12_offer(&to) {
+                let amt = amount_sats
+                    .ok_or("--amount-sats is required when sending to a bolt12 offer")?;
+                format!("{to}?amount={amt}")
+            } else {
+                if amount_sats.is_some() {
+                    return Err(
+                        "--amount-sats is not accepted for bolt11 invoices; the invoice encodes the amount".into(),
+                    );
+                }
+                to
+            };
             Ok(Input::Send {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()),
+                wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Ln),
                 to,
                 onchain_memo: None,
-                local_memo: memo_vec_to_map(local_memo),
+                local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
             })
         }
-        LnCommand::Receive {
-            wallet,
-            amount,
-            wait_until_paid,
-            wait_timeout_s,
-            wait_poll_interval_ms,
-            qr_svg_file,
-        } => Ok(Input::Receive {
+        LnCommand::Receive { common, amount } => Ok(Input::Receive {
             id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
+            wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
             network: Some(Network::Ln),
-            amount: Some(Amount {
-                value: amount,
+            amount: amount.map(|v| Amount {
+                value: v,
                 token: "sats".to_string(),
             }),
             onchain_memo: None,
-            wait_until_paid,
-            wait_timeout_s,
-            wait_poll_interval_ms,
+            wait_until_paid: common.wait,
+            wait_timeout_s: common.wait_timeout_s,
+            wait_poll_interval_ms: common.wait_poll_interval_ms,
             wait_sync_limit: None,
-            write_qr_svg_file: qr_svg_file,
+            write_qr_svg_file: common.qr_svg_file,
             min_confirmations: None,
         }),
         LnCommand::Invoice { transaction_id } => Ok(Input::HistoryStatus {
@@ -2474,45 +2391,39 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
             }),
         },
         SolCommand::Send {
-            wallet,
+            common,
             to,
             amount,
             token,
-            onchain_memo,
-            local_memo,
         } => {
             validate_sol_address(&to)?;
             validate_token_not_contract(&token)?;
             let target = format!("solana:{to}?amount={amount}&token={token}");
             Ok(Input::Send {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()),
+                wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Sol),
                 to: target,
-                onchain_memo,
-                local_memo: memo_vec_to_map(local_memo),
+                onchain_memo: common.onchain_memo,
+                local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
             })
         }
         SolCommand::Receive {
-            wallet,
+            common,
             onchain_memo,
-            wait,
-            wait_timeout_s,
-            wait_poll_interval_ms,
-            qr_svg_file,
             min_confirmations,
         } => Ok(Input::Receive {
             id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
+            wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
             network: Some(Network::Sol),
             amount: None,
             onchain_memo: onchain_memo.filter(|s| !s.trim().is_empty()),
-            wait_until_paid: wait,
-            wait_timeout_s,
-            wait_poll_interval_ms,
+            wait_until_paid: common.wait,
+            wait_timeout_s: common.wait_timeout_s,
+            wait_poll_interval_ms: common.wait_poll_interval_ms,
             wait_sync_limit: None,
-            write_qr_svg_file: qr_svg_file,
+            write_qr_svg_file: common.qr_svg_file,
             min_confirmations,
         }),
         SolCommand::Balance { wallet } => Ok(Input::Balance {
@@ -2565,48 +2476,43 @@ fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
             }),
         },
         EvmCommand::Send {
-            wallet,
+            common,
             to,
             amount,
             token,
-            onchain_memo,
-            local_memo,
         } => {
             validate_evm_address(&to)?;
             validate_token_not_contract(&token)?;
             let target = format!("ethereum:{to}?amount={amount}&token={token}");
             Ok(Input::Send {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()),
+                wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Evm),
                 to: target,
-                onchain_memo,
-                local_memo: memo_vec_to_map(local_memo),
+                onchain_memo: common.onchain_memo,
+                local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
             })
         }
         EvmCommand::Receive {
-            wallet,
+            common,
             onchain_memo,
-            wait,
-            wait_timeout_s,
-            wait_poll_interval_ms,
             min_confirmations,
         } => {
-            if wait {
+            if common.wait {
                 return Err(
                     "evm receive --wait requires --amount; use unified receive command".into(),
                 );
             }
             Ok(Input::Receive {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
+                wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
                 network: Some(Network::Evm),
                 amount: None,
                 onchain_memo,
-                wait_until_paid: wait,
-                wait_timeout_s,
-                wait_poll_interval_ms,
+                wait_until_paid: common.wait,
+                wait_timeout_s: common.wait_timeout_s,
+                wait_poll_interval_ms: common.wait_poll_interval_ms,
                 wait_sync_limit: None,
                 write_qr_svg_file: false,
                 min_confirmations,
@@ -2667,39 +2573,30 @@ fn btc_command_to_input(cmd: BtcCommand, id: &str) -> Result<Input, String> {
                 wallet,
             }),
         },
-        BtcCommand::Send {
-            wallet,
-            to,
-            amount,
-            onchain_memo,
-            local_memo,
-        } => {
+        BtcCommand::Send { common, to, amount } => {
             let target = format!("bitcoin:{to}?amount={amount}");
             Ok(Input::Send {
                 id: id.to_string(),
-                wallet: wallet.filter(|s| !s.is_empty()),
+                wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Btc),
                 to: target,
-                onchain_memo,
-                local_memo: memo_vec_to_map(local_memo),
+                onchain_memo: common.onchain_memo,
+                local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
             })
         }
         BtcCommand::Receive {
-            wallet,
-            wait,
-            wait_timeout_s,
-            wait_poll_interval_ms,
+            common,
             wait_sync_limit,
         } => Ok(Input::Receive {
             id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
+            wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
             network: Some(Network::Btc),
             amount: None,
             onchain_memo: None,
-            wait_until_paid: wait,
-            wait_timeout_s,
-            wait_poll_interval_ms,
+            wait_until_paid: common.wait,
+            wait_timeout_s: common.wait_timeout_s,
+            wait_poll_interval_ms: common.wait_poll_interval_ms,
             wait_sync_limit,
             write_qr_svg_file: false,
             min_confirmations: None,
@@ -4961,5 +4858,138 @@ mod tests {
         )
         .expect_err("--wait-timeout-s without --wait should error");
         assert!(err.contains("--wait"), "error: {err}");
+    }
+
+    // ═══════════════════════════════════════════
+    // BOLT12 offer tests
+    // ═══════════════════════════════════════════
+
+    #[test]
+    fn parse_ln_receive_without_amount_for_bolt12() {
+        let input = parse_subcommand(&["ln", "receive"], "t_bolt12_1")
+            .expect("ln receive without --amount should parse (bolt12 offer)");
+        match input {
+            Input::Receive {
+                network, amount, ..
+            } => {
+                assert_eq!(network, Some(Network::Ln));
+                assert!(amount.is_none(), "amount should be None for bolt12 offer");
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unified_ln_receive_without_amount_for_bolt12() {
+        let input = parse_subcommand(&["receive", "--network", "ln"], "t_bolt12_2")
+            .expect("unified ln receive without --amount should parse");
+        match input {
+            Input::Receive {
+                network, amount, ..
+            } => {
+                assert_eq!(network, Some(Network::Ln));
+                assert!(amount.is_none(), "amount should be None for bolt12 offer");
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ln_send_bolt12_requires_amount() {
+        let err = parse_subcommand(&["ln", "send", "--to", "lno1abc123"], "t_bolt12_3")
+            .expect_err("ln send to bolt12 without --amount-sats should error");
+        assert!(
+            err.contains("amount-sats"),
+            "error should mention amount-sats: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_ln_send_bolt12_with_amount() {
+        let input = parse_subcommand(
+            &["ln", "send", "--to", "lno1abc123", "--amount-sats", "500"],
+            "t_bolt12_4",
+        )
+        .expect("ln send to bolt12 with --amount-sats should parse");
+        match input {
+            Input::Send { to, network, .. } => {
+                assert_eq!(network, Some(Network::Ln));
+                assert!(to.contains("lno1abc123"), "to should contain offer");
+                assert!(to.contains("?amount=500"), "to should encode amount");
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ln_send_bolt12_case_insensitive() {
+        let input = parse_subcommand(
+            &[
+                "ln",
+                "send",
+                "--to",
+                "LNO1UPPERCASE",
+                "--amount-sats",
+                "100",
+            ],
+            "t_bolt12_5",
+        )
+        .expect("uppercase LNO1 should be accepted");
+        match input {
+            Input::Send { to, .. } => {
+                assert!(
+                    to.contains("?amount=100"),
+                    "uppercase offer should get amount appended: {to}"
+                );
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unified_ln_send_bolt12_with_amount() {
+        let input = parse_subcommand(
+            &[
+                "send",
+                "--network",
+                "ln",
+                "--to",
+                "lno1xyz",
+                "--amount",
+                "1000",
+            ],
+            "t_bolt12_6",
+        )
+        .expect("unified ln send to bolt12 with --amount should parse");
+        match input {
+            Input::Send { to, .. } => {
+                assert!(to.contains("lno1xyz"), "to should contain offer");
+                assert!(to.contains("?amount=1000"), "to should encode amount");
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unified_ln_send_bolt12_rejects_without_amount() {
+        let err = parse_subcommand(
+            &["send", "--network", "ln", "--to", "lno1xyz"],
+            "t_bolt12_7",
+        )
+        .expect_err("unified ln send to bolt12 without --amount should error");
+        assert!(err.contains("amount"), "error should mention amount: {err}");
+    }
+
+    #[test]
+    fn parse_ln_send_bolt11_rejects_amount_sats() {
+        let err = parse_subcommand(
+            &["ln", "send", "--to", "lnbc1abc", "--amount-sats", "100"],
+            "t_bolt12_8",
+        )
+        .expect_err("ln send to bolt11 with --amount-sats should error");
+        assert!(
+            err.contains("not accepted"),
+            "error should reject amount for bolt11: {err}"
+        );
     }
 }

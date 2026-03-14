@@ -328,6 +328,19 @@ pub fn update_transaction_record_fee(
     )))
 }
 
+#[cfg_attr(
+    not(any(
+        feature = "ln-nwc",
+        feature = "ln-phoenixd",
+        feature = "ln-lnbits",
+        feature = "sol",
+        feature = "evm",
+        feature = "btc-esplora",
+        feature = "btc-core",
+        feature = "btc-electrum"
+    )),
+    allow(dead_code)
+)]
 pub fn update_transaction_record_status(
     data_dir: &str,
     transaction_id: &str,

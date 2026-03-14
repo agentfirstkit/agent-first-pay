@@ -1,3 +1,18 @@
+#![cfg_attr(
+    not(any(
+        feature = "cashu",
+        feature = "ln-nwc",
+        feature = "ln-phoenixd",
+        feature = "ln-lnbits",
+        feature = "sol",
+        feature = "evm",
+        feature = "btc-esplora",
+        feature = "btc-core",
+        feature = "btc-electrum"
+    )),
+    allow(dead_code)
+)]
+
 use crate::provider::PayError;
 use crate::types::Network;
 use serde::{Deserialize, Serialize};
@@ -93,6 +108,7 @@ pub fn wallet_data_directory_path(data_dir: &str, wallet_id: &str) -> Result<Pat
     Ok(wallet_directory_path(data_dir, wallet_id)?.join("wallet-data"))
 }
 
+#[cfg(feature = "redb")]
 pub(crate) fn parse_wallet_metadata(
     raw: &str,
     wallet_id: &str,
@@ -129,6 +145,7 @@ fn provider_directory_name_for_wallet_metadata(wallet_metadata: &WalletMetadata)
     }
 }
 
+#[cfg(feature = "redb")]
 pub(crate) fn network_from_provider_dir(name: &str) -> Option<Network> {
     if name == "wallets-cashu" {
         Some(Network::Cashu)

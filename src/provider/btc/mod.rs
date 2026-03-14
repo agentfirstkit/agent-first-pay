@@ -7,8 +7,8 @@ mod electrum;
 mod esplora;
 
 use crate::provider::{HistorySyncStats, PayError, PayProvider};
-use crate::store::transaction;
 use crate::store::wallet::{self, WalletMetadata};
+use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use async_trait::async_trait;
 use bdk_wallet::bitcoin::{Address, Amount as BtcAmount, Transaction, Txid};
@@ -18,6 +18,7 @@ use bdk_wallet::{KeychainKind, Wallet};
 use common::*;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 
 // ═══════════════════════════════════════════
 // BtcChainSource trait
@@ -181,22 +182,24 @@ fn chain_position_epoch_s(chain_position: ChainPosition<ConfirmationBlockTime>) 
 
 pub struct BtcProvider {
     data_dir: String,
+    store: Arc<StorageBackend>,
 }
 
 impl BtcProvider {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(data_dir: &str, store: Arc<StorageBackend>) -> Self {
         Self {
             data_dir: data_dir.to_string(),
+            store,
         }
     }
 
     fn resolve_wallet_id(&self, wallet_id: &str) -> Result<String, PayError> {
-        wallet::resolve_wallet_id(&self.data_dir, wallet_id)
+        self.store.resolve_wallet_id(wallet_id)
     }
 
     fn load_btc_wallet(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
         let id = self.resolve_wallet_id(wallet_id)?;
-        let meta = wallet::load_wallet_metadata(&self.data_dir, &id)?;
+        let meta = self.store.load_wallet_metadata(&id)?;
         if meta.network != Network::Btc {
             return Err(PayError::WalletNotFound(format!(
                 "wallet {id} is not a btc wallet"
@@ -313,7 +316,7 @@ impl PayProvider for BtcProvider {
 
         let address = wallet_address(&meta)?;
 
-        wallet::save_wallet_metadata(&self.data_dir, &meta)?;
+        self.store.save_wallet_metadata(&meta)?;
 
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
         let _ = bdk_wallet.reveal_addresses_to(KeychainKind::External, 0);
@@ -321,7 +324,7 @@ impl PayProvider for BtcProvider {
 
         if is_restore {
             if let Err(e) = Self::full_scan_wallet(&self.data_dir, &meta, &mut bdk_wallet).await {
-                let _ = wallet::delete_wallet_metadata(&self.data_dir, &wallet_id);
+                let _ = self.store.delete_wallet_metadata(&wallet_id);
                 return Err(e);
             }
         }
@@ -350,12 +353,12 @@ impl PayProvider for BtcProvider {
             )));
         }
 
-        wallet::delete_wallet_metadata(&self.data_dir, &id)?;
+        self.store.delete_wallet_metadata(&id)?;
         Ok(())
     }
 
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError> {
-        let metas = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Btc))?;
+        let metas = self.store.list_wallet_metadata(Some(Network::Btc))?;
         let mut summaries = Vec::with_capacity(metas.len());
         for meta in metas {
             let address = wallet_address(&meta).unwrap_or_else(|_| "error".to_string());
@@ -529,7 +532,7 @@ impl PayProvider for BtcProvider {
             }),
         };
 
-        let _ = transaction::append_transaction_record(&self.data_dir, &record);
+        let _ = self.store.append_transaction_record(&record);
 
         Ok(SendResult {
             wallet: id,
@@ -615,14 +618,14 @@ impl PayProvider for BtcProvider {
     ) -> Result<Vec<HistoryRecord>, PayError> {
         let id = self.resolve_wallet_id(wallet_id)?;
         let _meta = self.load_btc_wallet(&id)?;
-        let all = transaction::load_wallet_transaction_records(&self.data_dir, &id)?;
+        let all = self.store.load_wallet_transaction_records(&id)?;
         let end = all.len().min(offset + limit);
         let start = all.len().min(offset);
         Ok(all[start..end].to_vec())
     }
 
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        match transaction::find_transaction_record_by_id(&self.data_dir, transaction_id)? {
+        match self.store.find_transaction_record_by_id(transaction_id)? {
             Some(mut rec) => {
                 if let Some(chain_txid) = chain_txid_from_record(&rec) {
                     if let Ok(meta) = self.load_btc_wallet(&rec.wallet) {
@@ -644,8 +647,7 @@ impl PayProvider for BtcProvider {
                             if rec.status != status
                                 || rec.confirmed_at_epoch_s != confirmed_at_epoch_s
                             {
-                                let _ = transaction::update_transaction_record_status(
-                                    &self.data_dir,
+                                let _ = self.store.update_transaction_record_status(
                                     &rec.transaction_id,
                                     status,
                                     confirmed_at_epoch_s,
@@ -689,7 +691,7 @@ impl PayProvider for BtcProvider {
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
         Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
 
-        let local_records = transaction::load_wallet_transaction_records(&self.data_dir, &id)?;
+        let local_records = self.store.load_wallet_transaction_records(&id)?;
         let mut local_by_chain_txid: HashMap<String, HistoryRecord> = HashMap::new();
         for record in local_records {
             if record.network != Network::Btc {
@@ -726,8 +728,7 @@ impl PayProvider for BtcProvider {
                 if existing.status != status
                     || existing.confirmed_at_epoch_s != confirmed_at_epoch_s
                 {
-                    let _ = transaction::update_transaction_record_status(
-                        &self.data_dir,
+                    let _ = self.store.update_transaction_record_status(
                         &existing.transaction_id,
                         status,
                         confirmed_at_epoch_s,
@@ -772,7 +773,7 @@ impl PayProvider for BtcProvider {
                     token: "sats".to_string(),
                 }),
             };
-            let _ = transaction::append_transaction_record(&self.data_dir, &record);
+            let _ = self.store.append_transaction_record(&record);
             local_by_chain_txid.insert(chain_txid, record);
             stats.records_added = stats.records_added.saturating_add(1);
         }
@@ -786,8 +787,17 @@ mod tests {
     use super::common::*;
     use super::BtcProvider;
     use crate::provider::{PayError, PayProvider};
+    use crate::store::StorageBackend;
     use crate::types::{BtcBackend, WalletCreateRequest};
     use bdk_wallet::bitcoin::Network as BtcNetwork;
+    use std::sync::Arc;
+
+    #[cfg(feature = "redb")]
+    fn test_store(data_dir: &str) -> Arc<StorageBackend> {
+        Arc::new(StorageBackend::Redb(
+            crate::store::redb_store::RedbStore::new(data_dir),
+        ))
+    }
 
     #[test]
     fn parse_transfer_target_bitcoin_uri() {
@@ -863,7 +873,7 @@ mod tests {
     async fn create_wallet_rejects_empty_esplora_url() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_str().unwrap();
-        let provider = BtcProvider::new(data_dir);
+        let provider = BtcProvider::new(data_dir, test_store(data_dir));
         let mut req = signet_request("bad-esplora");
         req.btc_esplora_url = Some("   ".to_string());
 
@@ -879,7 +889,7 @@ mod tests {
     async fn create_wallet_rejects_core_rpc_when_feature_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_str().unwrap();
-        let provider = BtcProvider::new(data_dir);
+        let provider = BtcProvider::new(data_dir, test_store(data_dir));
         let mut req = signet_request("core-disabled");
         req.btc_backend = Some(BtcBackend::CoreRpc);
         req.btc_core_url = Some("http://127.0.0.1:18443".to_string());
@@ -896,7 +906,7 @@ mod tests {
     async fn create_wallet_core_rpc_requires_url() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_str().unwrap();
-        let provider = BtcProvider::new(data_dir);
+        let provider = BtcProvider::new(data_dir, test_store(data_dir));
         let mut req = signet_request("core-needs-url");
         req.btc_backend = Some(BtcBackend::CoreRpc);
         req.btc_core_url = None;
@@ -913,7 +923,7 @@ mod tests {
     async fn create_wallet_electrum_requires_url() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_str().unwrap();
-        let provider = BtcProvider::new(data_dir);
+        let provider = BtcProvider::new(data_dir, test_store(data_dir));
         let mut req = signet_request("electrum-needs-url");
         req.btc_backend = Some(BtcBackend::Electrum);
         req.btc_electrum_url = None;
@@ -929,7 +939,7 @@ mod tests {
     async fn send_quote_rejects_invalid_address() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_str().unwrap();
-        let provider = BtcProvider::new(data_dir);
+        let provider = BtcProvider::new(data_dir, test_store(data_dir));
         let wallet = provider
             .create_wallet(&signet_request("send-quote-invalid"))
             .await
@@ -950,7 +960,7 @@ mod tests {
     async fn restore_wallet_runs_full_scan_and_cleans_up_on_failure() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_str().unwrap();
-        let provider = BtcProvider::new(data_dir);
+        let provider = BtcProvider::new(data_dir, test_store(data_dir));
         let mut req = signet_request("restore-full-scan");
         req.mnemonic_secret = Some(
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
@@ -973,7 +983,7 @@ mod tests {
     async fn non_restore_create_skips_full_scan() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_str().unwrap();
-        let provider = BtcProvider::new(data_dir);
+        let provider = BtcProvider::new(data_dir, test_store(data_dir));
         let mut req = signet_request("create-no-fullscan");
         req.btc_esplora_url = Some("http://127.0.0.1:1".to_string());
 

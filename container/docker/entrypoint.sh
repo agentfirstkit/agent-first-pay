@@ -25,15 +25,8 @@ case "$AFPAY_MODE" in
         SECRET_VAL="${AFPAY_RPC_SECRET}"
         SECRET_LABEL="RPC secret"
         ;;
-    mcp)
-        # MCP uses stdio, no secret needed
-        SECRET_FILE=""
-        SECRET_ENV=""
-        SECRET_VAL=""
-        SECRET_LABEL=""
-        ;;
     *)
-        echo "ERROR: unsupported AFPAY_MODE=${AFPAY_MODE} (expected: rest, rpc, mcp)"
+        echo "ERROR: unsupported AFPAY_MODE=${AFPAY_MODE} (expected: rest, rpc)"
         exit 1
         ;;
 esac
@@ -71,13 +64,6 @@ case "$AFPAY_MODE" in
         echo "  afpay mode: rpc"
         echo "  afpay endpoint: 0.0.0.0:${AFPAY_PORT}"
         echo "  afpay RPC secret: ${SECRET_VAL}"
-        echo "========================================="
-        ;;
-    mcp)
-        # MCP uses stdio — supervisor manages the process but it won't listen on a port
-        AFPAY_CMD="afpay --mode mcp --data-dir ${AFPAY_DATA_DIR}"
-        echo "========================================="
-        echo "  afpay mode: mcp (stdio)"
         echo "========================================="
         ;;
 esac

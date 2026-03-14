@@ -60,9 +60,6 @@ Networks not listed in `[providers]` use their local implementation (if compiled
 All networks in one process. Simplest setup:
 
 ```bash
-# Full stack — MCP server with all networks
-afpay --mode mcp
-
 # REST API server (curl-accessible, no specialized client needed)
 afpay --mode rest --rest-api-key "my-secret"
 
@@ -77,10 +74,10 @@ cargo build --features btc-esplora
 Networks run as independent daemons. A coordinator connects to named `afpay_rpc` nodes via encrypted gRPC. Any node can itself forward to downstream nodes (cascading):
 
 ```
-Agent (Claude)
-  │ MCP (stdio)
+Agent / Client
+  │ REST or gRPC
   ▼
-afpay --mode mcp                           ← coordinator (config.toml below)
+afpay --mode rest (or rpc)                 ← coordinator (config.toml below)
   │ gRPC (AES-256-GCM PSK)
   ├──→ afpay --mode rpc (wallet-server)    ← VPS-A: ln + cashu
   └──→ afpay --mode rpc (chain-server)     ← VPS-B: sol + evm + btc
@@ -118,6 +115,7 @@ The same CLI commands work locally or against a remote daemon:
 ```bash
 # Local (wallet on this machine)
 afpay send --network ln --to lnbc1...
+afpay send --network ln --to lno1... --amount 1000   # BOLT12 offer (phoenixd only)
 
 # Remote (forward to rpc daemon)
 afpay --rpc-endpoint 10.0.1.5:9400 --rpc-secret "abc..." send --network ln --to lnbc1...
@@ -187,8 +185,6 @@ tonic = "0.14"           # gRPC server/client
 prost = "0.14"           # protobuf
 tonic-build = "0.14"     # build.rs proto compilation
 aes-gcm = "0.10"         # AES-256-GCM encryption
-rmcp = "1.1"             # MCP framework (mcp feature)
-schemars = "1"           # JSON Schema for MCP tool params (mcp feature)
 axum = "0.8"             # HTTP REST server (rest feature)
 tower-http = "0.6"       # CORS middleware (rest feature)
 ```
@@ -220,7 +216,7 @@ Same as RPC mode:
 
 ### Container Deployment
 
-The `container/docker/` directory provides the canonical single-container deployment using supervisord. The `container/apple-container/` directory adds a macOS-specific Apple Container CLI launcher that reuses the same Dockerfile and runtime defaults. The `AFPAY_MODE` environment variable selects the afpay run mode (`rest`, `rpc`, or `mcp`):
+The `container/docker/` directory provides the canonical single-container deployment using supervisord. The `container/apple-container/` directory adds a macOS-specific Apple Container CLI launcher that reuses the same Dockerfile and runtime defaults. The `AFPAY_MODE` environment variable selects the afpay run mode (`rest` or `rpc`):
 
 ```
 supervisord
@@ -232,11 +228,11 @@ supervisord
 
 | Layer | Variable | Default | Description |
 |-------|----------|---------|-------------|
-| Build | `FEATURES` | `btc-core,ln-phoenixd,cashu,redb,mcp,rest,exchange-rate` | cargo --features |
+| Build | `FEATURES` | `btc-core,ln-phoenixd,cashu,redb,rest,exchange-rate` | cargo --features |
 | Build | `INSTALL_PHOENIXD` | `true` | Install phoenixd binary |
 | Build | `INSTALL_BITCOIND` | `false` | Install bitcoind binary |
-| Runtime | `AFPAY_MODE` | `rest` | afpay run mode: `rest`, `rpc`, `mcp` |
-| Runtime | `AFPAY_PORT` | `9401` | Listen port (rest/rpc; ignored for mcp) |
+| Runtime | `AFPAY_MODE` | `rest` | afpay run mode: `rest` or `rpc` |
+| Runtime | `AFPAY_PORT` | `9401` | Listen port (rest/rpc) |
 | Runtime | `AFPAY_REST_API_KEY` | auto-generated | REST Bearer token (rest mode) |
 | Runtime | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret (rpc mode) |
 | Runtime | `ENABLE_PHOENIXD` | `true` | Start phoenixd process |
@@ -253,9 +249,6 @@ docker compose -f container/docker/compose.yaml up --build
 
 # RPC mode — for afpay CLI clients
 AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
-
-# MCP mode — stdio for AI agents
-AFPAY_MODE=mcp docker compose -f container/docker/compose.yaml up --build
 ```
 
 All commands work with Podman — replace `docker compose` with `podman compose`:
@@ -290,8 +283,8 @@ Each node decides independently whether to enforce limits:
 |------|------------|-----------|
 | `--mode rpc` | Always enforced | Security boundary — agent cannot modify daemon config |
 | `--mode rest` | Always enforced | Security boundary — same as RPC mode |
-| CLI/pipe/MCP + all local providers | Enforced | Only defense layer available |
-| CLI/pipe/MCP + any remote provider | Not enforced locally | Remote daemon handles it |
+| CLI/pipe + all local providers | Enforced | Only defense layer available |
+| CLI/pipe + any remote provider | Not enforced locally | Remote daemon handles it |
 
 In cascading deployments, each RPC daemon layer enforces its own limits. The coordinator delegates enforcement to downstream nodes.
 
@@ -348,10 +341,10 @@ cargo build --no-default-features --features ln,redb
 cargo build
 
 # PostgreSQL-only server (no local redb)
-cargo build --no-default-features --features postgres,mcp,exchange-rate
+cargo build --no-default-features --features postgres,exchange-rate
 
 # Pure coordinator (only RPC forwarding, no wallet SDK, no local storage)
-cargo build --no-default-features --features mcp
+cargo build --no-default-features
 ```
 
 ### SDK Dependencies
@@ -359,7 +352,7 @@ cargo build --no-default-features --features mcp
 | Component | Crate | Notes |
 |-----------|-------|-------|
 | Cashu | `cdk` (Cashu Dev Kit) | Pure Rust, HTTP mint interaction |
-| Lightning | phoenixd / LNbits / NWC | External backends, no embedded node |
+| Lightning | phoenixd / LNbits / NWC | External backends, no embedded node. phoenixd supports BOLT12 offers |
 | Solana | anza-xyz component crates v3.x | Pure Rust (not monolithic solana-sdk) |
 | EVM | `alloy` | Pure Rust (no kzg feature) |
 | Bitcoin (Esplora) | `bdk_wallet` + `bdk_esplora` | BDK v2, Esplora HTTP API, SegWit/Taproot |
@@ -367,4 +360,3 @@ cargo build --no-default-features --features mcp
 | Bitcoin (Electrum) | `bdk_wallet` + `bdk_electrum` | BDK v2, Electrum protocol |
 | Storage (embedded) | `redb` | Embedded key-value, pure Rust |
 | Storage (PostgreSQL) | `sqlx` | Async PostgreSQL, pure Rust (rustls) |
-| MCP | `rmcp` | MCP server framework (stdio transport) |

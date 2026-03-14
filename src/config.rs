@@ -5,7 +5,7 @@ use std::path::Path;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn enabled_features() -> Vec<&'static str> {
-    [
+    let features: &[Option<&str>] = &[
         #[cfg(feature = "redb")]
         Some("redb"),
         #[cfg(feature = "postgres")]
@@ -28,16 +28,12 @@ pub fn enabled_features() -> Vec<&'static str> {
         Some("btc-core"),
         #[cfg(feature = "btc-electrum")]
         Some("btc-electrum"),
-        #[cfg(feature = "mcp")]
-        Some("mcp"),
         #[cfg(feature = "interactive")]
         Some("interactive"),
         #[cfg(feature = "rest")]
         Some("rest"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+    ];
+    features.iter().copied().flatten().collect()
 }
 
 /// Single source of truth for startup log — always includes env.features.

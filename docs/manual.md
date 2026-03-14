@@ -9,15 +9,14 @@ Agent-first cryptocurrency micropayment tool. Single binary, multiple run modes,
 | cli | `afpay <subcommand>` | Single command, exits on completion |
 | pipe | `afpay --mode pipe` | JSONL stdin/stdout long-lived connection |
 | interactive | `afpay --mode interactive` | REPL + Tab completion + QR codes (requires `interactive` feature) |
-| mcp | `afpay --mode mcp` | MCP protocol (AI agent integration) |
 | rpc | `afpay --mode rpc` | Daemon, gRPC + AES-256-GCM PSK encryption |
 | rest | `afpay --mode rest` | HTTP REST API daemon, Bearer token auth (requires `rest` feature) |
 
 ## Global Options
 
 ```
---mode cli|pipe|interactive|mcp|rpc|rest  Run mode (default: cli)
---output json|yaml|plain    Output format (default: json; not supported in mcp mode)
+--mode cli|pipe|interactive|rpc|rest  Run mode (default: cli)
+--output json|yaml|plain    Output format (default: json)
 --data-dir <path>           Data directory (default: ~/.afpay/)
 --log <filters>             Log filters, comma-separated
 --rpc-endpoint <host:port>  Connect to remote daemon (cli mode)
@@ -34,7 +33,9 @@ All send/receive commands use `--amount <value>` (always integer base units) wit
 ```bash
 # cashu/ln/btc — no --token needed, amount is sats
 afpay send --network cashu --amount 100
-afpay receive --network ln --amount 100
+afpay receive --network ln --amount 100       # BOLT11 invoice
+afpay receive --network ln                    # BOLT12 offer (phoenixd only)
+afpay send --network ln --to lno1... --amount 1000  # pay BOLT12 offer
 afpay send --network btc --to <addr> --amount 5000
 
 # sol/evm — --token required
@@ -98,7 +99,7 @@ When `storage_backend = "postgres"`, all data is stored in PostgreSQL — wallet
 | Network | Feature Flag | SDK | Status |
 |---------|-------------|-----|--------|
 | Cashu | `cashu` | CDK 0.15 | Implemented |
-| Lightning | `ln` | phoenixd / LNbits / NWC | Implemented |
+| Lightning | `ln-phoenixd` / `ln-lnbits` / `ln-nwc` | phoenixd (default) / LNbits / NWC | Implemented |
 | Solana | `sol` | Local key + Solana JSON-RPC | Implemented (wallet/transfer/SPL Token) |
 | EVM chain | `evm` | Alloy | Implemented (wallet/transfer/ERC-20 Token) |
 | Bitcoin | `btc-esplora` / `btc-core` / `btc-electrum` | BDK | Implemented (SegWit/Taproot, mainnet/signet, multi-backend) |
@@ -110,7 +111,6 @@ Other features:
 | `redb` (default) | redb, fs2 | Embedded key-value storage |
 | `postgres` (default) | sqlx | PostgreSQL storage backend |
 | `interactive` | rustyline, qrcode | REPL interactive mode |
-| `mcp` (default) | rmcp, schemars | MCP protocol support (rmcp stdio transport) |
 | `rest` | axum, tower-http | HTTP REST API server mode |
 | `exchange-rate` (default) | reqwest | Exchange rate fetching for global-usd-cents limits |
 
@@ -119,7 +119,7 @@ Compile with feature flags:
 ```bash
 cargo build --features cashu              # Cashu only (redb storage)
 cargo build --features cashu,interactive  # Cashu + interactive mode
-cargo build --no-default-features --features postgres,mcp,exchange-rate  # PostgreSQL-only server
+cargo build --no-default-features --features postgres,exchange-rate  # PostgreSQL-only server
 cargo build --no-default-features         # Pure coordinator (no wallet SDK, no local storage)
 ```
 
@@ -178,11 +178,17 @@ afpay send --network cashu --to lnbc1... [--wallet <w>]
 
 ### Lightning Send
 
-Pay a Lightning invoice:
+Pay a Lightning invoice (BOLT11) or BOLT12 offer:
 
 ```bash
+# Pay BOLT11 invoice (amount encoded in invoice)
 afpay send --network ln --to <bolt11_invoice> [--wallet <w>] [--local-memo <text>]
+
+# Pay BOLT12 offer (phoenixd only, --amount required)
+afpay send --network ln --to <bolt12_offer> --amount <sats> [--wallet <w>] [--local-memo <text>]
 ```
+
+BOLT12 offers (`lno1...`) are only supported on the phoenixd backend. The `--amount` flag is required for offers (rejected for BOLT11 invoices, which encode the amount).
 
 ### Solana Send
 
@@ -208,7 +214,7 @@ Amount is in satoshis. Addresses: `bc1p`/`bc1q` (mainnet) or `tb1p`/`tb1q` (sign
 
 - **Sol**: base58, 32-44 chars, rejects `0x` prefix
 - **EVM**: `0x` prefix + 40 hex chars
-- **LN**: `lnbc`/`lntb`/`lnbcrt` prefix (bolt11)
+- **LN**: `lnbc`/`lntb`/`lnbcrt` prefix (BOLT11 invoice) or `lno1` prefix (BOLT12 offer)
 - **BTC**: `bc1`/`tb1` prefix (bech32/bech32m)
 - **--token**: rejects raw contract addresses; use `afpay wallet config token-add` to register first
 
@@ -264,8 +270,14 @@ afpay receive --network cashu --ln-quote-id <quote_id> --wallet <w>
 ### Lightning Receive
 
 ```bash
+# BOLT11 invoice (one-time, amount-specific)
 afpay receive --network ln --amount <sats> [--wallet <w>] [--qr-svg-file]
+
+# BOLT12 offer (persistent, reusable — phoenixd only)
+afpay receive --network ln [--wallet <w>]
 ```
+
+When `--amount` is omitted, returns a reusable BOLT12 offer (`lno1...`) instead of a one-time BOLT11 invoice. BOLT12 offers are only supported on the phoenixd backend.
 
 ### Solana Receive
 
@@ -626,7 +638,9 @@ afpay(demo)> send-to-ln --to lnbc1...  # Withdraw to Lightning invoice
 afpay(demo)> history                   # = history list --wallet <active>
 afpay(demo)> receive-from-ln-claim <quote_id>  # Claim tokens
 afpay(ln-main)> receive 100            # = ln receive --wallet <active> --amount 100
+afpay(ln-main)> receive                # = ln receive --wallet <active> (BOLT12 offer, phoenixd only)
 afpay(ln-main)> send --to lnbc1...     # = ln send --wallet <active> --to lnbc1...
+afpay(ln-main)> send --to lno1... --amount-sats 500  # pay BOLT12 offer (phoenixd only)
 afpay(ln-main)> invoice <transaction_id>  # Query invoice/payment_hash status
 ```
 
@@ -703,6 +717,7 @@ All requests are distinguished by the `code` field:
 {"code":"wallet_close","id":"req_4","wallet":"w_1a2b3c4d"}
 {"code":"balance","id":"req_5","wallet":"w_1a2b3c4d"}
 {"code":"receive","id":"req_6","wallet":"w_1a2b3c4d","amount":{"value":100,"token":"sats"}}
+{"code":"receive","id":"req_6b","wallet":"w_1a2b3c4d","network":"ln"}
 {"code":"receive_claim","id":"req_7","wallet":"w_1a2b3c4d","quote_id":"abc123"}
 {"code":"cashu_send","id":"req_8","amount":{"value":21,"token":"sats"}}
 {"code":"cashu_receive","id":"req_9","token":"cashuBo2F..."}
@@ -732,87 +747,6 @@ Requests are matched to responses via the `id` field. Non-system requests (not p
 ### Shutdown
 
 Send `{"code":"close"}` for graceful shutdown. afpay waits for all in-flight requests to complete (up to 5 second timeout), then outputs the `close` response and exits.
-
----
-
-## MCP Protocol
-
-`--mode mcp` uses the rmcp framework with MCP stdio transport. Each tool dispatches through the same `handler::dispatch()` pipeline as CLI/pipe modes.
-
-### Cashu-specific tools
-
-| Tool | Description |
-|------|-------------|
-| `cashu_wallet_create` | Create a Cashu wallet (`mint_url` required) |
-| `cashu_wallet_list` | List Cashu wallets |
-| `cashu_wallet_close` | Close a zero-balance Cashu wallet |
-| `cashu_balance` | Check Cashu wallet balance |
-| `cashu_receive_from_ln` | Get Lightning invoice to receive into Cashu wallet |
-| `cashu_receive_from_ln_claim` | Claim minted tokens from receive-from-ln quote |
-| `cashu_send` | Send P2P Cashu token (wallet auto-selected if omitted) |
-| `cashu_receive` | Receive a Cashu token (wallet auto-matched from token) |
-| `cashu_send_to_ln` | Send Cashu to Lightning invoice |
-
-### Cross-network tools
-
-| Tool | Description |
-|------|-------------|
-| `wallet_create` | Create a wallet for any network (cashu, sol, evm, btc) |
-| `ln_wallet_create` | Create a Lightning wallet (nwc, phoenixd, lnbits) |
-| `wallet_list` | List all wallets (optional network filter) |
-| `wallet_close` | Close a wallet |
-| `balance` | Check wallet balance (cross-network) |
-| `send` | Send payment to address, invoice, or Lightning address |
-| `receive` | Receive payment — returns address or invoice |
-| `receive_claim` | Claim minted tokens from a receive quote |
-| `wallet_show_seed` | Show wallet seed phrase (mnemonic) |
-| `wallet_restore` | Restore wallet proofs from mint (Cashu only) |
-
-### History tools
-
-| Tool | Description |
-|------|-------------|
-| `history_list` | List transaction history |
-| `history_status` | Check transaction status by ID |
-| `history_update` | Incrementally sync provider history into local store |
-
-### Spend limit tools
-
-| Tool | Description |
-|------|-------------|
-| `limit_add` | Add a spend limit rule |
-| `limit_remove` | Remove a spend limit rule by ID |
-| `limit_list` | List spend limit status |
-| `limit_set` | Set spend limits (replace all existing) |
-
-### Wallet config tools
-
-| Tool | Description |
-|------|-------------|
-| `wallet_config_show` | Show wallet configuration |
-| `wallet_config_set` | Update wallet settings (label, rpc endpoints, chain id) |
-| `wallet_config_token_add` | Register a custom token for balance tracking |
-| `wallet_config_token_remove` | Unregister a custom token |
-
-### Runtime tools
-
-| Tool | Description |
-|------|-------------|
-| `pay_config` | Read or update runtime configuration (limits, log filters) |
-| `version` | Show afpay version and server info |
-
-### Configuration Example (Claude Desktop)
-
-```json
-{
-  "mcpServers": {
-    "afpay": {
-      "command": "afpay",
-      "args": ["--mode", "mcp"]
-    }
-  }
-}
-```
 
 ---
 
@@ -899,15 +833,11 @@ podman compose -f container/docker/compose.yaml up --build   # equivalent
 # RPC mode — for afpay CLI clients
 AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
 AFPAY_MODE=rpc AFPAY_PORT=9400 ./container/apple-container/up.sh
-
-# MCP mode — stdio
-AFPAY_MODE=mcp docker compose -f container/docker/compose.yaml up --build
-AFPAY_MODE=mcp ./container/apple-container/up.sh
 ```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AFPAY_MODE` | `rest` | `rest`, `rpc`, or `mcp` |
+| `AFPAY_MODE` | `rest` | `rest` or `rpc` |
 | `AFPAY_PORT` | `9401` | Listen port (rest/rpc) |
 | `AFPAY_REST_API_KEY` | auto-generated | REST Bearer token |
 | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret |
