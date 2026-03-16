@@ -1156,11 +1156,22 @@ impl SpendLedger {
 
         let quote = self.get_or_fetch_quote(symbol, "USD").await?;
 
-        // Warn if cached quote age exceeds 80% of its TTL.
+        // Block if the quote has fully expired (fetch must have failed silently
+        // in a prior call, or the clock jumped).
+        let now = now_epoch_ms();
+        if quote.expires_at_epoch_ms > 0 && now > quote.expires_at_epoch_ms {
+            return Err(PayError::NetworkError(
+                "exchange-rate quote expired — cannot convert to USD; check exchange_rate sources"
+                    .to_string(),
+            ));
+        }
+
+        // Flag if cached quote age exceeds 80% of its TTL (set on every occurrence
+        // so callers can surface the warning per-request).
         let ttl_ms = quote
             .expires_at_epoch_ms
             .saturating_sub(quote.fetched_at_epoch_ms);
-        let age_ms = now_epoch_ms().saturating_sub(quote.fetched_at_epoch_ms);
+        let age_ms = now.saturating_sub(quote.fetched_at_epoch_ms);
         if ttl_ms > 0 && age_ms > ttl_ms * 4 / 5 {
             self.fx_stale_warned
                 .store(true, std::sync::atomic::Ordering::Relaxed);

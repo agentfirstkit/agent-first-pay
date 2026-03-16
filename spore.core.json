@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/RPC/REST modes",
@@ -10,19 +10,19 @@
     "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
   "mutations": [
-    "Remove MCP mode (--mode mcp) and rmcp/schemars dependencies, simplifying the runtime to REST, RPC, pipe, and interactive modes",
-    "Split monolithic handler.rs (3171 LOC) into handler/ module directory with focused sub-modules (wallet, pay, history, limit, helpers), improving maintainability",
-    "Add dispatch_storage! macro to deduplicate 15 identical match-dispatch patterns in the storage backend layer",
-    "Add with_spend_reserve helper that unifies the reserve-execute-confirm/cancel spend-limit flow and logs cancel/confirm failures instead of silently ignoring them",
-    "Add FX quote staleness warning when exchange rate age exceeds 80% of TTL during USD spend-limit conversion",
-    "Add CommonSendArgs and CommonReceiveArgs shared clap structs to deduplicate CLI arg definitions across all five network subcommands",
-    "Remove ln-nwc and ln-lnbits from default feature flags, reducing default binary size and compile-time dependencies"
+    "Fix timing attack vulnerability in REST API key comparison by using constant-time byte comparison instead of short-circuit string equality",
+    "Replace non-standard EVM key derivation (raw seed bytes) with proper BIP44 m/44'/60'/0'/0/0 hierarchical derivation via alloy MnemonicBuilder, producing addresses compatible with MetaMask and standard wallets",
+    "Add configurable token-bucket rate limiting for REST and RPC endpoints with per-second and max-concurrent controls, preventing DoS via request flooding",
+    "Block spend-limit-gated payments when the cached FX quote has fully expired instead of silently using stale rates, ensuring USD-denominated limits remain accurate",
+    "Fix try_provider macro to continue trying remaining providers after a non-fatal error instead of stopping at the first failure, improving multi-provider resilience",
+    "Unify wallet storage from per-network directories into a single wallets/ directory with one shared catalog, simplifying the data model and removing legacy path compatibility code",
+    "Add sol and evm to default container build features so Docker and Apple container deployments include all supported networks out of the box"
   ],
   "license": "MIT",
   "bonds": [
     {
       "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.AiLLXEv2TsvN9pcW2GyDA9Wt8ytaXpfx4unZMNjgysGx"
+      "uri": "cmn://cmn.dev/b3.BRYrnB2XFLsAu9V5bAYmzh3USmrjQp8fYNbAw17ZLHVz"
     }
   ],
   "tree": {

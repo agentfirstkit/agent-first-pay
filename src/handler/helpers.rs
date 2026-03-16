@@ -8,9 +8,12 @@ use tokio::sync::mpsc;
 
 use super::App;
 
-/// Try each provider until one succeeds. Skips NotImplemented, stops on first real result.
+/// Try each provider until one succeeds. Skips NotImplemented.
+/// On a real error, records it but continues trying remaining providers.
+/// Returns the first success, or the last real error if all fail.
 macro_rules! try_provider {
     ($providers:expr, |$p:ident| $call:expr) => {{
+        let mut _last_err: Option<PayError> = None;
         let mut _result: Option<Result<_, PayError>> = None;
         for _prov in $providers.values() {
             let $p = _prov.as_ref();
@@ -21,14 +24,16 @@ macro_rules! try_provider {
                 }
                 Err(PayError::NotImplemented(_)) => continue,
                 Err(e) => {
-                    _result = Some(Err(e));
-                    break;
+                    _last_err = Some(e);
                 }
             }
         }
         match _result {
             Some(r) => r,
-            None => Err(PayError::NotImplemented("network not enabled".to_string())),
+            None => match _last_err {
+                Some(e) => Err(e),
+                None => Err(PayError::NotImplemented("network not enabled".to_string())),
+            },
         }
     }};
 }

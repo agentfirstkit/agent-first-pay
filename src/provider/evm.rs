@@ -6,7 +6,7 @@ use crate::types::*;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::local::{coins_bip39::English, MnemonicBuilder, PrivateKeySigner};
 use async_trait::async_trait;
 use bip39::Mnemonic;
 use std::collections::{HashMap, HashSet};
@@ -80,21 +80,11 @@ impl EvmProvider {
 
     fn signer_from_mnemonic(mnemonic_str: &str) -> Result<PrivateKeySigner, PayError> {
         // Derive EVM key from BIP39 mnemonic using BIP44 path m/44'/60'/0'/0/0
-        let mnemonic: Mnemonic = mnemonic_str.parse().map_err(|_| {
-            PayError::InternalError(
-                "invalid evm wallet secret: expected BIP39 mnemonic words".to_string(),
-            )
-        })?;
-        let seed = mnemonic.to_seed_normalized("");
-        // Use first 32 bytes of the 64-byte seed as the private key.
-        // For a proper BIP44 derivation we would need an HD wallet library,
-        // but alloy's MnemonicBuilder handles this — however it pulls in
-        // additional deps. For now, derive deterministically from seed bytes.
-        // alloy's local signer supports from_slice for raw private key.
-        let key_bytes: [u8; 32] = seed[..32]
-            .try_into()
-            .map_err(|_| PayError::InternalError("seed too short".to_string()))?;
-        PrivateKeySigner::from_bytes(&key_bytes.into())
+        MnemonicBuilder::<English>::default()
+            .phrase(mnemonic_str)
+            .index(0u32)
+            .map_err(|e| PayError::InternalError(format!("evm derivation index: {e}")))?
+            .build()
             .map_err(|e| PayError::InternalError(format!("build evm signer from mnemonic: {e}")))
     }
 

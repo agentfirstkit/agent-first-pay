@@ -3,7 +3,8 @@ pub mod crypto;
 use crate::handler::{self, App};
 use crate::rpc::crypto::Cipher;
 use crate::types::*;
-use std::sync::atomic::Ordering;
+use std::io::Write;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::Code;
@@ -29,6 +30,106 @@ use proto::{EncryptedRequest, EncryptedResponse};
 struct AfPayService {
     cipher: Cipher,
     config: RuntimeConfig,
+    rate_limiter: Option<RpcRateLimiter>,
+}
+
+/// Simple token-bucket rate limiter for RPC.
+struct RpcRateLimiter {
+    rps: u32,
+    max_concurrent: u32,
+    in_flight: AtomicU32,
+    tokens_milli: AtomicU64,
+    last_refill_ms: AtomicU64,
+}
+
+impl RpcRateLimiter {
+    fn new(config: &RateLimitConfig) -> Self {
+        let rps = config.requests_per_second;
+        Self {
+            rps,
+            max_concurrent: config.max_concurrent,
+            in_flight: AtomicU32::new(0),
+            tokens_milli: AtomicU64::new(u64::from(rps) * 1000),
+            last_refill_ms: AtomicU64::new(rpc_now_ms()),
+        }
+    }
+
+    fn try_acquire(&self) -> Result<RpcRateLimitGuard<'_>, ()> {
+        if self.max_concurrent > 0 {
+            let prev = self.in_flight.fetch_add(1, Ordering::Relaxed);
+            if prev >= self.max_concurrent {
+                self.in_flight.fetch_sub(1, Ordering::Relaxed);
+                return Err(());
+            }
+        }
+        if self.rps > 0 {
+            self.refill();
+            let cost = 1000u64;
+            loop {
+                let current = self.tokens_milli.load(Ordering::Relaxed);
+                if current < cost {
+                    if self.max_concurrent > 0 {
+                        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    return Err(());
+                }
+                if self
+                    .tokens_milli
+                    .compare_exchange_weak(
+                        current,
+                        current - cost,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
+        Ok(RpcRateLimitGuard { limiter: self })
+    }
+
+    fn refill(&self) {
+        let now = rpc_now_ms();
+        let last = self.last_refill_ms.load(Ordering::Relaxed);
+        let elapsed = now.saturating_sub(last);
+        if elapsed == 0 {
+            return;
+        }
+        if self
+            .last_refill_ms
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let add = elapsed * u64::from(self.rps);
+            let max = u64::from(self.rps) * 1000;
+            let _ = self
+                .tokens_milli
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                    Some(c.saturating_add(add).min(max))
+                });
+        }
+    }
+}
+
+struct RpcRateLimitGuard<'a> {
+    limiter: &'a RpcRateLimiter,
+}
+
+impl Drop for RpcRateLimitGuard<'_> {
+    fn drop(&mut self) {
+        if self.limiter.max_concurrent > 0 {
+            self.limiter.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn rpc_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[tonic::async_trait]
@@ -38,6 +139,18 @@ impl AfPay for AfPayService {
         request: Request<EncryptedRequest>,
     ) -> Result<Response<EncryptedResponse>, Status> {
         let req = request.into_inner();
+
+        // Rate limit check
+        let _rate_guard = if let Some(rl) = &self.rate_limiter {
+            match rl.try_acquire() {
+                Ok(guard) => Some(guard),
+                Err(()) => {
+                    return Err(Status::resource_exhausted("rate limit exceeded"));
+                }
+            }
+        } else {
+            None
+        };
 
         // Decrypt request
         let plaintext = match self.cipher.decrypt(&req.nonce, &req.ciphertext) {
@@ -116,7 +229,7 @@ impl AfPay for AfPayService {
                     &serde_json::to_value(&out).unwrap_or(serde_json::Value::Null),
                     agent_first_data::OutputFormat::Json,
                 );
-                println!("{rendered}");
+                let _ = writeln!(std::io::stdout(), "{rendered}");
             }
             let value = serde_json::to_value(&out).unwrap_or(serde_json::Value::Null);
             outputs.push(value);
@@ -158,7 +271,7 @@ pub async fn run_rpc(init: RpcInit) {
             );
             let rendered =
                 agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
-            println!("{rendered}");
+            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -174,7 +287,7 @@ pub async fn run_rpc(init: RpcInit) {
             let value = agent_first_data::build_cli_error(&e, None);
             let rendered =
                 agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
-            println!("{rendered}");
+            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -192,20 +305,25 @@ pub async fn run_rpc(init: RpcInit) {
     ) {
         let value = serde_json::to_value(&startup).unwrap_or(serde_json::Value::Null);
         let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
-        println!("{rendered}");
+        let _ = writeln!(std::io::stdout(), "{rendered}");
     }
 
     let startup_errors = crate::handler::startup_provider_validation_errors(&config).await;
     for error_output in &startup_errors {
         let value = serde_json::to_value(error_output).unwrap_or(serde_json::Value::Null);
         let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
-        println!("{rendered}");
+        let _ = writeln!(std::io::stdout(), "{rendered}");
     }
     if !startup_errors.is_empty() {
         std::process::exit(1);
     }
 
-    let service = AfPayService { cipher, config };
+    let rate_limiter = config.rate_limit.as_ref().map(RpcRateLimiter::new);
+    let service = AfPayService {
+        cipher,
+        config,
+        rate_limiter,
+    };
 
     let addr = match init.listen.parse() {
         Ok(a) => a,
@@ -216,7 +334,7 @@ pub async fn run_rpc(init: RpcInit) {
             );
             let rendered =
                 agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
-            println!("{rendered}");
+            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -228,7 +346,7 @@ pub async fn run_rpc(init: RpcInit) {
     if let Err(e) = server.await {
         let value = agent_first_data::build_cli_error(&format!("RPC server error: {e}"), None);
         let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
-        println!("{rendered}");
+        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
 }
@@ -302,7 +420,7 @@ fn emit_rpc_log(
         &serde_json::to_value(&log).unwrap_or(serde_json::Value::Null),
         agent_first_data::OutputFormat::Json,
     );
-    println!("{rendered}");
+    let _ = writeln!(std::io::stdout(), "{rendered}");
 }
 
 fn grpc_code_name(code: Code) -> &'static str {

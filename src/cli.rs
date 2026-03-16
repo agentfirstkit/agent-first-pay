@@ -5,6 +5,7 @@ use crate::types::*;
 use agent_first_data::OutputFormat;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
+use std::io::Write;
 
 // ═══════════════════════════════════════════
 // Mode Dispatch Types
@@ -1105,7 +1106,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
         Err(e) => {
             use clap::error::ErrorKind;
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
-                println!("{e}");
+                let _ = writeln!(std::io::stdout(), "{e}");
                 std::process::exit(0);
             }
             return Err(e.to_string().into());

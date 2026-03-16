@@ -966,6 +966,9 @@ pub struct RuntimeConfig {
     /// PostgreSQL connection URL (used when storage_backend = "postgres").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postgres_url_secret: Option<String>,
+    /// Rate limiting for REST/RPC endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 impl Default for RuntimeConfig {
@@ -981,6 +984,7 @@ impl Default for RuntimeConfig {
             providers: std::collections::HashMap::new(),
             storage_backend: None,
             postgres_url_secret: None,
+            rate_limit: None,
         }
     }
 }
@@ -1038,6 +1042,40 @@ pub enum ExchangeRateSourceType {
     Generic,
     CoinGecko,
     Kraken,
+}
+
+/// Rate limiting configuration for REST/RPC endpoints.
+///
+/// ```toml
+/// [rate_limit]
+/// requests_per_second = 20
+/// max_concurrent = 50
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum requests per second (token-bucket refill rate). 0 = unlimited.
+    #[serde(default = "default_rate_limit_rps")]
+    pub requests_per_second: u32,
+    /// Maximum concurrent in-flight requests. 0 = unlimited.
+    #[serde(default = "default_rate_limit_concurrent")]
+    pub max_concurrent: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_second: default_rate_limit_rps(),
+            max_concurrent: default_rate_limit_concurrent(),
+        }
+    }
+}
+
+fn default_rate_limit_rps() -> u32 {
+    20
+}
+
+fn default_rate_limit_concurrent() -> u32 {
+    50
 }
 
 fn default_exchange_rate_ttl_s() -> u64 {

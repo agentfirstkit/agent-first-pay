@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-pay"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin on-chain), send/receive, spend limits, REST/RPC modes"
 license = "MIT"
@@ -85,7 +85,7 @@ solana-system-interface = { version = "3.1", features = ["wincode"], optional = 
 base64 = { version = "0.22", optional = true }
 wincode = { version = "0.4", optional = true }
 
-alloy = { version = "1.7", default-features = false, features = ["provider-http", "signers", "signer-local", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
+alloy = { version = "1.7", default-features = false, features = ["provider-http", "signers", "signer-local", "signer-mnemonic", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
 bdk_wallet = { version = "2", default-features = false, features = ["std", "keys-bip39"], optional = true }
 bdk_esplora = { version = "0.22", default-features = false, features = ["async-https-rustls", "tokio"], optional = true }
 bdk_bitcoind_rpc = { version = "0.22", optional = true }

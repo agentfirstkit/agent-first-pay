@@ -2,6 +2,7 @@ use crate::rpc::crypto::Cipher;
 use crate::rpc::proto::af_pay_client::AfPayClient;
 use crate::rpc::proto::EncryptedRequest;
 use agent_first_data::OutputFormat;
+use std::io::Write;
 
 /// Send an Input to a remote RPC server, return the decrypted Output array.
 pub async fn rpc_call(
@@ -98,7 +99,7 @@ pub fn require_remote_args<'a>(
                 Some("pass the address of the afpay daemon"),
             );
             let rendered = agent_first_data::cli_output(&value, format);
-            println!("{rendered}");
+            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -110,7 +111,7 @@ pub fn require_remote_args<'a>(
                 Some("must match the --rpc-secret used by the daemon"),
             );
             let rendered = agent_first_data::cli_output(&value, format);
-            println!("{rendered}");
+            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -136,7 +137,7 @@ pub fn emit_remote_outputs(
             }
         }
         let rendered = crate::output_fmt::render_value_with_policy(value, format);
-        println!("{rendered}");
+        let _ = writeln!(std::io::stdout(), "{rendered}");
     }
     had_error
 }

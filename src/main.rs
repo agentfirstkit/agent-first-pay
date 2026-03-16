@@ -4,9 +4,8 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
+        clippy::print_stdout,
         clippy::print_stderr,
-        clippy::disallowed_methods,
-        clippy::disallowed_macros
     )
 )]
 
@@ -29,6 +28,7 @@ use agent_first_data::OutputFormat;
 use cli::Mode;
 use handler::App;
 use provider::remote;
+use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
@@ -348,7 +348,7 @@ fn emit_cli_error(msg: &str, format: OutputFormat) {
 fn emit_cli_error_hint(msg: &str, hint: Option<&str>, format: OutputFormat) {
     let value = agent_first_data::build_cli_error(msg, hint);
     let rendered = agent_first_data::cli_output(&value, format);
-    println!("{rendered}");
+    let _ = writeln!(std::io::stdout(), "{rendered}");
 }
 
 fn log_event_enabled(log: &[String], event: &str) -> bool {
@@ -363,7 +363,7 @@ fn log_event_enabled(log: &[String], event: &str) -> bool {
 fn emit_output(out: &Output, format: OutputFormat) {
     let value = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
     let rendered = output_fmt::render_value_with_policy(&value, format);
-    println!("{rendered}");
+    let _ = writeln!(std::io::stdout(), "{rendered}");
 }
 
 fn request_id_for_tracking(input: &Input) -> Option<&str> {

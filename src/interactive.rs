@@ -11,6 +11,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Editor, Helper};
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -683,7 +684,7 @@ fn write_qr_svg_file(data_dir: &str, kind: &str, payload: &str) -> Result<String
 fn emit(output: &Output, format: OutputFormat) {
     let value = serde_json::to_value(output).unwrap_or(serde_json::Value::Null);
     let text = crate::output_fmt::render_value_with_policy(&value, format);
-    println!("{text}");
+    let _ = writeln!(std::io::stdout(), "{text}");
 }
 
 fn log_matches(filters: &[String], event: &str) -> bool {
@@ -708,8 +709,11 @@ fn confirm_send(wallet: &str, amount: u64, to: &str) -> bool {
     } else {
         to.to_string()
     };
-    println!("  Send {amount} sats from {wallet} to {target}");
-    print!("  Confirm? [y/N]> ");
+    let _ = writeln!(
+        std::io::stdout(),
+        "  Send {amount} sats from {wallet} to {target}"
+    );
+    let _ = write!(std::io::stdout(), "  Confirm? [y/N]> ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut buf = String::new();
@@ -721,11 +725,17 @@ fn confirm_send(wallet: &str, amount: u64, to: &str) -> bool {
 
 fn confirm_send_with_fee(wallet: &str, amount: u64, fee: u64, fee_unit: &str) -> bool {
     let total = amount + fee;
-    println!("  Send {amount} {fee_unit} from {wallet} as P2P cashu token");
+    let _ = writeln!(
+        std::io::stdout(),
+        "  Send {amount} {fee_unit} from {wallet} as P2P cashu token"
+    );
     if fee > 0 {
-        println!("  Fee: {fee} {fee_unit}  (total: {total} {fee_unit})");
+        let _ = writeln!(
+            std::io::stdout(),
+            "  Fee: {fee} {fee_unit}  (total: {total} {fee_unit})"
+        );
     }
-    print!("  Confirm? [y/N]> ");
+    let _ = write!(std::io::stdout(), "  Confirm? [y/N]> ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut buf = String::new();
@@ -748,9 +758,15 @@ fn confirm_withdraw(
         to.to_string()
     };
     let total = amount + fee_estimate;
-    println!("  Pay {amount} {fee_unit} from {wallet} to {target}");
-    println!("  Fee estimate: {fee_estimate} {fee_unit}  (total: {total} {fee_unit})");
-    print!("  Confirm? [y/N]> ");
+    let _ = writeln!(
+        std::io::stdout(),
+        "  Pay {amount} {fee_unit} from {wallet} to {target}"
+    );
+    let _ = writeln!(
+        std::io::stdout(),
+        "  Fee estimate: {fee_estimate} {fee_unit}  (total: {total} {fee_unit})"
+    );
+    let _ = write!(std::io::stdout(), "  Confirm? [y/N]> ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut buf = String::new();
@@ -774,7 +790,10 @@ async fn deposit_follow_up(
     request_id: &str,
     render: OutputRenderContext<'_>,
 ) {
-    println!("Pay the invoice above, then press Enter to claim (or type 'skip')...");
+    let _ = writeln!(
+        std::io::stdout(),
+        "Pay the invoice above, then press Enter to claim (or type 'skip')..."
+    );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut buf = String::new();
@@ -783,7 +802,8 @@ async fn deposit_follow_up(
     }
     let trimmed = buf.trim();
     if trimmed == "skip" || trimmed == "s" {
-        println!(
+        let _ = writeln!(
+            std::io::stdout(),
             "Skipped. To claim later: receive --network cashu --wallet {wallet} --ln-quote-id {quote_id}"
         );
         return;
@@ -899,7 +919,8 @@ fn emit_qr_saved_message(
             "trace": {"duration_ms": 0},
         }),
     };
-    println!(
+    let _ = writeln!(
+        std::io::stdout(),
         "{}",
         crate::output_fmt::render_value_with_policy(&value, output_format)
     );
@@ -920,7 +941,8 @@ fn emit_remote_outputs_with_qr(
                 }
             }
         }
-        println!(
+        let _ = writeln!(
+            std::io::stdout(),
             "{}",
             crate::output_fmt::render_value_with_policy(value, format)
         );
@@ -956,10 +978,15 @@ fn wallet_deposit_qr_payload(
 // ═══════════════════════════════════════════
 
 fn print_help() {
-    print!("{}", crate::cli::subcommand_help(&["--help"]));
-    println!();
+    let _ = write!(
+        std::io::stdout(),
+        "{}",
+        crate::cli::subcommand_help(&["--help"])
+    );
+    let _ = writeln!(std::io::stdout());
 
-    println!(
+    let _ = writeln!(
+        std::io::stdout(),
         "\
 Session:
   use <wallet_id|label>       Set active wallet (auto-injects --wallet)
@@ -1001,7 +1028,7 @@ pub async fn run_interactive(init: InteractiveInit) {
     let mut config = match RuntimeConfig::load_from_dir(&resolved_dir) {
         Ok(c) => c,
         Err(e) => {
-            println!("config error: {e}");
+            let _ = writeln!(std::io::stdout(), "config error: {e}");
             return;
         }
     };
@@ -1051,7 +1078,7 @@ pub async fn run_interactive(init: InteractiveInit) {
     let mut rl = match Editor::new() {
         Ok(editor) => editor,
         Err(e) => {
-            println!("Failed to initialize editor: {e}");
+            let _ = writeln!(std::io::stdout(), "Failed to initialize editor: {e}");
             return;
         }
     };
@@ -1060,8 +1087,11 @@ pub async fn run_interactive(init: InteractiveInit) {
     let history_path = format!("{data_dir_owned}/.afpay_history");
     let _ = rl.load_history(&history_path);
 
-    println!("afpay v{VERSION} interactive mode");
-    println!("Type 'help' for commands, Tab for completion, Ctrl-D to exit.\n");
+    let _ = writeln!(std::io::stdout(), "afpay v{VERSION} interactive mode");
+    let _ = writeln!(
+        std::io::stdout(),
+        "Type 'help' for commands, Tab for completion, Ctrl-D to exit.\n"
+    );
 
     loop {
         let prompt = state.prompt();
@@ -1078,7 +1108,7 @@ pub async fn run_interactive(init: InteractiveInit) {
                     Ok(c) => c,
                     Err(e) => {
                         if !e.is_empty() {
-                            println!("{e}");
+                            let _ = writeln!(std::io::stdout(), "{e}");
                         }
                         continue;
                     }
@@ -1150,7 +1180,8 @@ pub async fn run_interactive(init: InteractiveInit) {
                                         }
                                     }
                                     if !got_quote {
-                                        println!(
+                                        let _ = writeln!(
+                                            std::io::stdout(),
                                             "  Could not get melt quote; skipping confirmation."
                                         );
                                         true
@@ -1161,7 +1192,7 @@ pub async fn run_interactive(init: InteractiveInit) {
                                 _ => true,
                             };
                             if !confirmed {
-                                println!("Cancelled.");
+                                let _ = writeln!(std::io::stdout(), "Cancelled.");
                                 continue;
                             }
                         }
@@ -1241,7 +1272,7 @@ pub async fn run_interactive(init: InteractiveInit) {
                 break;
             }
             Err(e) => {
-                println!("Read error: {e}");
+                let _ = writeln!(std::io::stdout(), "Read error: {e}");
                 break;
             }
         }
@@ -1250,7 +1281,7 @@ pub async fn run_interactive(init: InteractiveInit) {
     // Save history (ensure data dir exists)
     let _ = std::fs::create_dir_all(&data_dir_owned);
     let _ = rl.save_history(&history_path);
-    println!("Goodbye.");
+    let _ = writeln!(std::io::stdout(), "Goodbye.");
 }
 
 fn handle_session_command(state: &mut ReplState, name: &str, args: &[String]) {
@@ -1258,38 +1289,42 @@ fn handle_session_command(state: &mut ReplState, name: &str, args: &[String]) {
         "output" => match args.first().map(|s| s.as_str()) {
             Some("json") => {
                 state.output_format = OutputFormat::Json;
-                println!("Output: json");
+                let _ = writeln!(std::io::stdout(), "Output: json");
             }
             Some("yaml") => {
                 state.output_format = OutputFormat::Yaml;
-                println!("Output: yaml");
+                let _ = writeln!(std::io::stdout(), "Output: yaml");
             }
             Some("plain") => {
                 state.output_format = OutputFormat::Plain;
-                println!("Output: plain");
+                let _ = writeln!(std::io::stdout(), "Output: plain");
             }
-            _ => println!(
-                "Output: {:?}. Usage: output <json|yaml|plain>",
-                state.output_format
-            ),
+            _ => {
+                let _ = writeln!(
+                    std::io::stdout(),
+                    "Output: {:?}. Usage: output <json|yaml|plain>",
+                    state.output_format
+                );
+            }
         },
         "log" => {
             if args.is_empty() {
                 if state.log_filters.is_empty() {
-                    println!(
+                    let _ = writeln!(
+                        std::io::stdout(),
                         "Log: off. Usage: log <filters...> (e.g. log startup,cashu) or log off"
                     );
                 } else {
-                    println!("Log: {}", state.log_filters.join(","));
+                    let _ = writeln!(std::io::stdout(), "Log: {}", state.log_filters.join(","));
                 }
             } else if args.len() == 1 && args[0] == "off" {
                 state.log_filters.clear();
-                println!("Log: off");
+                let _ = writeln!(std::io::stdout(), "Log: off");
             } else {
                 let joined: Vec<&str> = args.iter().flat_map(|a| a.split(',')).collect();
                 let as_strings: Vec<String> = joined.iter().map(|s| s.to_string()).collect();
                 state.log_filters = agent_first_data::cli_parse_log_filters(&as_strings);
-                println!("Log: {}", state.log_filters.join(","));
+                let _ = writeln!(std::io::stdout(), "Log: {}", state.log_filters.join(","));
             }
         }
         _ => {}
@@ -1301,12 +1336,12 @@ fn resolve_use(state: &mut ReplState, target: &str) {
         state.active_wallet = None;
         state.active_label = None;
         state.active_network = None;
-        println!("Cleared active wallet.");
+        let _ = writeln!(std::io::stdout(), "Cleared active wallet.");
         return;
     }
 
     let Some(store) = &state.store else {
-        println!("No storage backend available.");
+        let _ = writeln!(std::io::stdout(), "No storage backend available.");
         return;
     };
     let wallets_result = store.list_wallet_metadata(None);
@@ -1323,27 +1358,29 @@ fn resolve_use(state: &mut ReplState, target: &str) {
                         .as_deref()
                         .map(|l| format!(" ({l})"))
                         .unwrap_or_default();
-                    println!("Active wallet: {}{label_display}", w.id);
+                    let _ = writeln!(std::io::stdout(), "Active wallet: {}{label_display}", w.id);
                     return;
                 }
                 if w.label.as_deref() == Some(target) {
                     state.active_wallet = Some(w.id.clone());
                     state.active_label = Some(target.to_string());
                     state.active_network = Some(w.network);
-                    println!("Active wallet: {} ({target})", w.id);
+                    let _ = writeln!(std::io::stdout(), "Active wallet: {} ({target})", w.id);
                     return;
                 }
             }
-            println!("Wallet not found: {target}");
+            let _ = writeln!(std::io::stdout(), "Wallet not found: {target}");
             if !wallets.is_empty() {
-                println!("Available:");
+                let _ = writeln!(std::io::stdout(), "Available:");
                 for w in &wallets {
                     let label = w.label.as_deref().unwrap_or("-");
-                    println!("  {} ({label})", w.id);
+                    let _ = writeln!(std::io::stdout(), "  {} ({label})", w.id);
                 }
             }
         }
-        Err(e) => println!("Error listing wallets: {e}"),
+        Err(e) => {
+            let _ = writeln!(std::io::stdout(), "Error listing wallets: {e}");
+        }
     }
 }
 
@@ -1367,7 +1404,7 @@ async fn run_interactive_remote(
     let mut local_config = match RuntimeConfig::load_from_dir(&resolved_dir) {
         Ok(c) => c,
         Err(e) => {
-            println!("config error: {e}");
+            let _ = writeln!(std::io::stdout(), "config error: {e}");
             return;
         }
     };
@@ -1388,7 +1425,7 @@ async fn run_interactive_remote(
     let mut rl = match Editor::new() {
         Ok(editor) => editor,
         Err(e) => {
-            println!("Failed to initialize editor: {e}");
+            let _ = writeln!(std::io::stdout(), "Failed to initialize editor: {e}");
             return;
         }
     };
@@ -1451,8 +1488,14 @@ async fn run_interactive_remote(
         }
     }
 
-    println!("afpay v{VERSION} interactive mode (remote: {endpoint})");
-    println!("Type 'help' for commands, Tab for completion, Ctrl-D to exit.\n");
+    let _ = writeln!(
+        std::io::stdout(),
+        "afpay v{VERSION} interactive mode (remote: {endpoint})"
+    );
+    let _ = writeln!(
+        std::io::stdout(),
+        "Type 'help' for commands, Tab for completion, Ctrl-D to exit.\n"
+    );
 
     loop {
         let prompt = state.prompt();
@@ -1469,7 +1512,7 @@ async fn run_interactive_remote(
                     Ok(c) => c,
                     Err(e) => {
                         if !e.is_empty() {
-                            println!("{e}");
+                            let _ = writeln!(std::io::stdout(), "{e}");
                         }
                         continue;
                     }
@@ -1483,7 +1526,7 @@ async fn run_interactive_remote(
                             state.active_wallet = None;
                             state.active_label = None;
                             state.active_network = None;
-                            println!("Cleared active wallet.");
+                            let _ = writeln!(std::io::stdout(), "Cleared active wallet.");
                         } else {
                             // In remote mode, resolve `use` via wallet_list RPC
                             let list_input = Input::WalletList {
@@ -1525,7 +1568,10 @@ async fn run_interactive_remote(
                                             let label_display = wlabel
                                                 .map(|l| format!(" ({l})"))
                                                 .unwrap_or_default();
-                                            println!("Active wallet: {wid}{label_display}");
+                                            let _ = writeln!(
+                                                std::io::stdout(),
+                                                "Active wallet: {wid}{label_display}"
+                                            );
                                             found = true;
                                             break;
                                         }
@@ -1540,7 +1586,7 @@ async fn run_interactive_remote(
                                     v.get("code").and_then(|v| v.as_str()) == Some("error")
                                 })
                             {
-                                println!("Wallet not found: {target}");
+                                let _ = writeln!(std::io::stdout(), "Wallet not found: {target}");
                             }
                         }
                     }
@@ -1569,11 +1615,11 @@ async fn run_interactive_remote(
             }
             Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
             Err(e) => {
-                println!("Read error: {e}");
+                let _ = writeln!(std::io::stdout(), "Read error: {e}");
                 break;
             }
         }
     }
 
-    println!("Goodbye.");
+    let _ = writeln!(std::io::stdout(), "Goodbye.");
 }
