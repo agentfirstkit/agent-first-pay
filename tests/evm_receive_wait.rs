@@ -63,6 +63,7 @@ impl MockEvmWaitProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: None,
             fee: None,
+            reference_keys: None,
         }
     }
 }
@@ -273,6 +274,7 @@ async fn evm_receive_wait_matches_onchain_memo() {
             wait_sync_limit: None,
             write_qr_svg_file: false,
             min_confirmations: None,
+            reference: None,
         },
     )
     .await;
@@ -366,6 +368,7 @@ async fn evm_receive_wait_emits_chain_transaction_id() {
             wait_sync_limit: None,
             write_qr_svg_file: false,
             min_confirmations: None,
+            reference: None,
         },
     )
     .await;

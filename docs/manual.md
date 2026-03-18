@@ -193,7 +193,7 @@ BOLT12 offers (`lno1...`) are only supported on the phoenixd backend. The `--amo
 ### Solana Send
 
 ```bash
-afpay send --network sol --to <address> --token <native|usdc|usdt|mint_addr> --amount <u64> [--wallet <w>] [--onchain-memo <text>]
+afpay send --network sol --to <address> --token <native|usdc|usdt|mint_addr> --amount <u64> [--wallet <w>] [--onchain-memo <text>] [--reference <base58>]
 ```
 
 ### EVM Send
@@ -282,10 +282,10 @@ When `--amount` is omitted, returns a reusable BOLT12 offer (`lno1...`) instead 
 ### Solana Receive
 
 ```bash
-afpay receive --network sol [--wallet <w>] --token <native|usdc|symbol> [--wait [--onchain-memo <text> | --amount <n>]] [--wait-timeout-s <s>] [--wait-poll-interval-ms <ms>] [--min-confirmations <n>]
+afpay receive --network sol [--wallet <w>] --token <native|usdc|symbol> [--wait [--onchain-memo <text> | --amount <n> | --reference <base58>]] [--wait-timeout-s <s>] [--wait-poll-interval-ms <ms>] [--min-confirmations <n>]
 ```
 
-With `--wait`, must provide `--onchain-memo` or `--amount` to match incoming transactions. Use `--min-confirmations <n>` to require a minimum confirmation depth before considering the payment settled (e.g. `--min-confirmations 32` for finalized on Solana).
+With `--wait`, must provide at least one of `--onchain-memo`, `--amount`, or `--reference` to match incoming transactions. `--reference` matches transactions that include the given base58-encoded public key as a read-only account on the transfer instruction (per `strain-payment-method-solana` convention). Match conditions can be combined — e.g. `--reference <key> --amount <n>` requires both to match. Use `--min-confirmations <n>` to require a minimum confirmation depth before considering the payment settled (e.g. `--min-confirmations 32` for finalized on Solana).
 
 ### EVM Receive
 

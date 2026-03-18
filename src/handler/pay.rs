@@ -145,6 +145,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
             wait_sync_limit,
             write_qr_svg_file: _,
             min_confirmations,
+            reference,
         } => {
             let start = Instant::now();
             let wait_requested = wait_until_paid
@@ -296,8 +297,12 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                             .filter(|text| !text.is_empty())
                             .map(str::to_owned);
                         let amount_to_watch = amount.as_ref().map(|a| a.value);
+                        let reference_to_watch = reference.clone();
 
-                        if memo_to_watch.is_none() && amount_to_watch.is_none() {
+                        if memo_to_watch.is_none()
+                            && amount_to_watch.is_none()
+                            && reference_to_watch.is_none()
+                        {
                             emit_error_hint(
                                 &app.writer,
                                 Some(id),
@@ -305,7 +310,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                     "sol receive --wait requires a match condition".to_string(),
                                 ),
                                 start,
-                                Some("pass --onchain-memo or --amount"),
+                                Some("pass --onchain-memo, --amount, or --reference"),
                             )
                             .await;
                             return;
@@ -319,12 +324,21 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                         if item.direction != Direction::Receive {
                                             return false;
                                         }
+                                        if let Some(ref r) = reference_to_watch {
+                                            let has_ref = item
+                                                .reference_keys
+                                                .as_ref()
+                                                .is_some_and(|keys| keys.iter().any(|k| k == r));
+                                            if !has_ref {
+                                                return false;
+                                            }
+                                        }
                                         if let Some(ref m) = memo_to_watch {
                                             item.onchain_memo.as_deref() == Some(m.as_str())
                                         } else if let Some(expected) = amount_to_watch {
                                             item.amount.value == expected
                                         } else {
-                                            false
+                                            reference_to_watch.is_some()
                                         }
                                     });
                                     if let Some(item) = matched {
@@ -353,11 +367,16 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                                                 memo_to_watch
                                                             {
                                                                 format!("memo '{m}'")
+                                                            } else if let Some(expected) =
+                                                                amount_to_watch
+                                                            {
+                                                                format!("amount {expected}")
+                                                            } else if let Some(ref r) =
+                                                                reference_to_watch
+                                                            {
+                                                                format!("reference '{r}'")
                                                             } else {
-                                                                format!(
-                                                                    "amount {}",
-                                                                    amount_to_watch.unwrap_or(0)
-                                                                )
+                                                                "unknown".to_string()
                                                             };
                                                             emit_error(
                                                                 &app.writer,
@@ -425,8 +444,12 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                     if Instant::now() >= deadline {
                                         let criteria = if let Some(ref m) = memo_to_watch {
                                             format!("memo '{m}'")
+                                        } else if let Some(expected) = amount_to_watch {
+                                            format!("amount {expected}")
+                                        } else if let Some(ref r) = reference_to_watch {
+                                            format!("reference '{r}'")
                                         } else {
-                                            format!("amount {}", amount_to_watch.unwrap_or(0))
+                                            "unknown".to_string()
                                         };
                                         emit_error(
                                             &app.writer,
@@ -445,8 +468,12 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                     if Instant::now() >= deadline {
                                         let criteria = if let Some(ref m) = memo_to_watch {
                                             format!("memo '{m}'")
+                                        } else if let Some(expected) = amount_to_watch {
+                                            format!("amount {expected}")
+                                        } else if let Some(ref r) = reference_to_watch {
+                                            format!("reference '{r}'")
                                         } else {
-                                            format!("amount {}", amount_to_watch.unwrap_or(0))
+                                            "unknown".to_string()
                                         };
                                         emit_error(
                                             &app.writer,

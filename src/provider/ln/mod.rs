@@ -516,6 +516,7 @@ impl PayProvider for LnProvider {
                         created_at_epoch_s: now,
                         confirmed_at_epoch_s: Some(now),
                         fee: None,
+                        reference_keys: None,
                     };
                     let _ = self.store.append_transaction_record(&record);
                 }
@@ -644,6 +645,7 @@ impl PayProvider for LnProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -698,6 +700,7 @@ impl PayProvider for LnProvider {
                             None
                         },
                         fee: None,
+                        reference_keys: None,
                     })
                     .collect());
             }
@@ -795,6 +798,7 @@ impl PayProvider for LnProvider {
                                     None
                                 },
                                 fee: None,
+                                reference_keys: None,
                             };
                             return Ok(HistoryStatusInfo {
                                 transaction_id: transaction_id.to_string(),
@@ -879,6 +883,7 @@ impl PayProvider for LnProvider {
                         created_at_epoch_s: payment.created_at_epoch_s,
                         confirmed_at_epoch_s,
                         fee: None,
+                        reference_keys: None,
                     };
                     let _ = self.store.append_transaction_record(&record);
                     stats.records_added = stats.records_added.saturating_add(1);

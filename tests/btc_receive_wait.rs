@@ -48,6 +48,7 @@ impl MockBtcWaitProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: None,
             fee: None,
+            reference_keys: None,
         }
     }
 }
@@ -234,6 +235,7 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
             wait_sync_limit: None,
             write_qr_svg_file: false,
             min_confirmations: None,
+            reference: None,
         },
     )
     .await;

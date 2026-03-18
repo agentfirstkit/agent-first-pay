@@ -823,6 +823,7 @@ impl EvmProvider {
                     created_at_epoch_s: block_timestamp,
                     confirmed_at_epoch_s: Some(block_timestamp),
                     fee: None,
+                    reference_keys: None,
                 };
                 let _ = self.store.append_transaction_record(&record);
                 known_txids.insert(tx_hash);
@@ -923,6 +924,7 @@ impl EvmProvider {
                     created_at_epoch_s: block_timestamp,
                     confirmed_at_epoch_s: Some(block_timestamp),
                     fee: None,
+                    reference_keys: None,
                 };
                 let _ = self.store.append_transaction_record(&record);
                 known_txids.insert(tx_hash);
@@ -1493,6 +1495,7 @@ impl PayProvider for EvmProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: None,
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&history);
 

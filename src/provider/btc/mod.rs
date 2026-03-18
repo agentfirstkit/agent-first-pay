@@ -530,6 +530,7 @@ impl PayProvider for BtcProvider {
                 value: f,
                 token: "sats".to_string(),
             }),
+            reference_keys: None,
         };
 
         let _ = self.store.append_transaction_record(&record);
@@ -772,6 +773,7 @@ impl PayProvider for BtcProvider {
                     value,
                     token: "sats".to_string(),
                 }),
+                reference_keys: None,
             };
             let _ = self.store.append_transaction_record(&record);
             local_by_chain_txid.insert(chain_txid, record);

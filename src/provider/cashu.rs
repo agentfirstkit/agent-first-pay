@@ -493,6 +493,7 @@ impl PayProvider for CashuProvider {
                 created_at_epoch_s: now,
                 confirmed_at_epoch_s: Some(now),
                 fee: None,
+                reference_keys: None,
             };
             let _ = self.store.append_transaction_record(&record);
         }
@@ -617,6 +618,7 @@ impl PayProvider for CashuProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -720,6 +722,7 @@ impl PayProvider for CashuProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: None,
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -820,6 +823,7 @@ impl PayProvider for CashuProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 

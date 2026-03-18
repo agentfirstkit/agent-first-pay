@@ -440,6 +440,7 @@ mod tests {
             created_at_epoch_s: 1700000000,
             confirmed_at_epoch_s: Some(1700000001),
             fee: None,
+            reference_keys: None,
         }
     }
 

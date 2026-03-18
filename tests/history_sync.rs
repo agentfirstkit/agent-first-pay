@@ -263,6 +263,7 @@ async fn history_list_reads_only_local_store() {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: None,
+            reference_keys: None,
         })
         .expect("append transaction");
 

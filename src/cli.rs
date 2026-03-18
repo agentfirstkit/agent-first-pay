@@ -280,6 +280,9 @@ enum PayCommand {
         /// Restrict to wallets on these mint URLs (cashu only)
         #[arg(long = "cashu-mint")]
         cashu_mint: Vec<String>,
+        /// Reference key for order binding (base58, sol only, per strain-payment-method-solana)
+        #[arg(long)]
+        reference: Option<String>,
     },
     /// Receive payment (unified, network-aware)
     Receive {
@@ -322,6 +325,9 @@ enum PayCommand {
         /// Minimum confirmation depth before considering payment settled (sol/evm only, requires --wait)
         #[arg(long = "min-confirmations")]
         min_confirmations: Option<u32>,
+        /// Reference key to watch for (base58, sol only, per strain-payment-method-solana)
+        #[arg(long)]
+        reference: Option<String>,
     },
 }
 
@@ -501,6 +507,9 @@ enum SolCommand {
         /// Token: "native" for SOL, "usdc", "usdt", or SPL mint address
         #[arg(long)]
         token: String,
+        /// Reference key for order binding (base58-encoded 32 bytes, per strain-payment-method-solana)
+        #[arg(long)]
+        reference: Option<String>,
     },
     /// Show wallet receive address
     #[command(name = "receive", hide = true)]
@@ -513,6 +522,9 @@ enum SolCommand {
         /// Minimum confirmation depth before considering payment settled (requires --wait)
         #[arg(long = "min-confirmations")]
         min_confirmations: Option<u32>,
+        /// Reference key to watch for (base58, used with --wait, per strain-payment-method-solana)
+        #[arg(long)]
+        reference: Option<String>,
     },
     /// Check balance
     #[command(hide = true)]
@@ -1278,6 +1290,7 @@ fn unified_send_to_input(
     onchain_memo: Option<String>,
     local_memo: Vec<(String, String)>,
     mint_url: Vec<String>,
+    reference: Option<String>,
     id: &str,
 ) -> Result<Input, String> {
     let local_memo = memo_vec_to_map(local_memo);
@@ -1322,6 +1335,9 @@ fn unified_send_to_input(
     };
     match network {
         CliNetwork::Cashu => {
+            if reference.is_some() {
+                return Err("--reference is only supported for sol".into());
+            }
             if token.is_some() {
                 return Err("--token is not supported for cashu; cashu operates in sats".into());
             }
@@ -1367,6 +1383,9 @@ fn unified_send_to_input(
             }
         }
         CliNetwork::Ln => {
+            if reference.is_some() {
+                return Err("--reference is only supported for sol".into());
+            }
             if token.is_some() {
                 return Err("--token is not supported for ln; Lightning uses sats".into());
             }
@@ -1411,7 +1430,10 @@ fn unified_send_to_input(
             let amount = amount.ok_or("--amount is required for sol send")?;
             let to = to.ok_or("--to is required for sol send (Solana address)")?;
             validate_sol_address(&to)?;
-            let target = format!("solana:{to}?amount={amount}&token={token}");
+            let mut target = format!("solana:{to}?amount={amount}&token={token}");
+            if let Some(ref r) = reference {
+                target.push_str(&format!("&reference={r}"));
+            }
             Ok(Input::Send {
                 id: id.to_string(),
                 wallet,
@@ -1423,6 +1445,9 @@ fn unified_send_to_input(
             })
         }
         CliNetwork::Evm => {
+            if reference.is_some() {
+                return Err("--reference is only supported for sol".into());
+            }
             if !mint_url.is_empty() {
                 return Err("--cashu-mint is only supported for cashu".into());
             }
@@ -1443,6 +1468,9 @@ fn unified_send_to_input(
             })
         }
         CliNetwork::Btc => {
+            if reference.is_some() {
+                return Err("--reference is only supported for sol".into());
+            }
             if !mint_url.is_empty() {
                 return Err("--cashu-mint is only supported for cashu".into());
             }
@@ -1480,6 +1508,7 @@ fn unified_receive_to_input(
     qr_svg_file: bool,
     ln_quote_id: Option<String>,
     min_confirmations: Option<u32>,
+    reference: Option<String>,
     id: &str,
 ) -> Result<Input, String> {
     // --ln-quote-id: resume claiming from a previous deposit (cashu/ln only)
@@ -1516,6 +1545,15 @@ fn unified_receive_to_input(
         if let Some(ref n) = network {
             if !matches!(n, CliNetwork::Evm | CliNetwork::Btc) {
                 return Err("--wait-sync-limit is only supported for evm and btc networks".into());
+            }
+        }
+    }
+
+    // Validate --reference requires sol network
+    if reference.is_some() {
+        if let Some(ref n) = network {
+            if !matches!(n, CliNetwork::Sol) {
+                return Err("--reference is only supported for sol".into());
             }
         }
     }
@@ -1565,6 +1603,7 @@ fn unified_receive_to_input(
                 wait_sync_limit,
                 write_qr_svg_file: qr_svg_file,
                 min_confirmations,
+                reference,
             });
         }
     };
@@ -1606,6 +1645,7 @@ fn unified_receive_to_input(
                     wait_sync_limit: None,
                     write_qr_svg_file: qr_svg_file,
                     min_confirmations: None,
+                    reference: None,
                 })
             }
         }
@@ -1637,6 +1677,7 @@ fn unified_receive_to_input(
                 wait_sync_limit: None,
                 write_qr_svg_file: qr_svg_file,
                 min_confirmations: None,
+                reference: None,
             })
         }
         CliNetwork::Sol => {
@@ -1646,9 +1687,9 @@ fn unified_receive_to_input(
             if let Some(ref t) = token {
                 validate_token_not_contract(t)?;
             }
-            if wait && onchain_memo.is_none() && amount.is_none() {
+            if wait && onchain_memo.is_none() && amount.is_none() && reference.is_none() {
                 return Err(
-                    "--wait requires --onchain-memo or --amount to match transactions".into(),
+                    "--wait requires --onchain-memo, --amount, or --reference to match transactions".into(),
                 );
             }
             Ok(Input::Receive {
@@ -1666,6 +1707,7 @@ fn unified_receive_to_input(
                 wait_sync_limit: None,
                 write_qr_svg_file: qr_svg_file,
                 min_confirmations,
+                reference,
             })
         }
         CliNetwork::Evm => {
@@ -1693,6 +1735,7 @@ fn unified_receive_to_input(
                 wait_sync_limit,
                 write_qr_svg_file: false,
                 min_confirmations,
+                reference: None,
             })
         }
         CliNetwork::Btc => {
@@ -1717,6 +1760,7 @@ fn unified_receive_to_input(
                 wait_sync_limit,
                 write_qr_svg_file: false,
                 min_confirmations: None,
+                reference: None,
             })
         }
     }
@@ -1880,6 +1924,7 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
             onchain_memo,
             local_memo,
             cashu_mint,
+            reference,
         } => unified_send_to_input(
             network,
             to,
@@ -1889,6 +1934,7 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
             onchain_memo,
             local_memo,
             cashu_mint,
+            reference,
             id,
         ),
         PayCommand::Receive {
@@ -1905,6 +1951,7 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
             qr_svg_file,
             ln_quote_id,
             min_confirmations,
+            reference,
         } => unified_receive_to_input(
             network,
             cashu_token,
@@ -1919,6 +1966,7 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
             qr_svg_file,
             ln_quote_id,
             min_confirmations,
+            reference,
             id,
         ),
         PayCommand::Cashu { action } => cashu_command_to_input(action, id),
@@ -2155,6 +2203,7 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
                 wait_sync_limit: None,
                 write_qr_svg_file: common.qr_svg_file,
                 min_confirmations: None,
+                reference: None,
             })
         }
         CashuCommand::ReceiveFromLnClaim {
@@ -2338,6 +2387,7 @@ fn ln_command_to_input(cmd: LnCommand, id: &str) -> Result<Input, String> {
             wait_sync_limit: None,
             write_qr_svg_file: common.qr_svg_file,
             min_confirmations: None,
+            reference: None,
         }),
         LnCommand::Invoice { transaction_id } => Ok(Input::HistoryStatus {
             id: id.to_string(),
@@ -2396,10 +2446,14 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
             to,
             amount,
             token,
+            reference,
         } => {
             validate_sol_address(&to)?;
             validate_token_not_contract(&token)?;
-            let target = format!("solana:{to}?amount={amount}&token={token}");
+            let mut target = format!("solana:{to}?amount={amount}&token={token}");
+            if let Some(ref r) = reference {
+                target.push_str(&format!("&reference={r}"));
+            }
             Ok(Input::Send {
                 id: id.to_string(),
                 wallet: common.wallet.filter(|s| !s.is_empty()),
@@ -2414,6 +2468,7 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
             common,
             onchain_memo,
             min_confirmations,
+            reference,
         } => Ok(Input::Receive {
             id: id.to_string(),
             wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
@@ -2426,6 +2481,7 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
             wait_sync_limit: None,
             write_qr_svg_file: common.qr_svg_file,
             min_confirmations,
+            reference,
         }),
         SolCommand::Balance { wallet } => Ok(Input::Balance {
             id: id.to_string(),
@@ -2517,6 +2573,7 @@ fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
                 wait_sync_limit: None,
                 write_qr_svg_file: false,
                 min_confirmations,
+                reference: None,
             })
         }
         EvmCommand::Balance { wallet } => Ok(Input::Balance {
@@ -2601,6 +2658,7 @@ fn btc_command_to_input(cmd: BtcCommand, id: &str) -> Result<Input, String> {
             wait_sync_limit,
             write_qr_svg_file: false,
             min_confirmations: None,
+            reference: None,
         }),
         BtcCommand::Balance { wallet } => Ok(Input::Balance {
             id: id.to_string(),

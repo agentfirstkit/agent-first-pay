@@ -37,6 +37,7 @@ impl MockSolWaitProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: None,
+            reference_keys: None,
         }
     }
 }
@@ -206,6 +207,7 @@ async fn sol_receive_wait_min_confirmations_accepts_finalized_without_depth_valu
             wait_sync_limit: None,
             write_qr_svg_file: false,
             min_confirmations: Some(6),
+            reference: None,
         },
     )
     .await;

@@ -357,6 +357,9 @@ pub struct HistoryRecord {
     pub confirmed_at_epoch_s: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fee: Option<Amount>,
+    /// Reference keys found in the transaction (sol only, per strain-payment-method-solana).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_keys: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -543,6 +546,9 @@ pub enum Input {
         write_qr_svg_file: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_confirmations: Option<u32>,
+        /// Reference key to watch for (base58, sol only, per strain-payment-method-solana).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
     },
     #[serde(rename = "receive_claim")]
     ReceiveClaim {

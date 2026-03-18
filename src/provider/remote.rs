@@ -542,6 +542,7 @@ impl PayProvider for RemoteProvider {
                 wait_sync_limit: None,
                 write_qr_svg_file: false,
                 min_confirmations: None,
+                reference: None,
             })
             .await,
             &["receive_info"],

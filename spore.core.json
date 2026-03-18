@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/RPC/REST modes",
@@ -10,13 +10,14 @@
     "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
   "mutations": [
-    "Remove afpay:memo:v1: prefix from EVM on-chain memos — afpay now passes memo content through raw without any proprietary wrapping, allowing upper-layer protocols to define their own memo formats"
+    "Add Solana reference key support for send and receive — send path appends a reference public key as a read-only non-signer account on the transfer instruction via --reference CLI flag, enabling order-bound payments per strain-payment-method-solana convention",
+    "Add reference key matching for sol receive --wait — extracts reference keys from on-chain transaction account lists and supports --reference as a match condition alongside --onchain-memo and --amount, enabling services to verify order-bound payments"
   ],
   "license": "MIT",
   "bonds": [
     {
       "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.8XHhVYkrnaRsDZ77VCAw1fxSg6HCcYQqZYSyGk8ngpQJ"
+      "uri": "cmn://cmn.dev/b3.DWFiuxES9nasYck941LX7Xjce2vtf3iqmheARXkUqQHu"
     }
   ],
   "tree": {

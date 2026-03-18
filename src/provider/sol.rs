@@ -51,6 +51,9 @@ struct SolTransferTarget {
     amount_lamports: u64,
     /// If set, this is an SPL token transfer instead of the native token.
     token_mint: Option<Pubkey>,
+    /// Reference key for order binding (per strain-payment-method-solana).
+    /// Added as a read-only non-signer account on the transfer instruction.
+    reference: Option<Pubkey>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,6 +176,7 @@ impl SolProvider {
 
         let mut amount_lamports: Option<u64> = None;
         let mut token_mint: Option<Pubkey> = None;
+        let mut reference: Option<Pubkey> = None;
         for pair in query.split('&') {
             if pair.is_empty() {
                 continue;
@@ -212,6 +216,11 @@ impl SolProvider {
                         }
                     }
                 }
+                "reference" => {
+                    reference = Some(Pubkey::from_str(value).map_err(|e| {
+                        PayError::InvalidAmount(format!("invalid reference key '{value}': {e}"))
+                    })?);
+                }
                 _ => {}
             }
         }
@@ -229,6 +238,7 @@ impl SolProvider {
             recipient_address: recipient_address.to_string(),
             amount_lamports,
             token_mint,
+            reference,
         })
     }
 
@@ -603,6 +613,49 @@ impl SolProvider {
         None
     }
 
+    /// Extract reference keys from a transaction's transfer instructions.
+    /// A reference key is any read-only non-signer account on a system transfer
+    /// or SPL token transfer instruction that isn't a known program or the
+    /// sender/recipient (per strain-payment-method-solana convention).
+    fn extract_reference_keys(tx: &SolGetTransactionResult) -> Vec<String> {
+        const KNOWN_PROGRAMS: &[&str] = &[
+            "11111111111111111111111111111111", // System Program
+            SPL_TOKEN_PROGRAM_ID,
+            SPL_ASSOCIATED_TOKEN_PROGRAM_ID,
+            SOL_MEMO_PROGRAM_ID,
+            "SysvarRent111111111111111111111111111111111",
+        ];
+        let account_keys = &tx.transaction.message.account_keys;
+        let mut refs = Vec::new();
+        for ix in &tx.transaction.message.instructions {
+            let Some(program_id) = account_keys.get(ix.program_id_index) else {
+                continue;
+            };
+            // Only inspect system transfer or SPL token transfer instructions
+            let is_transfer = program_id == "11111111111111111111111111111111"
+                || program_id == SPL_TOKEN_PROGRAM_ID;
+            if !is_transfer {
+                continue;
+            }
+            // Account indices beyond the standard transfer accounts are reference keys.
+            // System transfer: [from, to] = 2 accounts
+            // SPL transfer_checked: [source_ata, mint, dest_ata, authority] = 4 accounts
+            let expected_count = if program_id == SPL_TOKEN_PROGRAM_ID {
+                4
+            } else {
+                2
+            };
+            for &acct_idx in ix.accounts.iter().skip(expected_count) {
+                if let Some(key) = account_keys.get(acct_idx) {
+                    if !KNOWN_PROGRAMS.contains(&key.as_str()) {
+                        refs.push(key.clone());
+                    }
+                }
+            }
+        }
+        refs
+    }
+
     async fn fetch_recent_chain_signatures(
         &self,
         endpoints: &[String],
@@ -717,6 +770,14 @@ impl SolProvider {
             created_at_epoch_s,
             confirmed_at_epoch_s,
             fee: fee_amount,
+            reference_keys: {
+                let refs = Self::extract_reference_keys(&tx);
+                if refs.is_empty() {
+                    None
+                } else {
+                    Some(refs)
+                }
+            },
         }))
     }
 
@@ -842,6 +903,14 @@ impl SolProvider {
                 created_at_epoch_s,
                 confirmed_at_epoch_s,
                 fee: fee_amount,
+                reference_keys: {
+                    let refs = Self::extract_reference_keys(&tx);
+                    if refs.is_empty() {
+                        None
+                    } else {
+                        Some(refs)
+                    }
+                },
             },
             chain_status.confirmations,
         )))
@@ -990,6 +1059,8 @@ struct SolTransactionMessage {
 #[serde(rename_all = "camelCase")]
 struct SolCompiledInstruction {
     program_id_index: usize,
+    #[serde(default)]
+    accounts: Vec<usize>,
     #[serde(default)]
     data: String,
 }
@@ -1327,6 +1398,15 @@ impl PayProvider for SolProvider {
                 );
                 instructions.push(transfer_ix);
             }
+            // Add reference key as read-only non-signer account on the transfer
+            // instruction (per strain-payment-method-solana convention).
+            if let Some(ref_key) = &transfer_target.reference {
+                if let Some(last_ix) = instructions.last_mut() {
+                    last_ix
+                        .accounts
+                        .push(AccountMeta::new_readonly(*ref_key, false));
+                }
+            }
             let transaction = Transaction::new_signed_with_payer(
                 &instructions,
                 Some(&keypair.pubkey()),
@@ -1420,6 +1500,7 @@ impl PayProvider for SolProvider {
             created_at_epoch_s: now,
             confirmed_at_epoch_s: None,
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 
