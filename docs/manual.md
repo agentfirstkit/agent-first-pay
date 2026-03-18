@@ -293,7 +293,7 @@ With `--wait`, must provide `--onchain-memo` or `--amount` to match incoming tra
 afpay receive --network evm [--wallet <w>] --token <native|usdc|symbol> [--wait --amount <n> [--onchain-memo <text>]] [--wait-timeout-s <s>] [--wait-poll-interval-ms <ms>] [--wait-sync-limit <n>] [--min-confirmations <n>]
 ```
 
-Returns the wallet's receive address. With `--wait`, `--amount` is required and the command polls for matching incoming transactions. If `--onchain-memo` is provided, matching is limited to afpay-encoded EVM memos (`afpay:memo:v1:` payloads). The emitted `history_status.transaction_id` is an on-chain tx hash that can be queried again via `history status --transaction-id ...`. Use `--wait-sync-limit <n>` to control how many recent history records are scanned per poll while resolving the matched on-chain tx hash (default `500`, clamped to `1..5000`). Use `--min-confirmations <n>` to require a minimum confirmation depth (e.g. `--min-confirmations 12` for EVM L1).
+Returns the wallet's receive address. With `--wait`, `--amount` is required and the command polls for matching incoming transactions. If `--onchain-memo` is provided, matching is limited to transactions whose on-chain memo exactly matches the given text. The emitted `history_status.transaction_id` is an on-chain tx hash that can be queried again via `history status --transaction-id ...`. Use `--wait-sync-limit <n>` to control how many recent history records are scanned per poll while resolving the matched on-chain tx hash (default `500`, clamped to `1..5000`). Use `--min-confirmations <n>` to require a minimum confirmation depth (e.g. `--min-confirmations 12` for EVM L1).
 
 ### Bitcoin Receive
 

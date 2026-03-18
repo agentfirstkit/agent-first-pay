@@ -210,7 +210,7 @@ impl PayProvider for MockEvmWaitProvider {
 }
 
 #[tokio::test]
-async fn evm_receive_wait_matches_onchain_memo_when_afpay_encoded() {
+async fn evm_receive_wait_matches_onchain_memo() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_dir = tmp.path().to_string_lossy().into_owned();
     let config = RuntimeConfig {
@@ -301,7 +301,7 @@ async fn evm_receive_wait_matches_onchain_memo_when_afpay_encoded() {
     assert!(saw_receive_info, "expected receive_info output");
     assert!(
         saw_history_status,
-        "expected history_status output for afpay-encoded memo match"
+        "expected history_status output for onchain memo match"
     );
 }
 

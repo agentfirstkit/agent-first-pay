@@ -805,7 +805,7 @@ impl EvmProvider {
                     .input
                     .as_deref()
                     .and_then(|input| decode_hex_data_bytes(input).ok())
-                    .and_then(|input| decode_afpay_memo_payload(&input));
+                    .and_then(|input| decode_onchain_memo(&input));
                 let record = HistoryRecord {
                     transaction_id: tx_hash.clone(),
                     wallet: ctx.wallet_id.to_string(),
@@ -899,7 +899,7 @@ impl EvmProvider {
                         .get_transaction_input_raw(ctx.endpoints, &tx_hash)
                         .await?
                     {
-                        Some(input) => decode_afpay_memo_payload(&input),
+                        Some(input) => decode_onchain_memo(&input),
                         None => None,
                     };
                     memo_cache.insert(tx_hash.clone(), decoded.clone());
@@ -1024,7 +1024,6 @@ impl EvmTxReceipt {
 const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 const ERC20_TRANSFER_EVENT_TOPIC: &str =
     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-const AFPAY_EVM_MEMO_PREFIX: &[u8] = b"afpay:memo:v1:";
 
 fn encode_erc20_transfer(to: Address, amount: U256) -> Vec<u8> {
     let mut data = Vec::with_capacity(68);
@@ -1050,21 +1049,14 @@ fn normalize_onchain_memo(onchain_memo: Option<&str>) -> Result<Option<Vec<u8>>,
     Ok(Some(memo_bytes.to_vec()))
 }
 
-fn encode_afpay_memo_payload(memo_bytes: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(AFPAY_EVM_MEMO_PREFIX.len() + memo_bytes.len());
-    payload.extend_from_slice(AFPAY_EVM_MEMO_PREFIX);
-    payload.extend_from_slice(memo_bytes);
-    payload
-}
-
 fn append_memo_payload(mut data: Vec<u8>, memo_bytes: Option<&[u8]>) -> Vec<u8> {
     if let Some(memo) = memo_bytes {
-        data.extend_from_slice(&encode_afpay_memo_payload(memo));
+        data.extend_from_slice(memo);
     }
     data
 }
 
-fn decode_afpay_memo_payload(input_data: &[u8]) -> Option<String> {
+fn decode_onchain_memo(input_data: &[u8]) -> Option<String> {
     let memo_slice = if input_data.starts_with(&ERC20_TRANSFER_SELECTOR) {
         if input_data.len() <= 68 {
             return None;
@@ -1073,11 +1065,10 @@ fn decode_afpay_memo_payload(input_data: &[u8]) -> Option<String> {
     } else {
         input_data
     };
-    let payload = memo_slice.strip_prefix(AFPAY_EVM_MEMO_PREFIX)?;
-    if payload.is_empty() {
+    if memo_slice.is_empty() {
         return None;
     }
-    String::from_utf8(payload.to_vec()).ok()
+    String::from_utf8(memo_slice.to_vec()).ok()
 }
 
 fn decode_hex_data_bytes(raw: &str) -> Result<Vec<u8>, PayError> {
@@ -1387,7 +1378,7 @@ impl PayProvider for EvmProvider {
         let chain_id = Self::chain_id_for_wallet(&meta);
         let transfer_target = Self::parse_transfer_target(to, chain_id)?;
         let memo_bytes = normalize_onchain_memo(onchain_memo)?;
-        let memo_payload = memo_bytes.as_deref().map(encode_afpay_memo_payload);
+        let memo_payload = memo_bytes.as_deref();
 
         let signer = Self::wallet_signer(&meta)?;
 
@@ -1419,12 +1410,12 @@ impl PayProvider for EvmProvider {
                     .input(call_data.into());
                 provider.send_transaction(tx).await
             } else {
-                // Native ETH transfer (memo is afpay-prefixed calldata bytes)
+                // Native ETH transfer (memo as raw calldata bytes)
                 let mut tx = alloy::rpc::types::TransactionRequest::default()
                     .to(transfer_target.recipient_address)
                     .value(transfer_target.amount_wei);
-                if let Some(ref memo) = memo_payload {
-                    tx = tx.input(memo.clone().into());
+                if let Some(memo) = memo_payload {
+                    tx = tx.input(memo.to_vec().into());
                 }
                 provider.send_transaction(tx).await
             };
@@ -1685,7 +1676,7 @@ impl PayProvider for EvmProvider {
         else {
             return Ok(None);
         };
-        Ok(decode_afpay_memo_payload(&input_data))
+        Ok(decode_onchain_memo(&input_data))
     }
 
     async fn history_sync(&self, wallet: &str, limit: usize) -> Result<HistorySyncStats, PayError> {
@@ -1844,20 +1835,14 @@ mod tests {
             U256::from(42u64),
         );
         let with_memo = append_memo_payload(encoded.clone(), Some(b"memo"));
-        assert_eq!(
-            with_memo.len(),
-            encoded.len() + AFPAY_EVM_MEMO_PREFIX.len() + 4
-        );
-        assert!(with_memo.ends_with(b"afpay:memo:v1:memo"));
+        assert_eq!(with_memo.len(), encoded.len() + 4);
+        assert!(with_memo.ends_with(b"memo"));
     }
 
     #[test]
-    fn decode_afpay_memo_payload_supports_native_and_erc20_inputs() {
-        let native = encode_afpay_memo_payload(b"order:abc");
-        assert_eq!(
-            decode_afpay_memo_payload(&native),
-            Some("order:abc".to_string())
-        );
+    fn decode_onchain_memo_supports_native_and_erc20_inputs() {
+        let native = b"order:abc";
+        assert_eq!(decode_onchain_memo(native), Some("order:abc".to_string()));
 
         let erc20 = append_memo_payload(
             encode_erc20_transfer(
@@ -1868,10 +1853,7 @@ mod tests {
             ),
             Some(b"order:def"),
         );
-        assert_eq!(
-            decode_afpay_memo_payload(&erc20),
-            Some("order:def".to_string())
-        );
+        assert_eq!(decode_onchain_memo(&erc20), Some("order:def".to_string()));
 
         let legacy = append_memo_payload(
             encode_erc20_transfer(
@@ -1882,7 +1864,7 @@ mod tests {
             ),
             None,
         );
-        assert_eq!(decode_afpay_memo_payload(&legacy), None);
+        assert_eq!(decode_onchain_memo(&legacy), None);
     }
 
     #[test]
