@@ -1,6 +1,6 @@
-use crate::rpc::crypto::Cipher;
-use crate::rpc::proto::af_pay_client::AfPayClient;
-use crate::rpc::proto::EncryptedRequest;
+use crate::mode::rpc::crypto::Cipher;
+use crate::mode::rpc::proto::af_pay_client::AfPayClient;
+use crate::mode::rpc::proto::EncryptedRequest;
 use agent_first_data::OutputFormat;
 use std::io::Write;
 
@@ -622,6 +622,7 @@ impl PayProvider for RemoteProvider {
         Ok(CashuReceiveResult {
             wallet: out["wallet"].as_str().unwrap_or(wallet).to_string(),
             amount,
+            memo: out["memo"].as_str().map(|s| s.to_string()),
         })
     }
 
@@ -770,6 +771,7 @@ impl PayProvider for RemoteProvider {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

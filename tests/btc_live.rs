@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 //! Integration tests for BtcProvider against Bitcoin Signet.
 //!
 //! These tests hit the real Signet Esplora API — no funds required for read-only tests.

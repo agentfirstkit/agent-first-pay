@@ -9,35 +9,6 @@ use tokio::sync::mpsc;
 use super::App;
 
 /// Try each provider until one succeeds. Skips NotImplemented.
-/// On a real error, records it but continues trying remaining providers.
-/// Returns the first success, or the last real error if all fail.
-macro_rules! try_provider {
-    ($providers:expr, |$p:ident| $call:expr) => {{
-        let mut _last_err: Option<PayError> = None;
-        let mut _result: Option<Result<_, PayError>> = None;
-        for _prov in $providers.values() {
-            let $p = _prov.as_ref();
-            match $call.await {
-                Ok(v) => {
-                    _result = Some(Ok(v));
-                    break;
-                }
-                Err(PayError::NotImplemented(_)) => continue,
-                Err(e) => {
-                    _last_err = Some(e);
-                }
-            }
-        }
-        match _result {
-            Some(r) => r,
-            None => match _last_err {
-                Some(e) => Err(e),
-                None => Err(PayError::NotImplemented("network not enabled".to_string())),
-            },
-        }
-    }};
-}
-
 /// Collect results from all providers, skipping NotImplemented.
 macro_rules! collect_all {
     ($providers:expr, |$p:ident| $call:expr) => {{
@@ -143,7 +114,7 @@ pub(crate) fn extract_id(input: &Input) -> Option<String> {
         | Input::WalletConfigSet { id, .. }
         | Input::WalletConfigTokenAdd { id, .. }
         | Input::WalletConfigTokenRemove { id, .. } => Some(id.clone()),
-        Input::Config(_) | Input::Version | Input::Close => None,
+        Input::Config(_) | Input::ConfigShow { .. } | Input::Version | Input::Close => None,
     }
 }
 
@@ -245,28 +216,6 @@ pub(crate) fn wallet_summary_from_meta(
             .or(meta.evm_rpc_endpoints.clone()),
         chain_id: meta.evm_chain_id,
         created_at_epoch_s: meta.created_at_epoch_s,
-    }
-}
-
-pub(crate) async fn resolve_wallet_summary(app: &App, wallet_id: &str) -> WalletSummary {
-    if let Ok(meta) = require_store(app).and_then(|s| s.load_wallet_metadata(wallet_id)) {
-        return wallet_summary_from_meta(&meta, wallet_id);
-    }
-    if let Ok(wallets) = collect_all!(&app.providers, |p| p.list_wallets()) {
-        if let Some(summary) = wallets.into_iter().find(|w| w.id == wallet_id) {
-            return summary;
-        }
-    }
-    WalletSummary {
-        id: wallet_id.to_string(),
-        network: Network::Ln,
-        label: None,
-        address: String::new(),
-        backend: None,
-        mint_url: None,
-        rpc_endpoints: None,
-        chain_id: None,
-        created_at_epoch_s: 0,
     }
 }
 

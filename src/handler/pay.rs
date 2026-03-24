@@ -1120,6 +1120,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                             id,
                             wallet: r.wallet,
                             amount: r.amount,
+                            memo: r.memo,
                             trace: trace_from(start),
                         })
                         .await;

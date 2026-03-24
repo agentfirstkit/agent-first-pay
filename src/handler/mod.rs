@@ -313,16 +313,19 @@ pub async fn dispatch(app: &App, input: Input) {
         }
 
         // Inline handlers (small enough to keep in mod.rs)
-        Input::Config(_) | Input::Version | Input::Close => {}
+        Input::Config(_) | Input::ConfigShow { .. } | Input::Version | Input::Close => {}
     }
 
-    // Inline handlers for Config, Version, Close
+    // Inline handlers for Config, ConfigShow, Version, Close
     match input {
+        Input::ConfigShow { .. } => {
+            let cfg = app.config.read().await;
+            let _ = app.writer.send(Output::Config(cfg.clone())).await;
+        }
         Input::Config(patch) => {
             let start = Instant::now();
             let ConfigPatch {
                 data_dir,
-                limits,
                 log,
                 exchange_rate,
                 afpay_rpc,
@@ -344,32 +347,14 @@ pub async fn dispatch(app: &App, input: Input) {
             }
             if !unsupported.is_empty() {
                 let err = PayError::NotImplemented(format!(
-                    "runtime config only supports 'log' and 'limits'; unsupported fields: {}",
+                    "runtime config only supports 'log'; unsupported fields: {}",
                     unsupported.join(", ")
                 ));
                 emit_error(&app.writer, None, &err, start).await;
                 return;
             }
 
-            if let Some(ref v) = limits {
-                if !app.enforce_limits {
-                    let err = PayError::NotImplemented(
-                        "config.limits is unavailable when limits are not enforced locally; configure limits on the RPC daemon"
-                            .to_string(),
-                    );
-                    emit_error(&app.writer, None, &err, start).await;
-                    return;
-                }
-                if let Err(e) = app.spend_ledger.set_limits(v).await {
-                    emit_error(&app.writer, None, &e, start).await;
-                    return;
-                }
-            }
-
             let mut cfg = app.config.write().await;
-            if let Some(v) = limits {
-                cfg.limits = v;
-            }
             if let Some(v) = log {
                 cfg.log = agent_first_data::cli_parse_log_filters(&v);
             }

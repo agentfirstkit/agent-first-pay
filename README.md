@@ -97,7 +97,18 @@ afpay balance
 afpay --rpc-endpoint 10.0.1.5:9400 --rpc-secret "64-char-hex" balance
 ```
 
-Other modes: `--mode interactive` (REPL), `--mode pipe` (JSONL stdin/stdout), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [Manual](docs/manual.md) for details.
+Other modes: `--mode interactive` (REPL), `--mode tui` (full-screen terminal UI), `--mode pipe` (JSONL stdin/stdout), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [CLI Reference](docs/cli.md) for flags and subcommands, and [Architecture](docs/architecture.md) for deployment and protocol details.
+
+## Modes
+
+| Mode | Start | Use Case |
+|------|-------|----------|
+| cli | `afpay <subcommand>` | One command, local or forwarded via `--rpc-endpoint` |
+| pipe | `afpay --mode pipe` | Long-lived JSONL stdin/stdout session for agents |
+| interactive | `afpay --mode interactive` | Human REPL with completion and QR helpers |
+| tui | `afpay --mode tui` | Full-screen terminal workflow over the same interactive command interface |
+| rpc | `afpay --mode rpc` | Encrypted gRPC daemon for afpay clients or coordinators |
+| rest | `afpay --mode rest` | HTTP API server for curl, containers, and general clients |
 
 ## Quick Start
 
@@ -165,7 +176,7 @@ afpay send --network sol --to <address> --amount 1000000 --token usdc
 afpay receive --wallet sol-main --wait --amount 1000000 --token usdc
 
 # Custom SPL token (register first, then use by symbol)
-afpay wallet config token-add --wallet sol-main --symbol bonk --address DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 --decimals 5
+afpay sol config --wallet sol-main token-add --symbol bonk --address DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 --decimals 5
 afpay send --network sol --to <address> --amount 100000 --token bonk
 afpay receive --wallet sol-main --wait --amount 100000 --token bonk
 
@@ -194,7 +205,7 @@ afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --onchain-m
 afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --wait-sync-limit 1500
 
 # Custom ERC-20 token (register first, then use by symbol)
-afpay wallet config token-add --wallet evm-base --symbol dai --address 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb --decimals 18
+afpay evm config --wallet evm-base token-add --symbol dai --address 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb --decimals 18
 afpay send --wallet evm-base --to <address> --amount 1000000 --token dai
 afpay receive --wallet evm-base --wait --amount 1000000 --token dai
 
@@ -265,7 +276,7 @@ afpay history status --transaction-id <id>
 
 ## Token Support
 
-USDC and USDT are built-in for sol and evm. Other tokens (DAI, WBTC, BONK, WIF, JUP, etc.) can be registered per-wallet via `wallet config token-add`.
+USDC and USDT are built-in for sol and evm. Other tokens (DAI, WBTC, BONK, WIF, JUP, etc.) can be registered per-wallet via `<network> config --wallet <id> token-add`.
 
 Balance queries automatically show all known tokens:
 
@@ -287,10 +298,10 @@ Built-in tokens: EVM — USDC/USDT on Base (8453), Arbitrum (42161), Ethereum (1
 Multi-tier spend limits — all rules checked before every send, any breach rejects the transaction:
 
 ```bash
-afpay limit add --scope network --network cashu --window 1h --max-spend 10000
-afpay limit add --scope network --network sol --token native --window 1h --max-spend 1000000
-afpay limit add --scope wallet --wallet w_1a2b3c4d --window 24h --max-spend 50000
-afpay limit add --scope global-usd-cents --window 24h --max-spend 500000   # requires exchange rate config
+afpay cashu limit add --window 1h --max-spend 10000
+afpay sol limit add --token native --window 1h --max-spend 1000000
+afpay cashu limit --wallet w_1a2b3c4d add --window 24h --max-spend 50000
+afpay global limit add --window 24h --max-spend 500000   # requires exchange rate config
 afpay limit remove --rule-id r_1a2b3c4d
 afpay limit list
 ```
@@ -348,6 +359,15 @@ podman run -d --name afpay -p 9401:9401 \
 
 `AFPAY_MODE` selects `rest` or `rpc`. Secrets auto-generated on first run and persisted to volumes. `bitcoind` is disabled by default; when enabled it runs pruned `mainnet` with `BTC_PRUNE_MB=550`. See [container/README.md](container/README.md) for backup and restore scripts, [container/apple-container/README.md](container/apple-container/README.md) for the Apple Container CLI flow, and [Architecture](docs/architecture.md) for the full variable reference.
 
+## Data and Recovery
+
+- Default local data dir is `~/.afpay/`.
+- `storage_backend = "redb"` keeps wallet metadata, spend limits, and history in local `.redb` files.
+- `storage_backend = "postgres"` moves wallet metadata, seed secrets, transaction history, and spend accounting into PostgreSQL.
+- For container deployments, back up `/data/afpay` plus `/data/phoenixd/.phoenix/` when using phoenixd.
+- If you use PostgreSQL storage, back up PostgreSQL as well; volume backups alone are not enough.
+- Local wallets with mnemonics can be exported with `afpay wallet dangerously-show-seed --wallet <wallet_id>`.
+
 ## Testing
 
 ```bash
@@ -356,8 +376,7 @@ cargo test
 
 ## Docs
 
-- [Quick Start](docs/quickstart.md) — 30-second walkthrough for each network
-- [Manual](docs/manual.md) — Full command reference, all run modes, protocol details
+- [CLI Reference](docs/cli.md) — Generated command reference from `src/cli.rs`
 - [Architecture](docs/architecture.md) — Deployment patterns, RPC protocol, Provider design
 - [Testing](docs/testing.md) — Unit and integration tests
 

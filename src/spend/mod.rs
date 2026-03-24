@@ -1738,6 +1738,7 @@ fn next_counter(write_txn: &redb::WriteTransaction, key: &str) -> Result<u64, Pa
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

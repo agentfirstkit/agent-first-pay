@@ -1,7 +1,7 @@
 pub mod crypto;
 
+use self::crypto::Cipher;
 use crate::handler::{self, App};
-use crate::rpc::crypto::Cipher;
 use crate::types::*;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -470,6 +470,6 @@ fn input_request_id(input: &Input) -> Option<&str> {
         | Input::WalletConfigSet { id, .. }
         | Input::WalletConfigTokenAdd { id, .. }
         | Input::WalletConfigTokenRemove { id, .. } => Some(id.as_str()),
-        Input::Config(_) | Input::Version | Input::Close => None,
+        Input::Config(_) | Input::ConfigShow { .. } | Input::Version | Input::Close => None,
     }
 }

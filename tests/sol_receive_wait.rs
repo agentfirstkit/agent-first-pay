@@ -1,4 +1,5 @@
 #![cfg(feature = "redb")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use agent_first_pay::handler::{dispatch, App};
 use agent_first_pay::provider::{PayError, PayProvider};

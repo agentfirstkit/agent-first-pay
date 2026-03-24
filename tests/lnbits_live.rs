@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for LnProvider (lnbits backend) against a local LNbits FakeWallet instance.
 //!
 //! Prerequisites — start LNbits with FakeWallet in Docker:

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for LnProvider (phoenixd backend) against a local phoenixd testnet instance.
 //!
 //! Prerequisites:

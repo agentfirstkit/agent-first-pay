@@ -1778,6 +1778,7 @@ impl PayProvider for SolProvider {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{SolGetTransactionResult, SolProvider, SOL_MEMO_PROGRAM_ID};
     use crate::provider::PayProvider;

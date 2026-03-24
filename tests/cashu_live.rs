@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for CashuProvider against testnut.cashu.space (FakeWallet mint).
 //!
 //! All Lightning invoices are auto-paid by the FakeWallet mint, so no real funds needed.

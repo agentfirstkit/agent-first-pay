@@ -2,22 +2,25 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/RPC/REST modes",
   "intent": [
     "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
-  "mutations": [
-    "Add Solana reference key support for send and receive — send path appends a reference public key as a read-only non-signer account on the transfer instruction via --reference CLI flag, enabling order-bound payments per strain-payment-method-solana convention",
-    "Add reference key matching for sol receive --wait — extracts reference keys from on-chain transaction account lists and supports --reference as a match condition alongside --onchain-memo and --amount, enabling services to verify order-bound payments"
-  ],
   "license": "MIT",
+  "mutations": [
+    "Refactor runtime into modular mode/ directory — extract cli, pipe, rest, rpc, interactive, and new tui mode into separate files with a shared session layer, replacing the monolithic main.rs runtime",
+    "Add TUI mode powered by ratatui/crossterm for terminal-native wallet interaction alongside existing CLI, pipe, REST, and RPC modes",
+    "Add auto-generated CLI documentation from clap derive definitions, replacing the hand-maintained manual.md and quickstart.md with a generated cli.md reference",
+    "Enforce strict clippy lints across all production code with explicit test-only allowances",
+    "Bump toml dependency to 1.1 and agent-first-data to 0.7"
+  ],
   "bonds": [
     {
       "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.DWFiuxES9nasYck941LX7Xjce2vtf3iqmheARXkUqQHu"
+      "uri": "cmn://cmn.dev/b3.H8M8ziyKaUUe4RANZsyc1Ts6LknMYBuForfgdaRvwSSU"
     }
   ],
   "tree": {

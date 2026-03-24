@@ -98,6 +98,10 @@ macro_rules! dispatch_storage {
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "redb", feature = "postgres")),
+    allow(unused_variables)
+)]
 impl PayStore for StorageBackend {
     fn save_wallet_metadata(&self, meta: &WalletMetadata) -> Result<(), PayError> {
         dispatch_storage!(self, save_wallet_metadata, meta)

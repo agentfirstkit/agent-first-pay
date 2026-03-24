@@ -322,6 +322,49 @@ pub struct WalletBalanceItem {
     pub error: Option<String>,
 }
 
+/// Per-network balance summary aggregated from individual wallets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkBalanceSummary {
+    pub network: Network,
+    pub wallet_count: usize,
+    pub confirmed: u64,
+    pub pending: u64,
+    pub unit: String,
+    pub errors: usize,
+}
+
+impl NetworkBalanceSummary {
+    /// Build summaries grouped by (network, unit) from a list of wallet balances.
+    pub fn from_wallets(wallets: &[WalletBalanceItem]) -> Vec<Self> {
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<(String, String), Self> = BTreeMap::new();
+        for item in wallets {
+            let network = item.wallet.network;
+            let (unit, confirmed, pending) = match &item.balance {
+                Some(b) => (b.unit.clone(), b.confirmed, b.pending),
+                None => ("unknown".to_string(), 0, 0),
+            };
+            let has_error = item.error.is_some() || item.balance.is_none();
+            let key = (network.to_string(), unit.clone());
+            let entry = groups.entry(key).or_insert(Self {
+                network,
+                wallet_count: 0,
+                confirmed: 0,
+                pending: 0,
+                unit,
+                errors: 0,
+            });
+            entry.wallet_count += 1;
+            entry.confirmed += confirmed;
+            entry.pending += pending;
+            if has_error {
+                entry.errors += 1;
+            }
+        }
+        groups.into_values().collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReceiveInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,6 +418,7 @@ pub struct CashuSendResult {
 pub struct CashuReceiveResult {
     pub wallet: String,
     pub amount: Amount,
+    pub memo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -672,6 +716,8 @@ pub enum Input {
 
     #[serde(rename = "config")]
     Config(ConfigPatch),
+    #[serde(rename = "config_show")]
+    ConfigShow { id: String },
     #[serde(rename = "version")]
     Version,
     #[serde(rename = "close")]
@@ -696,6 +742,7 @@ impl Input {
                 | Input::WalletConfigTokenRemove { .. }
                 | Input::Restore { .. }
                 | Input::Config(_)
+                | Input::ConfigShow { .. }
         )
     }
 }
@@ -733,6 +780,8 @@ pub enum Output {
     WalletBalances {
         id: String,
         wallets: Vec<WalletBalanceItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary: Vec<NetworkBalanceSummary>,
         trace: Trace,
     },
     #[serde(rename = "receive_info")]
@@ -833,6 +882,8 @@ pub enum Output {
         id: String,
         wallet: String,
         amount: Amount,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memo: Option<String>,
         trace: Trace,
     },
     #[serde(rename = "restored")]
@@ -955,8 +1006,6 @@ pub struct RuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_secret: Option<String>,
     #[serde(default)]
-    pub limits: Vec<SpendLimit>,
-    #[serde(default)]
     pub log: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange_rate: Option<ExchangeRateConfig>,
@@ -983,7 +1032,6 @@ impl Default for RuntimeConfig {
             data_dir: default_data_dir(),
             rpc_endpoint: None,
             rpc_secret: None,
-            limits: vec![],
             log: vec![],
             exchange_rate: None,
             afpay_rpc: std::collections::HashMap::new(),
@@ -1108,8 +1156,6 @@ pub struct ConfigPatch {
     #[serde(default)]
     pub data_dir: Option<String>,
     #[serde(default)]
-    pub limits: Option<Vec<SpendLimit>>,
-    #[serde(default)]
     pub log: Option<Vec<String>>,
     #[serde(default)]
     pub exchange_rate: Option<ExchangeRateConfig>,
@@ -1191,6 +1237,7 @@ pub fn parse_bolt12_offer_parts(s: &str) -> (String, Option<u64>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

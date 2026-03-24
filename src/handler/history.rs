@@ -110,25 +110,24 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
 
         Input::HistoryStatus { id, transaction_id } => {
             let start = Instant::now();
-            let mut routed: Option<Result<HistoryStatusInfo, PayError>> = None;
-            for provider in app.providers.values() {
-                match provider.history_status(&transaction_id).await {
-                    Ok(info) => {
-                        routed = Some(Ok(info));
-                        break;
-                    }
-                    Err(PayError::NotImplemented(_)) | Err(PayError::WalletNotFound(_)) => {}
-                    Err(err) => {
-                        routed = Some(Err(err));
-                        break;
-                    }
-                }
-            }
-            match routed.unwrap_or_else(|| {
-                Err(PayError::WalletNotFound(format!(
-                    "transaction {transaction_id} not found"
-                )))
+            // Resolve the transaction's network from local store, then route
+            // to the specific provider. No fallback — if the transaction isn't
+            // in the local store, it doesn't exist.
+            let routed = match require_store(app).and_then(|s| {
+                s.find_transaction_record_by_id(&transaction_id)
+                    .map(|opt| opt.map(|r| r.network))
             }) {
+                Ok(Some(network)) => match app.providers.get(&network) {
+                    Some(provider) => provider.history_status(&transaction_id).await,
+                    None => Err(PayError::NotImplemented(format!(
+                        "no provider for {network}"
+                    ))),
+                },
+                _ => Err(PayError::WalletNotFound(format!(
+                    "transaction {transaction_id} not found"
+                ))),
+            };
+            match routed {
                 Ok(info) => {
                     let _ = app
                         .writer

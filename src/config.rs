@@ -100,9 +100,6 @@ impl RuntimeConfig {
         if let Some(v) = patch.data_dir {
             self.data_dir = v;
         }
-        if let Some(v) = patch.limits {
-            self.limits = v;
-        }
         if let Some(v) = patch.log {
             self.log = cli_parse_log_filters(&v);
         }

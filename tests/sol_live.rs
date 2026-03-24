@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 //! Integration tests for SolProvider against Solana devnet.
 //!
 //! These tests hit the real devnet RPC — no funds required for read-only tests.

@@ -913,6 +913,7 @@ pub(crate) fn parse_bolt11_payment_hash(bolt11: &str) -> Result<String, PayError
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 //! Integration tests for EvmProvider against Base Sepolia testnet.
 //!
 //! Read-only tests (create, balance, list) need no funds — just a working RPC endpoint.

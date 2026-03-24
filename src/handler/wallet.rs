@@ -188,10 +188,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             meta.network
                         ))),
                     },
-                    Err(PayError::WalletNotFound(_)) => {
-                        // Fallback for remote-only deployments where wallets may not be stored locally.
-                        try_provider!(&app.providers, |p| p.close_wallet(&wallet))
-                    }
+                    Err(e @ PayError::WalletNotFound(_)) => Err(e),
                     Err(error) => Err(error),
                 }
             };
@@ -283,57 +280,52 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             )
             .await;
             if let Some(wallet_id) = wallet {
-                let meta_opt = require_store(app)
-                    .and_then(|s| s.load_wallet_metadata(&wallet_id))
-                    .ok();
-                let result = if let Some(ref meta) = meta_opt {
-                    match get_provider(&app.providers, meta.network) {
-                        Some(provider) => {
-                            if check {
-                                match provider.check_balance(&wallet_id).await {
-                                    Err(PayError::NotImplemented(_)) => {
-                                        provider.balance(&wallet_id).await
-                                    }
-                                    other => other,
-                                }
-                            } else {
-                                provider.balance(&wallet_id).await
-                            }
-                        }
-                        None => Err(PayError::NotImplemented(format!(
-                            "no provider for {}",
-                            meta.network
-                        ))),
+                let meta = match require_store(app).and_then(|s| s.load_wallet_metadata(&wallet_id))
+                {
+                    Ok(m) => m,
+                    Err(_) => {
+                        emit_error(
+                            &app.writer,
+                            Some(id),
+                            &PayError::WalletNotFound(wallet_id),
+                            start,
+                        )
+                        .await;
+                        return;
                     }
-                } else {
-                    // Remote-only fallback: wallet metadata may not exist locally.
-                    if check {
-                        try_provider!(&app.providers, |p| async {
-                            match p.check_balance(&wallet_id).await {
-                                Err(PayError::NotImplemented(_)) => p.balance(&wallet_id).await,
+                };
+                let result = match get_provider(&app.providers, meta.network) {
+                    Some(provider) => {
+                        if check {
+                            match provider.check_balance(&wallet_id).await {
+                                Err(PayError::NotImplemented(_)) => {
+                                    provider.balance(&wallet_id).await
+                                }
                                 other => other,
                             }
-                        })
-                    } else {
-                        try_provider!(&app.providers, |p| p.balance(&wallet_id))
+                        } else {
+                            provider.balance(&wallet_id).await
+                        }
                     }
+                    None => Err(PayError::NotImplemented(format!(
+                        "no provider for {}",
+                        meta.network
+                    ))),
                 };
                 match result {
                     Ok(balance) => {
-                        let summary = if let Some(meta) = meta_opt {
-                            wallet_summary_from_meta(&meta, &wallet_id)
-                        } else {
-                            resolve_wallet_summary(app, &wallet_id).await
-                        };
+                        let summary = wallet_summary_from_meta(&meta, &wallet_id);
+                        let items = vec![WalletBalanceItem {
+                            wallet: summary,
+                            balance: Some(balance),
+                            error: None,
+                        }];
                         let _ = app
                             .writer
                             .send(Output::WalletBalances {
                                 id,
-                                wallets: vec![WalletBalanceItem {
-                                    wallet: summary,
-                                    balance: Some(balance),
-                                    error: None,
-                                }],
+                                summary: Vec::new(), // single wallet, no summary needed
+                                wallets: items,
                                 trace: trace_from(start),
                             })
                             .await;
@@ -341,20 +333,25 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                     Err(e) => emit_error(&app.writer, Some(id), &e, start).await,
                 }
             } else {
-                match collect_all!(&app.providers, |p| p.balance_all()) {
+                let balance_result = if let Some(network) = network {
+                    // Query only the specific network's provider
+                    if let Some(provider) = app.providers.get(&network) {
+                        provider.balance_all().await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                } else {
+                    collect_all!(&app.providers, |p| p.balance_all())
+                };
+                match balance_result {
                     Ok(wallets) => {
-                        let filtered = if let Some(network) = network {
-                            wallets
-                                .into_iter()
-                                .filter(|w| w.wallet.network == network)
-                                .collect()
-                        } else {
-                            wallets
-                        };
+                        let filtered = wallets;
+                        let summary = NetworkBalanceSummary::from_wallets(&filtered);
                         let _ = app
                             .writer
                             .send(Output::WalletBalances {
                                 id,
+                                summary,
                                 wallets: filtered,
                                 trace: trace_from(start),
                             })
@@ -376,7 +373,18 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                 }),
             )
             .await;
-            match try_provider!(&app.providers, |p| p.restore(&wallet)) {
+            let restore_result =
+                match require_store(app).and_then(|s| s.load_wallet_metadata(&wallet)) {
+                    Ok(meta) => match get_provider(&app.providers, meta.network) {
+                        Some(p) => p.restore(&wallet).await,
+                        None => Err(PayError::NotImplemented(format!(
+                            "no provider for {}",
+                            meta.network
+                        ))),
+                    },
+                    Err(_) => Err(PayError::WalletNotFound(wallet.clone())),
+                };
+            match restore_result {
                 Ok(r) => {
                     let _ = app
                         .writer
