@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 //! Integration tests for SolProvider against Solana devnet.
 //!
 //! These tests hit the real devnet RPC — no funds required for read-only tests.
@@ -13,7 +20,10 @@
 
 use agent_first_pay::provider::sol::SolProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
+use agent_first_pay::store::redb_store::RedbStore;
+use agent_first_pay::store::StorageBackend;
 use agent_first_pay::types::{Network, WalletCreateRequest};
+use std::sync::Arc;
 
 const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 
@@ -22,7 +32,10 @@ const DEVNET_RPC: &str = "https://api.devnet.solana.com";
 async fn sol_live_create_and_list() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -57,7 +70,10 @@ async fn sol_live_create_and_list() {
 async fn sol_live_balance_new_wallet() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -87,7 +103,10 @@ async fn sol_live_balance_new_wallet() {
 async fn sol_live_balance_all() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -119,7 +138,10 @@ async fn sol_live_balance_all() {
 async fn sol_live_receive_info() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -152,7 +174,10 @@ async fn sol_live_receive_info() {
 async fn sol_live_wallet_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
@@ -166,7 +191,10 @@ async fn sol_live_wallet_not_found() {
 async fn sol_live_close_empty_wallet() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -201,7 +229,10 @@ async fn sol_live_close_empty_wallet() {
 async fn sol_live_history_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -251,7 +282,10 @@ async fn sol_live_send_native() {
     };
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -316,7 +350,10 @@ async fn sol_live_send_usdc_token() {
     };
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = SolProvider::new(data_dir);
+    let provider = SolProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {

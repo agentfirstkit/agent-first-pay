@@ -493,12 +493,14 @@ impl PayProvider for CashuProvider {
                 created_at_epoch_s: now,
                 confirmed_at_epoch_s: Some(now),
                 fee: None,
+                reference_keys: None,
             };
             let _ = self.store.append_transaction_record(&record);
         }
         Ok(total)
     }
 
+    #[cfg(feature = "interactive")]
     async fn cashu_send_quote(
         &self,
         wallet_id: &str,
@@ -570,8 +572,10 @@ impl PayProvider for CashuProvider {
 
         // P2P cashu token send
         let cdk_amount = CdkAmount::from(amount.value);
+        let send_memo = onchain_memo.map(cdk::wallet::SendMemo::for_token);
         let send_options = SendOptions {
             include_fee: true,
+            memo: send_memo,
             ..SendOptions::default()
         };
         let prepared = w
@@ -592,7 +596,14 @@ impl PayProvider for CashuProvider {
         let total_spent = balance_before_send.saturating_sub(balance_after_send);
         let fee_sats = total_spent.saturating_sub(amount.value);
 
-        let token_str = token.to_string();
+        // Inject memo into token (cdk SendOptions.memo does not embed it)
+        let token_str = match (onchain_memo, token) {
+            (Some(memo), Token::TokenV4(mut v4)) => {
+                v4.memo = Some(memo.to_string());
+                Token::TokenV4(v4).to_string()
+            }
+            (_, token) => token.to_string(),
+        };
 
         let fee_amount = if fee_sats > 0 {
             Some(Amount {
@@ -616,6 +627,7 @@ impl PayProvider for CashuProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -692,6 +704,9 @@ impl PayProvider for CashuProvider {
             wallet_id.to_string()
         };
 
+        // Extract memo from token before consuming it
+        let token_memo = Token::from_str(token).ok().and_then(|t| t.memo().clone());
+
         let w = self.get_or_create_cdk_wallet(&resolved_wallet).await?;
         let transaction_id = wallet::generate_transaction_identifier()?;
 
@@ -712,13 +727,14 @@ impl PayProvider for CashuProvider {
                 token: "sats".to_string(),
             },
             status: TxStatus::Confirmed,
-            onchain_memo: Some("receive cashu token".to_string()),
+            onchain_memo: token_memo.clone(),
             local_memo: None,
             remote_addr: None,
             preimage: None,
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: None,
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -728,6 +744,7 @@ impl PayProvider for CashuProvider {
                 value: sats,
                 token: "sats".to_string(),
             },
+            memo: token_memo,
         })
     }
 
@@ -819,6 +836,7 @@ impl PayProvider for CashuProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -880,6 +898,7 @@ impl PayProvider for CashuProvider {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

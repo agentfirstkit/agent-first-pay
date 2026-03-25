@@ -2,30 +2,28 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.1.1",
+  "version": "0.6.0",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
-  "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/MCP/RPC/REST modes",
+  "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/RPC/REST modes",
   "intent": [
-    "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, MCP mode for agent integration, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
-  ],
-  "mutations": [
-    "Centralize output rendering policy into a shared output_fmt module, eliminating duplicated render_value_with_policy logic that previously existed independently in writer.rs and interactive.rs",
-    "Fix redaction policy not being applied when wallet_seed events are emitted through the remote output path, which previously bypassed the policy and could expose unredacted secrets in some output modes",
-    "Fix MCP drain_outputs to apply per-event redaction policy before assembling the events array, ensuring wallet_seed mnemonic handling is consistent with CLI and pipe modes",
-    "Update agent-first-data dependency to 0.7.0, which adds YAML and plain-text output format support"
+    "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
   "license": "MIT",
-  "bonds": [
-    {
-      "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.Fz9JVu8Z5vUwzNuPZXscSEahZ2YY8cEL5SkqMXFisNp5"
-    }
+  "mutations": [
+    "Rewrite CLI architecture from monolithic cli.rs/interactive.rs into modular mode system (mode/cli.rs, mode/interactive.rs, mode/pipe.rs, mode/session.rs, mode/tui.rs) with shared session backend, enabling multiple frontend modes to share command parsing and execution logic",
+    "Add full-screen TUI mode with sidebar wallet navigation — ratatui-based terminal UI with sidebar groups/wallets, inline send/receive/create/close forms, balance detail, history browser, spend limit management, global config editor, and real-time status bar",
+    "Add backup/restore commands for data portability — global and per-network backup/restore using tar+zstd archives with PostgreSQL pg_dump/psql support, merge vs full-overwrite modes, and extra directory mapping",
+    "Add TUI Data view for backup/restore operations with form-like Backup/Restore mode switcher, inline text editing, async execution via spawn_blocking, and status badges",
+    "Add copyable token/invoice extraction in TUI — detect long token/bolt11/invoice/address fields in command output, display in dedicated strip, and copy to system clipboard via y hotkey (pbcopy/wl-copy/xclip)",
+    "Refactor clap argument parsing into standalone args.rs with docgen binary for auto-generated CLI reference"
   ],
+  "bonds": [],
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
     "exclude_names": [
-      ".git"
+      ".git",
+      ".cmn"
     ],
     "follow_rules": [
       ".gitignore"

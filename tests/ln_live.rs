@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for LnProvider (phoenixd backend) against a local phoenixd testnet instance.
 //!
 //! Prerequisites:
@@ -11,7 +12,10 @@
 
 use agent_first_pay::provider::ln::LnProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
+use agent_first_pay::store::redb_store::RedbStore;
+use agent_first_pay::store::StorageBackend;
 use agent_first_pay::types::{Amount, LnWalletBackend, LnWalletCreateRequest, Network};
+use std::sync::Arc;
 
 fn endpoint() -> String {
     std::env::var("PHOENIXD_ENDPOINT").unwrap_or_else(|_| "http://localhost:9740".to_string())
@@ -44,7 +48,10 @@ fn sats(value: u64) -> Amount {
 async fn setup() -> (tempfile::TempDir, LnProvider, String) {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = LnProvider::new(data_dir);
+    let provider = LnProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let ep = endpoint();
     let pw = password();
@@ -196,7 +203,10 @@ async fn ln_live_send_quote_invalid_invoice_fails() {
 async fn ln_live_wallet_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = LnProvider::new(data_dir);
+    let provider = LnProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
@@ -207,12 +217,39 @@ async fn ln_live_wallet_not_found() {
 
 #[tokio::test]
 #[ignore]
-async fn ln_live_receive_info_requires_amount() {
+async fn ln_live_receive_bolt12_offer() {
     let (_tmp, provider, wallet_id) = setup().await;
 
-    let err = provider.receive_info(&wallet_id, None).await.unwrap_err();
+    // With BOLT12 support, receive without amount returns a persistent offer
+    let info = provider.receive_info(&wallet_id, None).await.unwrap();
+    let offer = info.address.expect("should return an offer address");
+    assert!(
+        offer.starts_with("lno1"),
+        "offer should start with lno1, got: {}",
+        &offer[..offer.len().min(30)]
+    );
+    assert!(
+        info.invoice.is_none(),
+        "bolt12 should not return a bolt11 invoice"
+    );
+    assert!(
+        info.quote_id.is_none(),
+        "bolt12 should not return a quote_id"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn ln_live_send_quote_rejects_bolt12() {
+    let (_tmp, provider, wallet_id) = setup().await;
+
+    // send_quote should reject BOLT12 offers (not parseable as bolt11)
+    let err = provider
+        .send_quote(&wallet_id, "lno1qgsqvgjwrdkmcakuay0rz", None)
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, PayError::InvalidAmount(_)),
-        "deposit without amount should fail, got: {err}"
+        "bolt12 should fail send_quote, got: {err}"
     );
 }

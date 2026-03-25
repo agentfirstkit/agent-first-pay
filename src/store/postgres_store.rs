@@ -438,6 +438,55 @@ impl PayStore for PostgresStore {
         })
     }
 
+    fn update_transaction_record_status(
+        &self,
+        tx_id: &str,
+        status: crate::types::TxStatus,
+        confirmed_at_epoch_s: Option<u64>,
+    ) -> Result<(), PayError> {
+        let pool = self.pool.clone();
+        let tx_id = tx_id.to_string();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let row: Option<(serde_json::Value,)> =
+                    sqlx::query_as("SELECT record FROM transactions WHERE transaction_id = $1")
+                        .bind(&tx_id)
+                        .fetch_optional(&pool)
+                        .await
+                        .map_err(|e| {
+                            PayError::InternalError(format!("postgres read transaction: {e}"))
+                        })?;
+
+                let Some((record_json,)) = row else {
+                    return Err(PayError::WalletNotFound(format!(
+                        "transaction {tx_id} not found"
+                    )));
+                };
+
+                let mut record: crate::types::HistoryRecord = serde_json::from_value(record_json)
+                    .map_err(|e| {
+                    PayError::InternalError(format!("postgres parse record: {e}"))
+                })?;
+                record.status = status;
+                record.confirmed_at_epoch_s = confirmed_at_epoch_s;
+                let updated_json = serde_json::to_value(&record).map_err(|e| {
+                    PayError::InternalError(format!("serialize updated record: {e}"))
+                })?;
+
+                sqlx::query("UPDATE transactions SET record = $1 WHERE transaction_id = $2")
+                    .bind(&updated_json)
+                    .bind(&tx_id)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| {
+                        PayError::InternalError(format!("postgres update transaction status: {e}"))
+                    })?;
+                Ok(())
+            })
+        })
+    }
+
     fn drain_migration_log(&self) -> Vec<MigrationLog> {
         Vec::new()
     }
