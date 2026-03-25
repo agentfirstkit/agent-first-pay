@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 // ═══════════════════════════════════════════
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Ln,
@@ -99,14 +98,12 @@ pub enum TxStatus {
 // ═══════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct Amount {
     pub value: u64,
     pub token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LnWalletBackend {
     Nwc,
@@ -115,6 +112,10 @@ pub enum LnWalletBackend {
 }
 
 impl LnWalletBackend {
+    #[cfg_attr(
+        not(any(feature = "ln-nwc", feature = "ln-phoenixd", feature = "ln-lnbits")),
+        allow(dead_code)
+    )]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Nwc => "nwc",
@@ -125,7 +126,6 @@ impl LnWalletBackend {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum BtcBackend {
     Esplora,
@@ -134,6 +134,14 @@ pub enum BtcBackend {
 }
 
 impl BtcBackend {
+    #[cfg_attr(
+        not(any(
+            feature = "btc-esplora",
+            feature = "btc-core",
+            feature = "btc-electrum"
+        )),
+        allow(dead_code)
+    )]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Esplora => "esplora",
@@ -159,7 +167,6 @@ pub struct LnWalletCreateRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SpendScope {
     #[serde(alias = "all")]
@@ -173,7 +180,6 @@ fn default_spend_scope_network() -> SpendScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct SpendLimit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
@@ -269,11 +275,26 @@ impl BalanceInfo {
         }
     }
 
+    #[cfg_attr(not(feature = "ln-phoenixd"), allow(dead_code))]
     pub fn with_additional(mut self, key: impl Into<String>, value: u64) -> Self {
         self.additional.insert(key.into(), value);
         self
     }
 
+    #[cfg_attr(
+        not(any(
+            feature = "cashu",
+            feature = "ln-nwc",
+            feature = "ln-phoenixd",
+            feature = "ln-lnbits",
+            feature = "sol",
+            feature = "evm",
+            feature = "btc-esplora",
+            feature = "btc-core",
+            feature = "btc-electrum"
+        )),
+        allow(dead_code)
+    )]
     pub fn non_zero_components(&self) -> Vec<(String, u64)> {
         let mut components = Vec::new();
         if self.confirmed > 0 {
@@ -299,6 +320,49 @@ pub struct WalletBalanceItem {
     pub balance: Option<BalanceInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Per-network balance summary aggregated from individual wallets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkBalanceSummary {
+    pub network: Network,
+    pub wallet_count: usize,
+    pub confirmed: u64,
+    pub pending: u64,
+    pub unit: String,
+    pub errors: usize,
+}
+
+impl NetworkBalanceSummary {
+    /// Build summaries grouped by (network, unit) from a list of wallet balances.
+    pub fn from_wallets(wallets: &[WalletBalanceItem]) -> Vec<Self> {
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<(String, String), Self> = BTreeMap::new();
+        for item in wallets {
+            let network = item.wallet.network;
+            let (unit, confirmed, pending) = match &item.balance {
+                Some(b) => (b.unit.clone(), b.confirmed, b.pending),
+                None => ("unknown".to_string(), 0, 0),
+            };
+            let has_error = item.error.is_some() || item.balance.is_none();
+            let key = (network.to_string(), unit.clone());
+            let entry = groups.entry(key).or_insert(Self {
+                network,
+                wallet_count: 0,
+                confirmed: 0,
+                pending: 0,
+                unit,
+                errors: 0,
+            });
+            entry.wallet_count += 1;
+            entry.confirmed += confirmed;
+            entry.pending += pending;
+            if has_error {
+                entry.errors += 1;
+            }
+        }
+        groups.into_values().collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +400,9 @@ pub struct HistoryRecord {
     pub confirmed_at_epoch_s: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fee: Option<Amount>,
+    /// Reference keys found in the transaction (sol only, per strain-payment-method-solana).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_keys: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -351,6 +418,7 @@ pub struct CashuSendResult {
 pub struct CashuReceiveResult {
     pub wallet: String,
     pub amount: Amount,
+    pub memo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -362,6 +430,7 @@ pub struct RestoreResult {
     pub unit: String,
 }
 
+#[cfg(feature = "interactive")]
 #[derive(Debug, Clone, Serialize)]
 pub struct CashuSendQuoteInfo {
     pub wallet: String,
@@ -516,9 +585,14 @@ pub enum Input {
         #[serde(default)]
         wait_poll_interval_ms: Option<u64>,
         #[serde(default)]
+        wait_sync_limit: Option<usize>,
+        #[serde(default)]
         write_qr_svg_file: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_confirmations: Option<u32>,
+        /// Reference key to watch for (base58, sol only, per strain-payment-method-solana).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
     },
     #[serde(rename = "receive_claim")]
     ReceiveClaim {
@@ -642,6 +716,8 @@ pub enum Input {
 
     #[serde(rename = "config")]
     Config(ConfigPatch),
+    #[serde(rename = "config_show")]
+    ConfigShow { id: String },
     #[serde(rename = "version")]
     Version,
     #[serde(rename = "close")]
@@ -666,6 +742,7 @@ impl Input {
                 | Input::WalletConfigTokenRemove { .. }
                 | Input::Restore { .. }
                 | Input::Config(_)
+                | Input::ConfigShow { .. }
         )
     }
 }
@@ -703,6 +780,8 @@ pub enum Output {
     WalletBalances {
         id: String,
         wallets: Vec<WalletBalanceItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        summary: Vec<NetworkBalanceSummary>,
         trace: Trace,
     },
     #[serde(rename = "receive_info")]
@@ -803,6 +882,8 @@ pub enum Output {
         id: String,
         wallet: String,
         amount: Amount,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memo: Option<String>,
         trace: Trace,
     },
     #[serde(rename = "restored")]
@@ -866,6 +947,36 @@ pub enum Output {
         trace: Trace,
     },
 
+    #[serde(rename = "data_backed_up")]
+    DataBackedUp {
+        data_dir: String,
+        path: String,
+        created_at_utc: String,
+        trace: Trace,
+    },
+    #[serde(rename = "data_restored")]
+    DataRestored {
+        data_dir: String,
+        path: String,
+        trace: Trace,
+    },
+
+    #[serde(rename = "network_data_backed_up")]
+    NetworkDataBackedUp {
+        network: String,
+        data_dir: String,
+        path: String,
+        created_at_utc: String,
+        trace: Trace,
+    },
+    #[serde(rename = "network_data_restored")]
+    NetworkDataRestored {
+        network: String,
+        data_dir: String,
+        path: String,
+        trace: Trace,
+    },
+
     #[serde(rename = "error")]
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -925,8 +1036,6 @@ pub struct RuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_secret: Option<String>,
     #[serde(default)]
-    pub limits: Vec<SpendLimit>,
-    #[serde(default)]
     pub log: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange_rate: Option<ExchangeRateConfig>,
@@ -942,6 +1051,9 @@ pub struct RuntimeConfig {
     /// PostgreSQL connection URL (used when storage_backend = "postgres").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postgres_url_secret: Option<String>,
+    /// Rate limiting for REST/RPC endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 impl Default for RuntimeConfig {
@@ -950,13 +1062,13 @@ impl Default for RuntimeConfig {
             data_dir: default_data_dir(),
             rpc_endpoint: None,
             rpc_secret: None,
-            limits: vec![],
             log: vec![],
             exchange_rate: None,
             afpay_rpc: std::collections::HashMap::new(),
             providers: std::collections::HashMap::new(),
             storage_backend: None,
             postgres_url_secret: None,
+            rate_limit: None,
         }
     }
 }
@@ -1016,6 +1128,40 @@ pub enum ExchangeRateSourceType {
     Kraken,
 }
 
+/// Rate limiting configuration for REST/RPC endpoints.
+///
+/// ```toml
+/// [rate_limit]
+/// requests_per_second = 20
+/// max_concurrent = 50
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum requests per second (token-bucket refill rate). 0 = unlimited.
+    #[serde(default = "default_rate_limit_rps")]
+    pub requests_per_second: u32,
+    /// Maximum concurrent in-flight requests. 0 = unlimited.
+    #[serde(default = "default_rate_limit_concurrent")]
+    pub max_concurrent: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_second: default_rate_limit_rps(),
+            max_concurrent: default_rate_limit_concurrent(),
+        }
+    }
+}
+
+fn default_rate_limit_rps() -> u32 {
+    20
+}
+
+fn default_rate_limit_concurrent() -> u32 {
+    50
+}
+
 fn default_exchange_rate_ttl_s() -> u64 {
     300
 }
@@ -1039,8 +1185,6 @@ fn default_exchange_rate_sources() -> Vec<ExchangeRateSource> {
 pub struct ConfigPatch {
     #[serde(default)]
     pub data_dir: Option<String>,
-    #[serde(default)]
-    pub limits: Option<Vec<SpendLimit>>,
     #[serde(default)]
     pub log: Option<Vec<String>>,
     #[serde(default)]
@@ -1104,9 +1248,54 @@ where
     d.deserialize_option(LocalMemoVisitor)
 }
 
+/// Returns true if the string looks like a BOLT12 offer (`lno1…`),
+/// optionally with a `?amount=<sats>` suffix. Case-insensitive.
+pub fn is_bolt12_offer(s: &str) -> bool {
+    s.len() >= 4 && s[..4].eq_ignore_ascii_case("lno1")
+}
+
+/// Split a BOLT12 offer string into the raw offer and an optional amount-sats.
+/// Accepts `lno1...` or `lno1...?amount=1000`. Case-insensitive prefix detection.
+pub fn parse_bolt12_offer_parts(s: &str) -> (String, Option<u64>) {
+    if let Some(idx) = s.find("?amount=") {
+        let offer = s[..idx].to_string();
+        let amt = s[idx + 8..].parse::<u64>().ok();
+        (offer, amt)
+    } else {
+        (s.to_string(), None)
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bolt12_offer_detection() {
+        assert!(is_bolt12_offer("lno1qgsqvgjwcf6qqz9"));
+        assert!(is_bolt12_offer("lno1qgsqvgjwcf6qqz9?amount=1000"));
+        assert!(is_bolt12_offer("LNO1QGSQVGJWCF6QQZ9"));
+        assert!(is_bolt12_offer("Lno1MixedCase"));
+        assert!(!is_bolt12_offer("lnbc1qgsqvgjwcf6qqz9"));
+        assert!(!is_bolt12_offer("lno"));
+        assert!(!is_bolt12_offer(""));
+    }
+
+    #[test]
+    fn bolt12_offer_parts_parsing() {
+        let (offer, amt) = parse_bolt12_offer_parts("lno1abc123");
+        assert_eq!(offer, "lno1abc123");
+        assert_eq!(amt, None);
+
+        let (offer, amt) = parse_bolt12_offer_parts("lno1abc123?amount=500");
+        assert_eq!(offer, "lno1abc123");
+        assert_eq!(amt, Some(500));
+
+        let (offer, amt) = parse_bolt12_offer_parts("LNO1ABC?amount=42");
+        assert_eq!(offer, "LNO1ABC");
+        assert_eq!(amt, Some(42));
+    }
 
     #[test]
     fn local_only_checks() {

@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 //! Integration tests for EvmProvider against Base Sepolia testnet.
 //!
 //! Read-only tests (create, balance, list) need no funds — just a working RPC endpoint.
@@ -15,7 +22,10 @@
 
 use agent_first_pay::provider::evm::EvmProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
+use agent_first_pay::store::redb_store::RedbStore;
+use agent_first_pay::store::StorageBackend;
 use agent_first_pay::types::{Network, WalletCreateRequest};
+use std::sync::Arc;
 
 const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
 
@@ -28,7 +38,10 @@ fn rpc_endpoint() -> String {
 async fn evm_live_create_and_list() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -67,7 +80,10 @@ async fn evm_live_create_and_list() {
 async fn evm_live_balance_new_wallet() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -99,7 +115,10 @@ async fn evm_live_balance_new_wallet() {
 async fn evm_live_balance_all() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -131,7 +150,10 @@ async fn evm_live_balance_all() {
 async fn evm_live_receive_info() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -161,7 +183,10 @@ async fn evm_live_receive_info() {
 async fn evm_live_wallet_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
@@ -175,7 +200,10 @@ async fn evm_live_wallet_not_found() {
 async fn evm_live_close_empty_wallet() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -209,7 +237,10 @@ async fn evm_live_close_empty_wallet() {
 async fn evm_live_history_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -256,7 +287,10 @@ async fn evm_live_send_native() {
     };
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {
@@ -313,7 +347,10 @@ async fn evm_live_send_usdc_token() {
     };
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = EvmProvider::new(data_dir);
+    let provider = EvmProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&WalletCreateRequest {

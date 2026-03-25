@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use agent_first_pay::types::{ConfigPatch, Input, Output, RuntimeConfig};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -11,7 +13,7 @@ use tokio::task::JoinHandle;
 
 /// Start a gRPC AfPay server on a free port. Returns (addr, secret, server_handle).
 fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
-    use agent_first_pay::rpc::crypto::Cipher;
+    use agent_first_pay::mode::rpc::crypto::Cipher;
 
     let secret = "test-secret-rpc".to_string();
 
@@ -21,8 +23,8 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
 
     let secret_clone = secret.clone();
     let handle = tokio::spawn(async move {
-        use agent_first_pay::rpc::proto::af_pay_server::{AfPay, AfPayServer};
-        use agent_first_pay::rpc::proto::{EncryptedRequest, EncryptedResponse};
+        use agent_first_pay::mode::rpc::proto::af_pay_server::{AfPay, AfPayServer};
+        use agent_first_pay::mode::rpc::proto::{EncryptedRequest, EncryptedResponse};
         use tonic::{Request, Response, Status};
 
         struct TestService {
@@ -103,7 +105,7 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
 mod crypto_roundtrip {
     #[test]
     fn roundtrip() {
-        use agent_first_pay::rpc::crypto::Cipher;
+        use agent_first_pay::mode::rpc::crypto::Cipher;
 
         let cipher = Cipher::from_secret("integration-test-secret");
         let plaintext = b"{\"code\":\"version\"}";
@@ -116,9 +118,9 @@ mod crypto_roundtrip {
 /// Raw gRPC version request/response (manual encrypt/decrypt via Cipher, no remote:: helpers).
 #[tokio::test]
 async fn rpc_version_raw() {
-    use agent_first_pay::rpc::crypto::Cipher;
-    use agent_first_pay::rpc::proto::af_pay_client::AfPayClient;
-    use agent_first_pay::rpc::proto::EncryptedRequest;
+    use agent_first_pay::mode::rpc::crypto::Cipher;
+    use agent_first_pay::mode::rpc::proto::af_pay_client::AfPayClient;
+    use agent_first_pay::mode::rpc::proto::EncryptedRequest;
 
     let (addr, secret, server_handle) = start_test_server();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -271,7 +273,6 @@ fn config_load_from_dir() {
     // No config file → defaults
     let cfg = RuntimeConfig::load_from_dir(&dir.path().to_string_lossy()).unwrap();
     assert!(cfg.providers.is_empty());
-    assert!(cfg.limits.is_empty());
     assert_eq!(cfg.data_dir, dir.path().to_string_lossy().as_ref());
 
     // Write a config.toml with afpay_rpc + providers
@@ -279,13 +280,6 @@ fn config_load_from_dir() {
         &config_path,
         r#"
 log = ["cashu"]
-
-[[limits]]
-scope = "network"
-network = "cashu"
-window_s = 86400
-max_spend = 100_000
-unit = "sats"
 
 [afpay_rpc.wallet-server]
 endpoint = "10.0.1.5:9400"
@@ -313,8 +307,6 @@ sol = "chain-server"
     assert_eq!(cfg.providers.len(), 2);
     assert_eq!(cfg.providers["ln"], "wallet-server");
     assert_eq!(cfg.providers["sol"], "chain-server");
-    assert_eq!(cfg.limits.len(), 1);
-    assert_eq!(cfg.limits[0].window_s, 86400);
     assert_eq!(cfg.log, vec!["cashu"]);
     // data_dir should be set to the provided dir, not from the config file
     assert_eq!(cfg.data_dir, dir.path().to_string_lossy().as_ref());
@@ -337,7 +329,6 @@ async fn config_update_rejects_unsupported_fields() {
         &app,
         Input::Config(ConfigPatch {
             data_dir: Some("/tmp/alt".to_string()),
-            limits: None,
             log: None,
             exchange_rate: None,
             afpay_rpc: None,
@@ -353,14 +344,14 @@ async fn config_update_rejects_unsupported_fields() {
             error_code, error, ..
         } => {
             assert_eq!(error_code, "not_implemented");
-            assert!(error.contains("only supports 'log' and 'limits'"));
+            assert!(error.contains("only supports 'log'"));
         }
         other => panic!("expected error output, got: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn config_update_allows_log_and_limits() {
+async fn config_update_allows_log() {
     let dir = tempfile::tempdir().unwrap();
     let config = RuntimeConfig {
         data_dir: dir.path().to_string_lossy().into_owned(),
@@ -376,15 +367,6 @@ async fn config_update_allows_log_and_limits() {
         &app,
         Input::Config(ConfigPatch {
             data_dir: None,
-            limits: Some(vec![agent_first_pay::types::SpendLimit {
-                rule_id: None,
-                scope: agent_first_pay::types::SpendScope::Network,
-                network: Some("cashu".to_string()),
-                wallet: None,
-                window_s: 3600,
-                max_spend: 1234,
-                token: None,
-            }]),
             log: Some(vec!["wallet".to_string(), "pay".to_string()]),
             exchange_rate: None,
             afpay_rpc: None,
@@ -397,8 +379,6 @@ async fn config_update_allows_log_and_limits() {
     let output = rx.recv().await.expect("config output");
     match output {
         Output::Config(cfg) => {
-            assert_eq!(cfg.limits.len(), 1);
-            assert_eq!(cfg.limits[0].max_spend, 1234);
             assert_eq!(cfg.log, vec!["wallet", "pay"]);
         }
         other => panic!("expected config output, got: {other:?}"),

@@ -159,6 +159,7 @@ pub trait PayProvider: Send + Sync {
     ) -> Result<ReceiveInfo, PayError>;
     async fn receive_claim(&self, wallet: &str, quote_id: &str) -> Result<u64, PayError>;
 
+    #[cfg(feature = "interactive")]
     async fn cashu_send_quote(
         &self,
         _wallet: &str,
@@ -206,6 +207,15 @@ pub trait PayProvider: Send + Sync {
         offset: usize,
     ) -> Result<Vec<HistoryRecord>, PayError>;
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError>;
+    /// Optional provider-specific on-chain memo decoding for a transaction.
+    /// Returns `Ok(None)` when memo cannot be decoded or is absent.
+    async fn history_onchain_memo(
+        &self,
+        _wallet: &str,
+        _transaction_id: &str,
+    ) -> Result<Option<String>, PayError> {
+        Ok(None)
+    }
     async fn history_sync(&self, wallet: &str, limit: usize) -> Result<HistorySyncStats, PayError> {
         let items = self.history_list(wallet, limit, 0).await?;
         Ok(HistorySyncStats {

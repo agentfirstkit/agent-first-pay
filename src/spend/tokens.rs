@@ -1,7 +1,10 @@
-/// Shared token registry for well-known tokens across chains.
-///
-/// Maps (chain, symbol) → (contract/mint address, decimals).
-/// Used by both EVM and SOL providers to resolve `--token usdc` style flags.
+#![cfg_attr(not(any(feature = "sol", feature = "evm")), allow(dead_code))]
+
+//! Shared token registry for well-known tokens across chains.
+//!
+//! Maps (chain, symbol) -> (contract/mint address, decimals).
+//! Used by both EVM and SOL providers to resolve `--token usdc` style flags.
+
 pub struct KnownToken {
     pub symbol: &'static str,
     pub address: &'static str,
@@ -131,6 +134,7 @@ pub fn sol_cluster_from_endpoint(endpoint: &str) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

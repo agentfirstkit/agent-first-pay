@@ -1,4 +1,5 @@
 #![cfg(feature = "rest")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use agent_first_pay::handler::{self, App};
 use agent_first_pay::types::{Input, Output, RuntimeConfig};

@@ -109,11 +109,7 @@ fn write_schema_version(db: &Database, version: u64) -> Result<(), PayError> {
 }
 
 #[cfg(test)]
-pub fn read_schema_version_pub(db: &Database) -> Result<u64, PayError> {
-    read_schema_version(db)
-}
-
-#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

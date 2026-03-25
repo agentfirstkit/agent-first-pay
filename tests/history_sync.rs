@@ -1,4 +1,5 @@
 #![cfg(feature = "redb")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use agent_first_pay::handler::{dispatch, App};
 use agent_first_pay::provider::{HistorySyncStats, PayError, PayProvider};
@@ -208,27 +209,29 @@ fn seed_phrase() -> String {
 fn setup_wallet(
     store: &agent_first_pay::store::StorageBackend,
     wallet_id: &str,
-) -> Result<(), PayError> {
-    store.save_wallet_metadata(&WalletMetadata {
-        id: wallet_id.to_string(),
-        network: Network::Evm,
-        label: Some("evm-test".to_string()),
-        mint_url: None,
-        sol_rpc_endpoints: None,
-        evm_rpc_endpoints: Some(vec!["https://rpc.example".to_string()]),
-        evm_chain_id: Some(8453),
-        seed_secret: Some(seed_phrase()),
-        backend: None,
-        btc_esplora_url: None,
-        btc_network: None,
-        btc_address_type: None,
-        btc_core_url: None,
-        btc_core_auth_secret: None,
-        btc_electrum_url: None,
-        custom_tokens: None,
-        created_at_epoch_s: wallet::now_epoch_seconds(),
-        error: None,
-    })
+) -> Result<(), Box<PayError>> {
+    store
+        .save_wallet_metadata(&WalletMetadata {
+            id: wallet_id.to_string(),
+            network: Network::Evm,
+            label: Some("evm-test".to_string()),
+            mint_url: None,
+            sol_rpc_endpoints: None,
+            evm_rpc_endpoints: Some(vec!["https://rpc.example".to_string()]),
+            evm_chain_id: Some(8453),
+            seed_secret: Some(seed_phrase()),
+            backend: None,
+            btc_esplora_url: None,
+            btc_network: None,
+            btc_address_type: None,
+            btc_core_url: None,
+            btc_core_auth_secret: None,
+            btc_electrum_url: None,
+            custom_tokens: None,
+            created_at_epoch_s: wallet::now_epoch_seconds(),
+            error: None,
+        })
+        .map_err(Box::new)
 }
 
 #[tokio::test]
@@ -261,6 +264,7 @@ async fn history_list_reads_only_local_store() {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: None,
+            reference_keys: None,
         })
         .expect("append transaction");
 

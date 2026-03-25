@@ -1,7 +1,7 @@
 use crate::provider::{HistorySyncStats, PayError, PayProvider};
 use crate::spend::tokens;
-use crate::store::transaction;
 use crate::store::wallet::{self, WalletMetadata};
+use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -17,6 +17,7 @@ use solana_sdk::transaction::Transaction;
 use solana_system_interface::instruction as system_instruction;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 
 fn sol_wallet_summary(meta: WalletMetadata, address: String) -> WalletSummary {
     WalletSummary {
@@ -33,8 +34,9 @@ fn sol_wallet_summary(meta: WalletMetadata, address: String) -> WalletSummary {
 }
 
 pub struct SolProvider {
-    data_dir: String,
+    _data_dir: String,
     http_client: reqwest::Client,
+    store: Arc<StorageBackend>,
 }
 
 const INVALID_SOL_WALLET_ADDRESS: &str = "invalid:sol-wallet-secret";
@@ -49,6 +51,9 @@ struct SolTransferTarget {
     amount_lamports: u64,
     /// If set, this is an SPL token transfer instead of the native token.
     token_mint: Option<Pubkey>,
+    /// Reference key for order binding (per strain-payment-method-solana).
+    /// Added as a read-only non-signer account on the transfer instruction.
+    reference: Option<Pubkey>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,10 +63,11 @@ struct SolChainStatus {
 }
 
 impl SolProvider {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(data_dir: &str, store: Arc<StorageBackend>) -> Self {
         Self {
-            data_dir: data_dir.to_string(),
+            _data_dir: data_dir.to_string(),
             http_client: reqwest::Client::new(),
+            store,
         }
     }
 
@@ -170,6 +176,7 @@ impl SolProvider {
 
         let mut amount_lamports: Option<u64> = None;
         let mut token_mint: Option<Pubkey> = None;
+        let mut reference: Option<Pubkey> = None;
         for pair in query.split('&') {
             if pair.is_empty() {
                 continue;
@@ -209,6 +216,11 @@ impl SolProvider {
                         }
                     }
                 }
+                "reference" => {
+                    reference = Some(Pubkey::from_str(value).map_err(|e| {
+                        PayError::InvalidAmount(format!("invalid reference key '{value}': {e}"))
+                    })?);
+                }
                 _ => {}
             }
         }
@@ -226,11 +238,12 @@ impl SolProvider {
             recipient_address: recipient_address.to_string(),
             amount_lamports,
             token_mint,
+            reference,
         })
     }
 
     fn load_sol_wallet(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
-        let meta = wallet::load_wallet_metadata(&self.data_dir, wallet_id)?;
+        let meta = self.store.load_wallet_metadata(wallet_id)?;
         if meta.network != Network::Sol {
             return Err(PayError::WalletNotFound(format!(
                 "{wallet_id} is not a sol wallet"
@@ -243,7 +256,7 @@ impl SolProvider {
         if !wallet_id.trim().is_empty() {
             return Ok(wallet_id.to_string());
         }
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Sol))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Sol))?;
         match wallets.len() {
             0 => Err(PayError::WalletNotFound("no sol wallet found".to_string())),
             1 => Ok(wallets[0].id.clone()),
@@ -600,6 +613,49 @@ impl SolProvider {
         None
     }
 
+    /// Extract reference keys from a transaction's transfer instructions.
+    /// A reference key is any read-only non-signer account on a system transfer
+    /// or SPL token transfer instruction that isn't a known program or the
+    /// sender/recipient (per strain-payment-method-solana convention).
+    fn extract_reference_keys(tx: &SolGetTransactionResult) -> Vec<String> {
+        const KNOWN_PROGRAMS: &[&str] = &[
+            "11111111111111111111111111111111", // System Program
+            SPL_TOKEN_PROGRAM_ID,
+            SPL_ASSOCIATED_TOKEN_PROGRAM_ID,
+            SOL_MEMO_PROGRAM_ID,
+            "SysvarRent111111111111111111111111111111111",
+        ];
+        let account_keys = &tx.transaction.message.account_keys;
+        let mut refs = Vec::new();
+        for ix in &tx.transaction.message.instructions {
+            let Some(program_id) = account_keys.get(ix.program_id_index) else {
+                continue;
+            };
+            // Only inspect system transfer or SPL token transfer instructions
+            let is_transfer = program_id == "11111111111111111111111111111111"
+                || program_id == SPL_TOKEN_PROGRAM_ID;
+            if !is_transfer {
+                continue;
+            }
+            // Account indices beyond the standard transfer accounts are reference keys.
+            // System transfer: [from, to] = 2 accounts
+            // SPL transfer_checked: [source_ata, mint, dest_ata, authority] = 4 accounts
+            let expected_count = if program_id == SPL_TOKEN_PROGRAM_ID {
+                4
+            } else {
+                2
+            };
+            for &acct_idx in ix.accounts.iter().skip(expected_count) {
+                if let Some(key) = account_keys.get(acct_idx) {
+                    if !KNOWN_PROGRAMS.contains(&key.as_str()) {
+                        refs.push(key.clone());
+                    }
+                }
+            }
+        }
+        refs
+    }
+
     async fn fetch_recent_chain_signatures(
         &self,
         endpoints: &[String],
@@ -714,6 +770,14 @@ impl SolProvider {
             created_at_epoch_s,
             confirmed_at_epoch_s,
             fee: fee_amount,
+            reference_keys: {
+                let refs = Self::extract_reference_keys(&tx);
+                if refs.is_empty() {
+                    None
+                } else {
+                    Some(refs)
+                }
+            },
         }))
     }
 
@@ -839,6 +903,14 @@ impl SolProvider {
                 created_at_epoch_s,
                 confirmed_at_epoch_s,
                 fee: fee_amount,
+                reference_keys: {
+                    let refs = Self::extract_reference_keys(&tx);
+                    if refs.is_empty() {
+                        None
+                    } else {
+                        Some(refs)
+                    }
+                },
             },
             chain_status.confirmations,
         )))
@@ -848,7 +920,7 @@ impl SolProvider {
         &self,
         transaction_id: &str,
     ) -> Result<Option<(HistoryRecord, Option<u32>)>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Sol))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Sol))?;
         for wallet in wallets {
             if let Some(record) = self
                 .fetch_chain_record_for_wallet(&wallet.id, transaction_id)
@@ -886,7 +958,7 @@ impl SolProvider {
         &self,
         transaction_id: &str,
     ) -> Result<Option<SolChainStatus>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Sol))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Sol))?;
         for meta in wallets {
             let Ok(endpoints) = Self::rpc_endpoints_for_wallet(&meta) else {
                 continue;
@@ -988,6 +1060,8 @@ struct SolTransactionMessage {
 struct SolCompiledInstruction {
     program_id_index: usize,
     #[serde(default)]
+    accounts: Vec<usize>,
+    #[serde(default)]
     data: String,
 }
 
@@ -1066,7 +1140,7 @@ impl PayProvider for SolProvider {
             created_at_epoch_s: wallet::now_epoch_seconds(),
             error: None,
         };
-        wallet::save_wallet_metadata(&self.data_dir, &meta)?;
+        self.store.save_wallet_metadata(&meta)?;
 
         Ok(WalletInfo {
             id: wallet_id,
@@ -1090,11 +1164,11 @@ impl PayProvider for SolProvider {
                 "wallet {wallet_id} has non-zero balance components ({component_list}); transfer funds first"
             )));
         }
-        wallet::delete_wallet_metadata(&self.data_dir, wallet_id)
+        self.store.delete_wallet_metadata(wallet_id)
     }
 
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Sol))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Sol))?;
         Ok(wallets
             .into_iter()
             .map(|meta| {
@@ -1126,7 +1200,7 @@ impl PayProvider for SolProvider {
     }
 
     async fn balance_all(&self) -> Result<Vec<WalletBalanceItem>, PayError> {
-        let wallets = wallet::list_wallet_metadata(&self.data_dir, Some(Network::Sol))?;
+        let wallets = self.store.list_wallet_metadata(Some(Network::Sol))?;
         let mut items = Vec::with_capacity(wallets.len());
         for meta in wallets {
             let custom_tokens = meta.custom_tokens.as_deref().unwrap_or_default().to_vec();
@@ -1324,6 +1398,15 @@ impl PayProvider for SolProvider {
                 );
                 instructions.push(transfer_ix);
             }
+            // Add reference key as read-only non-signer account on the transfer
+            // instruction (per strain-payment-method-solana convention).
+            if let Some(ref_key) = &transfer_target.reference {
+                if let Some(last_ix) = instructions.last_mut() {
+                    last_ix
+                        .accounts
+                        .push(AccountMeta::new_readonly(*ref_key, false));
+                }
+            }
             let transaction = Transaction::new_signed_with_payer(
                 &instructions,
                 Some(&keypair.pubkey()),
@@ -1417,8 +1500,9 @@ impl PayProvider for SolProvider {
             created_at_epoch_s: now,
             confirmed_at_epoch_s: None,
             fee: fee_amount.clone(),
+            reference_keys: None,
         };
-        let _ = transaction::append_transaction_record(&self.data_dir, &record);
+        let _ = self.store.append_transaction_record(&record);
 
         Ok(SendResult {
             wallet: resolved_wallet_id,
@@ -1458,8 +1542,7 @@ impl PayProvider for SolProvider {
     ) -> Result<Vec<HistoryRecord>, PayError> {
         let resolved = self.resolve_wallet_id(wallet_id)?;
         let _ = self.load_sol_wallet(&resolved)?;
-        let mut local_records =
-            transaction::load_wallet_transaction_records(&self.data_dir, &resolved)?;
+        let mut local_records = self.store.load_wallet_transaction_records(&resolved)?;
         for record in &mut local_records {
             if record.status != TxStatus::Pending || record.network != Network::Sol {
                 continue;
@@ -1480,8 +1563,7 @@ impl PayProvider for SolProvider {
                 if record.status != chain_status.status
                     || record.confirmed_at_epoch_s != confirmed_at_epoch_s
                 {
-                    let _ = transaction::update_transaction_record_status(
-                        &self.data_dir,
+                    let _ = self.store.update_transaction_record_status(
                         &record.transaction_id,
                         chain_status.status,
                         confirmed_at_epoch_s,
@@ -1519,8 +1601,7 @@ impl PayProvider for SolProvider {
     }
 
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        let local_record =
-            transaction::find_transaction_record_by_id(&self.data_dir, transaction_id)?;
+        let local_record = self.store.find_transaction_record_by_id(transaction_id)?;
         let local_sol_record = local_record.filter(|r| r.network == Network::Sol);
 
         let chain_record = if let Some(record) = &local_sol_record {
@@ -1546,8 +1627,7 @@ impl PayProvider for SolProvider {
                 if local.status != item.status
                     || local.confirmed_at_epoch_s != item.confirmed_at_epoch_s
                 {
-                    let _ = transaction::update_transaction_record_status(
-                        &self.data_dir,
+                    let _ = self.store.update_transaction_record_status(
                         transaction_id,
                         item.status,
                         item.confirmed_at_epoch_s,
@@ -1580,8 +1660,7 @@ impl PayProvider for SolProvider {
                 if local.status != chain_status.status
                     || local.confirmed_at_epoch_s != confirmed_at_epoch_s
                 {
-                    let _ = transaction::update_transaction_record_status(
-                        &self.data_dir,
+                    let _ = self.store.update_transaction_record_status(
                         transaction_id,
                         chain_status.status,
                         confirmed_at_epoch_s,
@@ -1623,8 +1702,7 @@ impl PayProvider for SolProvider {
         let resolved = self.resolve_wallet_id(wallet_id)?;
         let _ = self.load_sol_wallet(&resolved)?;
 
-        let mut local_records =
-            transaction::load_wallet_transaction_records(&self.data_dir, &resolved)?;
+        let mut local_records = self.store.load_wallet_transaction_records(&resolved)?;
         let mut stats = HistorySyncStats::default();
 
         for record in &mut local_records {
@@ -1651,8 +1729,7 @@ impl PayProvider for SolProvider {
                 if record.status != chain_status.status
                     || record.confirmed_at_epoch_s != confirmed_at_epoch_s
                 {
-                    let _ = transaction::update_transaction_record_status(
-                        &self.data_dir,
+                    let _ = self.store.update_transaction_record_status(
                         &record.transaction_id,
                         chain_status.status,
                         confirmed_at_epoch_s,
@@ -1681,8 +1758,7 @@ impl PayProvider for SolProvider {
                 if existing.status != chain_record.status
                     || existing.confirmed_at_epoch_s != chain_record.confirmed_at_epoch_s
                 {
-                    let _ = transaction::update_transaction_record_status(
-                        &self.data_dir,
+                    let _ = self.store.update_transaction_record_status(
                         &chain_record.transaction_id,
                         chain_record.status,
                         chain_record.confirmed_at_epoch_s,
@@ -1692,7 +1768,7 @@ impl PayProvider for SolProvider {
                 continue;
             }
 
-            let _ = transaction::append_transaction_record(&self.data_dir, &chain_record);
+            let _ = self.store.append_transaction_record(&chain_record);
             local_by_id.insert(chain_record.transaction_id.clone(), chain_record);
             stats.records_added = stats.records_added.saturating_add(1);
         }
@@ -1702,14 +1778,24 @@ impl PayProvider for SolProvider {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{SolGetTransactionResult, SolProvider, SOL_MEMO_PROGRAM_ID};
     use crate::provider::PayProvider;
     use crate::store::wallet::{self, WalletMetadata};
+    use crate::store::StorageBackend;
     use crate::types::{Network, WalletCreateRequest};
     use solana_sdk::pubkey::Pubkey;
     use solana_sdk::signature::{keypair_from_seed_phrase_and_passphrase, Signer};
     use std::str::FromStr;
+    use std::sync::Arc;
+
+    #[cfg(feature = "redb")]
+    fn test_store(data_dir: &str) -> Arc<StorageBackend> {
+        Arc::new(StorageBackend::Redb(
+            crate::store::redb_store::RedbStore::new(data_dir),
+        ))
+    }
 
     #[test]
     fn normalize_endpoint_adds_scheme() {
@@ -1928,11 +2014,12 @@ mod tests {
         assert!(SolProvider::extract_memo_from_transaction(&tx).is_none());
     }
 
+    #[cfg(feature = "redb")]
     #[tokio::test]
     async fn list_wallets_tolerates_invalid_secret() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_string_lossy().to_string();
-        let provider = SolProvider::new(&data_dir);
+        let provider = SolProvider::new(&data_dir, test_store(&data_dir));
         let endpoint = "https://api.devnet.solana.com".to_string();
 
         let valid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -1999,11 +2086,12 @@ mod tests {
         assert_eq!(bad.address, "invalid:sol-wallet-secret");
     }
 
+    #[cfg(feature = "redb")]
     #[tokio::test]
     async fn send_quote_resolves_wallet_identifier() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_string_lossy().to_string();
-        let provider = SolProvider::new(&data_dir);
+        let provider = SolProvider::new(&data_dir, test_store(&data_dir));
         let mnemonic =
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 

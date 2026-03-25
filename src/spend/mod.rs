@@ -1,9 +1,12 @@
+#![cfg_attr(not(any(feature = "redb", feature = "postgres")), allow(dead_code))]
+
 pub mod tokens;
 
 use crate::provider::PayError;
-use crate::types::{
-    ExchangeRateConfig, ExchangeRateSourceType, SpendLimit, SpendLimitStatus, SpendScope,
-};
+#[cfg(feature = "exchange-rate")]
+use crate::types::ExchangeRateSourceType;
+use crate::types::{ExchangeRateConfig, SpendLimit, SpendLimitStatus, SpendScope};
+#[cfg(feature = "redb")]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -118,6 +121,8 @@ pub struct SpendLedger {
     backend: SpendBackend,
     exchange_rate: Option<ExchangeRateConfig>,
     mu: Mutex<()>,
+    /// Set to true when a cached FX quote's age exceeds 80% of its TTL.
+    fx_stale_warned: std::sync::atomic::AtomicBool,
 }
 
 impl SpendLedger {
@@ -135,6 +140,7 @@ impl SpendLedger {
             backend,
             exchange_rate,
             mu: Mutex::new(()),
+            fx_stale_warned: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -144,7 +150,14 @@ impl SpendLedger {
             backend: SpendBackend::Postgres { pool },
             exchange_rate,
             mu: Mutex::new(()),
+            fx_stale_warned: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Returns true (once) if a stale FX quote was used since last check.
+    pub fn take_fx_stale_warning(&self) -> bool {
+        self.fx_stale_warned
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Add a single spend limit rule. Generates and assigns a rule_id, returns it.
@@ -165,14 +178,14 @@ impl SpendLedger {
     }
 
     /// Remove a spend limit rule by its rule_id.
-    pub async fn remove_limit(&self, rule_id: &str) -> Result<(), PayError> {
+    pub async fn remove_limit(&self, _rule_id: &str) -> Result<(), PayError> {
         let _guard = self.mu.lock().await;
 
         match &self.backend {
             #[cfg(feature = "redb")]
-            SpendBackend::Redb { .. } => self.remove_limit_redb(rule_id),
+            SpendBackend::Redb { .. } => self.remove_limit_redb(_rule_id),
             #[cfg(feature = "postgres")]
-            SpendBackend::Postgres { .. } => self.remove_limit_postgres(rule_id).await,
+            SpendBackend::Postgres { .. } => self.remove_limit_postgres(_rule_id).await,
             SpendBackend::None => Err(PayError::NotImplemented(
                 "no storage backend for spend limits".to_string(),
             )),
@@ -235,28 +248,28 @@ impl SpendLedger {
         }
     }
 
-    pub async fn confirm(&self, reservation_id: u64) -> Result<(), PayError> {
+    pub async fn confirm(&self, _reservation_id: u64) -> Result<(), PayError> {
         let _guard = self.mu.lock().await;
 
         match &self.backend {
             #[cfg(feature = "redb")]
-            SpendBackend::Redb { .. } => self.confirm_redb(reservation_id),
+            SpendBackend::Redb { .. } => self.confirm_redb(_reservation_id),
             #[cfg(feature = "postgres")]
-            SpendBackend::Postgres { .. } => self.confirm_postgres(reservation_id).await,
+            SpendBackend::Postgres { .. } => self.confirm_postgres(_reservation_id).await,
             SpendBackend::None => Err(PayError::NotImplemented(
                 "no storage backend for spend limits".to_string(),
             )),
         }
     }
 
-    pub async fn cancel(&self, reservation_id: u64) -> Result<(), PayError> {
+    pub async fn cancel(&self, _reservation_id: u64) -> Result<(), PayError> {
         let _guard = self.mu.lock().await;
 
         match &self.backend {
             #[cfg(feature = "redb")]
-            SpendBackend::Redb { .. } => self.cancel_redb(reservation_id),
+            SpendBackend::Redb { .. } => self.cancel_redb(_reservation_id),
             #[cfg(feature = "postgres")]
-            SpendBackend::Postgres { .. } => self.cancel_postgres(reservation_id).await,
+            SpendBackend::Postgres { .. } => self.cancel_postgres(_reservation_id).await,
             SpendBackend::None => Ok(()),
         }
     }
@@ -1142,6 +1155,28 @@ impl SpendLedger {
         })?;
 
         let quote = self.get_or_fetch_quote(symbol, "USD").await?;
+
+        // Block if the quote has fully expired (fetch must have failed silently
+        // in a prior call, or the clock jumped).
+        let now = now_epoch_ms();
+        if quote.expires_at_epoch_ms > 0 && now > quote.expires_at_epoch_ms {
+            return Err(PayError::NetworkError(
+                "exchange-rate quote expired — cannot convert to USD; check exchange_rate sources"
+                    .to_string(),
+            ));
+        }
+
+        // Flag if cached quote age exceeds 80% of its TTL (set on every occurrence
+        // so callers can surface the warning per-request).
+        let ttl_ms = quote
+            .expires_at_epoch_ms
+            .saturating_sub(quote.fetched_at_epoch_ms);
+        let age_ms = now.saturating_sub(quote.fetched_at_epoch_ms);
+        if ttl_ms > 0 && age_ms > ttl_ms * 4 / 5 {
+            self.fx_stale_warned
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
         let usd = (amount_native as f64 / divisor) * quote.price;
         if !usd.is_finite() || usd < 0f64 {
             return Err(PayError::InternalError(
@@ -1331,6 +1366,7 @@ fn token_asset(network: &str, token: Option<&str>) -> Option<(&'static str, f64)
     }
 }
 
+#[cfg(feature = "exchange-rate")]
 fn extract_price_generic(value: &serde_json::Value) -> Option<f64> {
     value
         .get("price")
@@ -1345,6 +1381,7 @@ fn extract_price_generic(value: &serde_json::Value) -> Option<f64> {
         })
 }
 
+#[cfg(feature = "exchange-rate")]
 impl ExchangeRateSourceType {
     fn as_str(self) -> &'static str {
         match self {
@@ -1355,6 +1392,7 @@ impl ExchangeRateSourceType {
     }
 }
 
+#[cfg(feature = "exchange-rate")]
 fn coingecko_coin_id(symbol: &str) -> Option<&'static str> {
     match symbol.to_ascii_uppercase().as_str() {
         "BTC" => Some("bitcoin"),
@@ -1364,6 +1402,7 @@ fn coingecko_coin_id(symbol: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(feature = "exchange-rate")]
 fn kraken_pair(symbol: &str) -> Option<&'static str> {
     match symbol.to_ascii_uppercase().as_str() {
         "BTC" => Some("XBTUSD"),
@@ -1454,11 +1493,13 @@ async fn fetch_from_source(
     extract_fn(&value).ok_or_else(|| "could not extract price from response".to_string())
 }
 
+#[cfg(feature = "redb")]
 fn encode<T: Serialize>(value: &T) -> Result<String, PayError> {
     serde_json::to_string(value)
         .map_err(|e| PayError::InternalError(format!("spend encode failed: {e}")))
 }
 
+#[cfg(feature = "redb")]
 fn decode<T: DeserializeOwned>(encoded: &str) -> Result<T, PayError> {
     serde_json::from_str(encoded).map_err(|e| {
         let preview_len = encoded.len().min(48);
@@ -1471,6 +1512,7 @@ fn decode<T: DeserializeOwned>(encoded: &str) -> Result<T, PayError> {
     })
 }
 
+#[cfg(feature = "redb")]
 fn prepend_err(prefix: &str, err: PayError) -> PayError {
     match err {
         PayError::InternalError(msg) => PayError::InternalError(format!("{prefix}: {msg}")),
@@ -1696,6 +1738,7 @@ fn next_counter(write_txn: &redb::WriteTransaction, key: &str) -> Result<u64, Pa
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

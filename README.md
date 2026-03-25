@@ -21,7 +21,7 @@ For remote operation, two server modes are available:
 
 ```
 # RPC mode — gRPC + AES-256-GCM PSK (process-to-process)
-afpay CLI / MCP / pipe
+afpay CLI / pipe
   │ gRPC (AES-256-GCM PSK)
   └──→ afpay --mode rpc (VPS)
 
@@ -40,7 +40,7 @@ See [Architecture](docs/architecture.md) for advanced multi-server deployment pa
 | Network | Unit | Token Support | Feature |
 |---------|------|---------------|---------|
 | Cashu | sats | — | `cashu` |
-| Lightning | sats | — | `ln-nwc` / `ln-phoenixd` / `ln-lnbits` |
+| Lightning | sats | — | `ln-phoenixd` (default) / `ln-lnbits` / `ln-nwc` |
 | Solana | lamports | USDC, USDT (SPL) | `sol` |
 | EVM chain | gwei | USDC, USDT (ERC-20) | `evm` |
 | Bitcoin | sats | — | `btc-esplora` / `btc-core` / `btc-electrum` |
@@ -97,7 +97,18 @@ afpay balance
 afpay --rpc-endpoint 10.0.1.5:9400 --rpc-secret "64-char-hex" balance
 ```
 
-Other modes: `--mode interactive` (REPL), `--mode pipe` (JSONL stdin/stdout), `--mode mcp` (MCP stdio, rmcp framework), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [Manual](docs/manual.md) for details.
+Other modes: `--mode interactive` (REPL), `--mode tui` (full-screen terminal UI), `--mode pipe` (JSONL stdin/stdout), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [CLI Reference](docs/cli.md) for flags and subcommands, and [Architecture](docs/architecture.md) for deployment and protocol details.
+
+## Modes
+
+| Mode | Start | Use Case |
+|------|-------|----------|
+| cli | `afpay <subcommand>` | One command, local or forwarded via `--rpc-endpoint` |
+| pipe | `afpay --mode pipe` | Long-lived JSONL stdin/stdout session for agents |
+| interactive | `afpay --mode interactive` | Human REPL with completion and QR helpers |
+| tui | `afpay --mode tui` | Full-screen terminal workflow over the same interactive command interface |
+| rpc | `afpay --mode rpc` | Encrypted gRPC daemon for afpay clients or coordinators |
+| rest | `afpay --mode rest` | HTTP API server for curl, containers, and general clients |
 
 ## Quick Start
 
@@ -135,11 +146,17 @@ afpay wallet create --network ln --backend nwc --nwc-uri-secret "nostr+walletcon
 afpay wallet create --network ln --backend phoenixd --endpoint http://localhost:9740 --password-secret "hunter2"
 afpay wallet create --network ln --backend lnbits --endpoint https://legend.lnbits.com --admin-key-secret "abc123"
 
-# Receive (create invoice)
+# Receive — BOLT11 invoice (one-time, amount-specific)
 afpay receive --network ln --amount 500
 
-# Send (pay invoice)
+# Receive — BOLT12 offer (persistent, reusable — phoenixd only)
+afpay receive --network ln
+
+# Send — pay BOLT11 invoice
 afpay send --network ln --to lnbc1...
+
+# Send — pay BOLT12 offer (phoenixd only, --amount required)
+afpay send --network ln --to lno1... --amount 1000
 
 afpay balance --network ln
 ```
@@ -159,7 +176,7 @@ afpay send --network sol --to <address> --amount 1000000 --token usdc
 afpay receive --wallet sol-main --wait --amount 1000000 --token usdc
 
 # Custom SPL token (register first, then use by symbol)
-afpay wallet config token-add --wallet sol-main --symbol bonk --address DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 --decimals 5
+afpay sol config --wallet sol-main token-add --symbol bonk --address DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 --decimals 5
 afpay send --network sol --to <address> --amount 100000 --token bonk
 afpay receive --wallet sol-main --wait --amount 100000 --token bonk
 
@@ -181,8 +198,14 @@ afpay receive --wallet evm-base --wait --amount 1000000000000 --token native
 afpay send --wallet evm-base --to <address> --amount 1000000 --token usdc
 afpay receive --wallet evm-base --wait --amount 1000000 --token usdc
 
+# Optional: match afpay-encoded on-chain memo while waiting (amount is still required)
+afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --onchain-memo "order:abc"
+
+# Optional: increase per-poll history scan window when waiting (default 500, clamp 1..5000)
+afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --wait-sync-limit 1500
+
 # Custom ERC-20 token (register first, then use by symbol)
-afpay wallet config token-add --wallet evm-base --symbol dai --address 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb --decimals 18
+afpay evm config --wallet evm-base token-add --symbol dai --address 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb --decimals 18
 afpay send --wallet evm-base --to <address> --amount 1000000 --token dai
 afpay receive --wallet evm-base --wait --amount 1000000 --token dai
 
@@ -208,6 +231,9 @@ afpay receive --network btc
 # Optional: wait for incoming funds (exact amount match)
 afpay receive --network btc --amount 1000 --wait --wait-timeout-s 120 --wait-poll-interval-ms 1000
 
+# Optional: increase per-poll history scan window when waiting (default 500, clamp 1..5000)
+afpay receive --network btc --amount 1000 --wait --wait-sync-limit 1500
+
 # Send (amount in satoshis)
 afpay send --network btc --to tb1q... --amount 5000
 
@@ -220,6 +246,8 @@ afpay wallet create --network btc --btc-network mainnet --btc-esplora-url https:
 afpay balance --network btc
 afpay history status --transaction-id <txid>
 ```
+
+`receive --wait` for EVM/BTC emits on-chain transaction IDs in `history_status.transaction_id`, so they can be re-queried with `history status --transaction-id ...`.
 
 BTC backend options are validated at wallet creation time:
 
@@ -248,7 +276,7 @@ afpay history status --transaction-id <id>
 
 ## Token Support
 
-USDC and USDT are built-in for sol and evm. Other tokens (DAI, WBTC, BONK, WIF, JUP, etc.) can be registered per-wallet via `wallet config token-add`.
+USDC and USDT are built-in for sol and evm. Other tokens (DAI, WBTC, BONK, WIF, JUP, etc.) can be registered per-wallet via `<network> config --wallet <id> token-add`.
 
 Balance queries automatically show all known tokens:
 
@@ -270,10 +298,10 @@ Built-in tokens: EVM — USDC/USDT on Base (8453), Arbitrum (42161), Ethereum (1
 Multi-tier spend limits — all rules checked before every send, any breach rejects the transaction:
 
 ```bash
-afpay limit add --scope network --network cashu --window 1h --max-spend 10000
-afpay limit add --scope network --network sol --token native --window 1h --max-spend 1000000
-afpay limit add --scope wallet --wallet w_1a2b3c4d --window 24h --max-spend 50000
-afpay limit add --scope global-usd-cents --window 24h --max-spend 500000   # requires exchange rate config
+afpay cashu limit add --window 1h --max-spend 10000
+afpay sol limit add --token native --window 1h --max-spend 1000000
+afpay cashu limit --wallet w_1a2b3c4d add --window 24h --max-spend 50000
+afpay global limit add --window 24h --max-spend 500000   # requires exchange rate config
 afpay limit remove --rule-id r_1a2b3c4d
 afpay limit list
 ```
@@ -293,29 +321,52 @@ afpay limit list
 | REST API (Docker-friendly) | HTTP `POST /v1/afpay` with Bearer auth, no client needed |
 | Depends on agent-first-data | Output formatting, `_secret` redaction, OutputFormat enum |
 
-## Docker / Podman
+## Containers
+
+Container assets now live under `container/`:
+
+- `container/docker/` — canonical Docker/Podman image, compose stack, and supervisor config
+- `container/apple-container/` — Apple `container` CLI workflow for macOS that reuses the same Dockerfile
 
 Single-container deployment with supervisord (afpay + optional phoenixd + optional bitcoind). Works with both Docker and Podman — all commands are interchangeable (`docker` ↔ `podman`, `docker compose` ↔ `podman compose`):
 
 ```bash
 # REST mode (default) — curl-accessible
-docker compose -f docker/docker-compose.yml up --build
-podman compose -f docker/docker-compose.yml up --build   # equivalent
+docker compose -f container/docker/compose.yaml up --build
+podman compose -f container/docker/compose.yaml up --build   # equivalent
+
+# macOS + Apple Container CLI workflow
+./container/apple-container/up.sh
 
 # RPC mode
-AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f docker/docker-compose.yml up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
+AFPAY_MODE=rpc AFPAY_PORT=9400 ./container/apple-container/up.sh
 
-# MCP mode
-AFPAY_MODE=mcp docker compose -f docker/docker-compose.yml up --build
+# Optional local bitcoind (pruned mainnet)
+ENABLE_BITCOIND=true INSTALL_BITCOIND=true docker compose -f container/docker/compose.yaml up --build
+ENABLE_BITCOIND=true ./container/apple-container/up.sh
+
+# Backup / restore container data
+./container/apple-container/backup.sh
+CONTAINER_RUNTIME=docker ./container/docker/backup.sh
 
 # Podman without compose — build and run directly
-podman build -t afpay -f docker/Dockerfile .
+podman build -t afpay -f container/docker/Dockerfile .
 podman run -d --name afpay -p 9401:9401 \
   -v afpay-data:/data/afpay -v bitcoind-data:/data/bitcoind -v phoenixd-data:/data/phoenixd \
   -e AFPAY_MODE=rest afpay
 ```
 
-`AFPAY_MODE` selects `rest`/`rpc`/`mcp`. Secrets auto-generated on first run and persisted to volumes. See [Architecture](docs/architecture.md) for full variable reference.
+`AFPAY_MODE` selects `rest` or `rpc`. Secrets auto-generated on first run and persisted to volumes. `bitcoind` is disabled by default; when enabled it runs pruned `mainnet` with `BTC_PRUNE_MB=550`. See [container/README.md](container/README.md) for backup and restore scripts, [container/apple-container/README.md](container/apple-container/README.md) for the Apple Container CLI flow, and [Architecture](docs/architecture.md) for the full variable reference.
+
+## Data and Recovery
+
+- Default local data dir is `~/.afpay/`.
+- `storage_backend = "redb"` keeps wallet metadata, spend limits, and history in local `.redb` files.
+- `storage_backend = "postgres"` moves wallet metadata, seed secrets, transaction history, and spend accounting into PostgreSQL.
+- For container deployments, back up `/data/afpay` plus `/data/phoenixd/.phoenix/` when using phoenixd.
+- If you use PostgreSQL storage, back up PostgreSQL as well; volume backups alone are not enough.
+- Local wallets with mnemonics can be exported with `afpay wallet dangerously-show-seed --wallet <wallet_id>`.
 
 ## Testing
 
@@ -325,8 +376,7 @@ cargo test
 
 ## Docs
 
-- [Quick Start](docs/quickstart.md) — 30-second walkthrough for each network
-- [Manual](docs/manual.md) — Full command reference, all run modes, protocol details
+- [CLI Reference](docs/cli.md) — Generated command reference from `src/cli.rs`
 - [Architecture](docs/architecture.md) — Deployment patterns, RPC protocol, Provider design
 - [Testing](docs/testing.md) — Unit and integration tests
 

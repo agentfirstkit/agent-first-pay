@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 //! Integration tests for BtcProvider against Bitcoin Signet.
 //!
 //! These tests hit the real Signet Esplora API — no funds required for read-only tests.
@@ -13,8 +20,11 @@
 
 use agent_first_pay::provider::btc::BtcProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
+use agent_first_pay::store::redb_store::RedbStore;
+use agent_first_pay::store::StorageBackend;
 use agent_first_pay::types::{Network, TxStatus, WalletCreateRequest};
 use std::process::Command;
+use std::sync::Arc;
 
 fn signet_request(label: &str) -> WalletCreateRequest {
     WalletCreateRequest {
@@ -56,7 +66,10 @@ fn signet_request_with_mnemonic(label: &str, mnemonic: String) -> WalletCreateRe
 async fn btc_live_create_taproot_and_list() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request("signet-taproot"))
@@ -82,7 +95,10 @@ async fn btc_live_create_taproot_and_list() {
 async fn btc_live_create_segwit_address() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request_segwit("signet-segwit"))
@@ -101,7 +117,10 @@ async fn btc_live_create_segwit_address() {
 async fn btc_live_balance_new_wallet() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request("signet-bal"))
@@ -118,7 +137,10 @@ async fn btc_live_balance_new_wallet() {
 async fn btc_live_balance_all() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request("signet-all"))
@@ -137,7 +159,10 @@ async fn btc_live_balance_all() {
 async fn btc_live_receive_info() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request("signet-recv"))
@@ -157,7 +182,10 @@ async fn btc_live_receive_info() {
 async fn btc_live_wallet_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
@@ -171,7 +199,10 @@ async fn btc_live_wallet_not_found() {
 async fn btc_live_close_empty_wallet() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request("signet-close"))
@@ -192,7 +223,10 @@ async fn btc_live_close_empty_wallet() {
 async fn btc_live_history_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request("signet-hist"))
@@ -208,7 +242,7 @@ async fn btc_live_history_empty() {
 async fn btc_live_mnemonic_restore_same_address() {
     let tmp1 = tempfile::tempdir().unwrap();
     let dir1 = tmp1.path().to_str().unwrap();
-    let provider1 = BtcProvider::new(dir1);
+    let provider1 = BtcProvider::new(dir1, Arc::new(StorageBackend::Redb(RedbStore::new(dir1))));
 
     let w1 = provider1
         .create_wallet(&signet_request("signet-orig"))
@@ -222,7 +256,7 @@ async fn btc_live_mnemonic_restore_same_address() {
     // Restore in a fresh data dir
     let tmp2 = tempfile::tempdir().unwrap();
     let dir2 = tmp2.path().to_str().unwrap();
-    let provider2 = BtcProvider::new(dir2);
+    let provider2 = BtcProvider::new(dir2, Arc::new(StorageBackend::Redb(RedbStore::new(dir2))));
 
     let w2 = provider2
         .create_wallet(&signet_request_with_mnemonic("signet-restore", mnemonic))
@@ -240,7 +274,10 @@ async fn btc_live_mnemonic_restore_same_address() {
 async fn btc_live_multiple_wallets() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w1 = provider
         .create_wallet(&signet_request("wallet-1"))
@@ -266,7 +303,10 @@ async fn btc_live_multiple_wallets() {
 async fn btc_live_send_quote_supported() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request("signet-send-quote"))
@@ -310,7 +350,10 @@ async fn btc_live_send_signet() {
     };
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_str().unwrap();
-    let provider = BtcProvider::new(data_dir);
+    let provider = BtcProvider::new(
+        data_dir,
+        Arc::new(StorageBackend::Redb(RedbStore::new(data_dir))),
+    );
 
     let w = provider
         .create_wallet(&signet_request_with_mnemonic("funded", mnemonic))
