@@ -1,9 +1,10 @@
 #[cfg(feature = "rest")]
 use crate::mode::rest::RestInit;
+#[cfg(feature = "rpc")]
 use crate::mode::rpc::RpcInit;
 use crate::types::*;
 use agent_first_data::OutputFormat;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -29,11 +30,17 @@ pub enum Mode {
     Cli(Box<CliRequest>),
     Pipe(PipeInit),
     Interactive(InteractiveInit),
+    #[cfg(feature = "rpc")]
     Rpc(RpcInit),
+    #[cfg(not(feature = "rpc"))]
+    Rpc(RpcStub),
     #[cfg(feature = "rest")]
     Rest(RestInit),
     Data(DataOp),
 }
+
+#[cfg(not(feature = "rpc"))]
+pub struct RpcStub;
 
 pub struct DataOp {
     pub kind: DataOpKind,
@@ -1330,11 +1337,42 @@ pub fn parse_args() -> Result<Mode, CliError> {
     let raw: Vec<String> = std::env::args().collect();
     let startup_requested = raw.iter().any(|a| a == "--log");
 
+    // --help: recursive plain-text help (all subcommands expanded)
+    if raw.iter().any(|a| a == "--help" || a == "-h") {
+        let subcommand_path: Vec<&str> = raw[1..]
+            .iter()
+            .take_while(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .collect();
+        let cmd = AfpayCli::command();
+        let _ = writeln!(
+            std::io::stdout(),
+            "{}",
+            agent_first_data::cli_render_help(&cmd, &subcommand_path)
+        );
+        std::process::exit(0);
+    }
+    // --help-markdown: Markdown for doc generation
+    if raw.iter().any(|a| a == "--help-markdown") {
+        let subcommand_path: Vec<&str> = raw[1..]
+            .iter()
+            .take_while(|a| !a.starts_with('-'))
+            .map(|s| s.as_str())
+            .collect();
+        let cmd = AfpayCli::command();
+        let _ = writeln!(
+            std::io::stdout(),
+            "{}",
+            agent_first_data::cli_render_help_markdown(&cmd, &subcommand_path)
+        );
+        std::process::exit(0);
+    }
+
     let cli = match AfpayCli::try_parse_from(&raw) {
         Ok(c) => c,
         Err(e) => {
             use clap::error::ErrorKind;
-            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+            if matches!(e.kind(), ErrorKind::DisplayVersion) {
                 let _ = writeln!(std::io::stdout(), "{e}");
                 std::process::exit(0);
             }
@@ -1381,15 +1419,22 @@ pub fn parse_args() -> Result<Mode, CliError> {
             }));
         }
         RuntimeMode::Rpc => {
-            return Ok(Mode::Rpc(RpcInit {
-                listen: cli.rpc_listen,
-                rpc_secret: cli.rpc_secret,
-                log,
-                data_dir: cli.data_dir,
-                startup_argv: raw.clone(),
-                startup_args: startup_args.clone(),
-                startup_requested,
-            }));
+            #[cfg(feature = "rpc")]
+            {
+                return Ok(Mode::Rpc(RpcInit {
+                    listen: cli.rpc_listen,
+                    rpc_secret: cli.rpc_secret,
+                    log,
+                    data_dir: cli.data_dir,
+                    startup_argv: raw.clone(),
+                    startup_args: startup_args.clone(),
+                    startup_requested,
+                }));
+            }
+            #[cfg(not(feature = "rpc"))]
+            {
+                return Ok(Mode::Rpc(RpcStub));
+            }
         }
         #[cfg(feature = "rest")]
         RuntimeMode::Rest => {

@@ -1,5 +1,6 @@
 use crate::args::InteractiveFrontend;
 use crate::handler::{self, App};
+#[cfg(feature = "rpc")]
 use crate::provider::remote;
 use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
@@ -961,16 +962,15 @@ pub(super) enum SessionBackend {
         app: Arc<App>,
         rx: mpsc::Receiver<Output>,
     },
-    Remote {
-        endpoint: String,
-        secret: String,
-    },
+    #[cfg(feature = "rpc")]
+    Remote { endpoint: String, secret: String },
 }
 
 impl SessionBackend {
     pub(super) fn connection_label(&self) -> String {
         match self {
             Self::Local { .. } => "local".to_string(),
+            #[cfg(feature = "rpc")]
             Self::Remote { endpoint, .. } => format!("remote: {endpoint}"),
         }
     }
@@ -983,6 +983,7 @@ impl SessionBackend {
     ) -> bool {
         match self {
             Self::Local { app, rx } => execute_local_command(host, state, app, rx, cmd).await,
+            #[cfg(feature = "rpc")]
             Self::Remote { endpoint, secret } => {
                 execute_remote_command(host, state, endpoint, secret, cmd).await
             }
@@ -1008,6 +1009,7 @@ impl SessionBackend {
                 }
                 results
             }
+            #[cfg(feature = "rpc")]
             Self::Remote { endpoint, secret } => remote::rpc_call(endpoint, secret, &input).await,
         }
     }
@@ -1028,6 +1030,7 @@ impl SessionBackend {
     }
 
     /// Spawn query (Remote). Results returned via JoinHandle.
+    #[cfg(feature = "rpc")]
     pub(super) fn spawn_remote(
         &self,
         input: Input,
@@ -1224,6 +1227,7 @@ async fn execute_local_command<H: InteractionHost>(
     false
 }
 
+#[cfg(feature = "rpc")]
 async fn execute_remote_command<H: InteractionHost>(
     host: &mut H,
     state: &mut SessionState,
@@ -1395,6 +1399,7 @@ fn resolve_use_local<H: InteractionHost>(host: &mut H, state: &mut SessionState,
     }
 }
 
+#[cfg(feature = "rpc")]
 async fn resolve_use_remote<H: InteractionHost>(
     host: &mut H,
     state: &mut SessionState,

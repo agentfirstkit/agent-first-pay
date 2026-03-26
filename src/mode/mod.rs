@@ -1,20 +1,32 @@
-use crate::args::{InteractiveFrontend, InteractiveInit, Mode};
-use crate::config::VERSION;
-use crate::handler::{self, App};
-use crate::provider::remote;
-use crate::types::*;
+use crate::args::Mode;
 use agent_first_data::OutputFormat;
+
+#[cfg(feature = "interactive")]
+use crate::args::{InteractiveFrontend, InteractiveInit};
+#[cfg(feature = "interactive")]
+use crate::config::VERSION;
+#[cfg(feature = "interactive")]
+use crate::handler::{self, App};
+#[cfg(all(feature = "interactive", feature = "rpc"))]
+use crate::provider::remote;
+#[cfg(feature = "interactive")]
+use crate::types::*;
+#[cfg(feature = "interactive")]
 use std::io::Write as _;
+#[cfg(feature = "interactive")]
 use std::sync::Arc;
+#[cfg(feature = "interactive")]
 use tokio::sync::mpsc;
 
 mod cli;
+#[cfg(feature = "backup")]
 mod data;
 #[cfg(feature = "interactive")]
 mod interactive;
 mod pipe;
 #[cfg(feature = "rest")]
 pub mod rest;
+#[cfg(feature = "rpc")]
 pub mod rpc;
 #[cfg(feature = "interactive")]
 mod session;
@@ -41,16 +53,27 @@ pub async fn run(mode: Mode) {
     match mode {
         Mode::Cli(req) => {
             if req.rpc_endpoint.is_some() {
-                cli::run_remote(*req).await;
+                #[cfg(feature = "rpc")]
+                {
+                    cli::run_remote(*req).await;
+                }
+                #[cfg(not(feature = "rpc"))]
+                {
+                    cli::emit_cli_error(
+                        "--rpc-endpoint requires feature 'rpc'; rebuild with: cargo build --features rpc",
+                        req.output,
+                    );
+                    std::process::exit(1);
+                }
             } else {
                 cli::run(*req).await;
             }
         }
         Mode::Pipe(init) => pipe::run(init).await,
-        Mode::Interactive(init) => {
+        Mode::Interactive(_init) => {
             #[cfg(feature = "interactive")]
             {
-                run_interactive(init).await;
+                run_interactive(_init).await;
             }
             #[cfg(not(feature = "interactive"))]
             {
@@ -61,10 +84,36 @@ pub async fn run(mode: Mode) {
                 std::process::exit(1);
             }
         }
-        Mode::Rpc(init) => rpc::run_rpc(init).await,
+        Mode::Rpc(_init) => {
+            #[cfg(feature = "rpc")]
+            {
+                rpc::run_rpc(_init).await;
+            }
+            #[cfg(not(feature = "rpc"))]
+            {
+                cli::emit_cli_error(
+                    "rpc mode requires feature 'rpc'; rebuild with: cargo build --features rpc",
+                    OutputFormat::Json,
+                );
+                std::process::exit(1);
+            }
+        }
         #[cfg(feature = "rest")]
         Mode::Rest(init) => rest::run_rest(init).await,
-        Mode::Data(op) => data::run_data(op).await,
+        Mode::Data(_op) => {
+            #[cfg(feature = "backup")]
+            {
+                data::run_data(_op).await;
+            }
+            #[cfg(not(feature = "backup"))]
+            {
+                cli::emit_cli_error(
+                    "backup/restore requires feature 'backup'; rebuild with: cargo build --features backup",
+                    OutputFormat::Json,
+                );
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -80,15 +129,27 @@ async fn run_interactive(init: InteractiveInit) {
     } = init;
 
     let runtime = if let Some(endpoint) = rpc_endpoint {
-        bootstrap_remote_session(
-            frontend,
-            output,
-            &log,
-            data_dir.as_deref(),
-            &endpoint,
-            rpc_secret.as_deref(),
-        )
-        .await
+        #[cfg(feature = "rpc")]
+        {
+            bootstrap_remote_session(
+                frontend,
+                output,
+                &log,
+                data_dir.as_deref(),
+                &endpoint,
+                rpc_secret.as_deref(),
+            )
+            .await
+        }
+        #[cfg(not(feature = "rpc"))]
+        {
+            let _ = (endpoint, rpc_secret);
+            cli::emit_cli_error(
+                "--rpc-endpoint requires feature 'rpc'; rebuild with: cargo build --features rpc",
+                output,
+            );
+            return;
+        }
     } else {
         bootstrap_local_session(frontend, output, &log, data_dir).await
     };
@@ -174,7 +235,7 @@ async fn bootstrap_local_session(
     })
 }
 
-#[cfg(feature = "interactive")]
+#[cfg(all(feature = "interactive", feature = "rpc"))]
 async fn bootstrap_remote_session(
     frontend: InteractiveFrontend,
     output: OutputFormat,

@@ -5,6 +5,7 @@ use super::session::{
 use super::InteractiveSessionRuntime;
 use crate::args::InteractiveFrontend;
 use crate::config::VERSION;
+#[cfg(feature = "rpc")]
 use crate::provider::remote;
 use crate::store::PayStore;
 use crate::types::{Input, Network};
@@ -202,6 +203,7 @@ enum PendingQueryKind {
 
 enum PendingQueryHandle {
     Local(tokio::task::JoinHandle<()>),
+    #[cfg(feature = "rpc")]
     Remote(tokio::task::JoinHandle<Vec<serde_json::Value>>),
 }
 
@@ -4102,6 +4104,7 @@ fn local_wallets(state: &SessionState) -> Result<Vec<TuiWalletEntry>, String> {
         .map_err(|error| format!("wallet refresh failed: {error}"))
 }
 
+#[cfg(feature = "rpc")]
 async fn remote_wallets(
     state: &mut SessionState,
     endpoint: &str,
@@ -4159,6 +4162,7 @@ async fn refresh_wallets(
 ) -> Result<(), String> {
     let wallets = match backend {
         SessionBackend::Local { .. } => local_wallets(state)?,
+        #[cfg(feature = "rpc")]
         SessionBackend::Remote { endpoint, secret } => {
             remote_wallets(state, endpoint, secret).await?
         }
@@ -4178,7 +4182,15 @@ fn spawn_pending(backend: &SessionBackend, input: Input, kind: PendingQueryKind)
     let handle = if backend.is_local() {
         PendingQueryHandle::Local(backend.spawn_local(input))
     } else {
-        PendingQueryHandle::Remote(backend.spawn_remote(input))
+        #[cfg(feature = "rpc")]
+        {
+            PendingQueryHandle::Remote(backend.spawn_remote(input))
+        }
+        #[cfg(not(feature = "rpc"))]
+        {
+            let _ = input;
+            unreachable!("remote backend requires feature 'rpc'")
+        }
     };
     PendingQuery { kind, handle }
 }
@@ -4329,6 +4341,7 @@ pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
         if let Some(pq) = &app.pending_query {
             let finished = match &pq.handle {
                 PendingQueryHandle::Local(h) => h.is_finished(),
+                #[cfg(feature = "rpc")]
                 PendingQueryHandle::Remote(h) => h.is_finished(),
             };
             if finished {
@@ -4340,6 +4353,7 @@ pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
                         let _ = h.await;
                         backend.try_recv_outputs()
                     }
+                    #[cfg(feature = "rpc")]
                     PendingQueryHandle::Remote(h) => h.await.unwrap_or_default(),
                 };
                 match pq.kind {

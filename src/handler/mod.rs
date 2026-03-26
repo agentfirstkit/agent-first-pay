@@ -17,6 +17,7 @@ use crate::provider::cashu::CashuProvider;
 use crate::provider::evm::EvmProvider;
 #[cfg(any(feature = "ln-nwc", feature = "ln-phoenixd", feature = "ln-lnbits"))]
 use crate::provider::ln::LnProvider;
+#[cfg(feature = "rpc")]
 use crate::provider::remote::RemoteProvider;
 #[cfg(feature = "sol")]
 use crate::provider::sol::SolProvider;
@@ -75,11 +76,19 @@ impl App {
             if let Some(rpc_name) = config.providers.get(&key) {
                 // Look up the afpay_rpc node by name
                 if let Some(rpc_cfg) = config.afpay_rpc.get(rpc_name) {
-                    let secret = rpc_cfg.endpoint_secret.as_deref().unwrap_or("");
-                    providers.insert(
-                        *network,
-                        Box::new(RemoteProvider::new(&rpc_cfg.endpoint, secret, *network)),
-                    );
+                    #[cfg(feature = "rpc")]
+                    {
+                        let secret = rpc_cfg.endpoint_secret.as_deref().unwrap_or("");
+                        providers.insert(
+                            *network,
+                            Box::new(RemoteProvider::new(&rpc_cfg.endpoint, secret, *network)),
+                        );
+                    }
+                    #[cfg(not(feature = "rpc"))]
+                    {
+                        let _ = rpc_cfg;
+                        providers.insert(*network, Box::new(StubProvider::new(*network)));
+                    }
                 } else {
                     // Unknown afpay_rpc name — insert stub so errors surface at runtime
                     providers.insert(*network, Box::new(StubProvider::new(*network)));
@@ -208,29 +217,32 @@ pub async fn startup_provider_validation_errors(config: &RuntimeConfig) -> Vec<O
     }
 
     // Ping each unique afpay_rpc endpoint once
-    let mut pinged: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (rpc_name, rpc_cfg) in &config.afpay_rpc {
-        if !pinged.insert(rpc_cfg.endpoint.clone()) {
-            continue;
-        }
-        // Find any network that maps to this rpc_name (for the RemoteProvider constructor)
-        let network = config
-            .providers
-            .iter()
-            .find(|(_, name)| *name == rpc_name)
-            .and_then(|(k, _)| k.parse::<Network>().ok())
-            .unwrap_or(Network::Cashu);
-        let secret = rpc_cfg.endpoint_secret.as_deref().unwrap_or("");
-        let provider = RemoteProvider::new(&rpc_cfg.endpoint, secret, network);
-        if let Err(err) = provider.ping().await {
-            errors.push(Output::Error {
-                id: None,
-                error_code: "provider_unreachable".to_string(),
-                error: format!("afpay_rpc.{rpc_name} ({}): {err}", rpc_cfg.endpoint),
-                hint: Some("check endpoint address and that the daemon is running".to_string()),
-                retryable: true,
-                trace: Trace::from_duration(0),
-            });
+    #[cfg(feature = "rpc")]
+    {
+        let mut pinged: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (rpc_name, rpc_cfg) in &config.afpay_rpc {
+            if !pinged.insert(rpc_cfg.endpoint.clone()) {
+                continue;
+            }
+            // Find any network that maps to this rpc_name (for the RemoteProvider constructor)
+            let network = config
+                .providers
+                .iter()
+                .find(|(_, name)| *name == rpc_name)
+                .and_then(|(k, _)| k.parse::<Network>().ok())
+                .unwrap_or(Network::Cashu);
+            let secret = rpc_cfg.endpoint_secret.as_deref().unwrap_or("");
+            let provider = RemoteProvider::new(&rpc_cfg.endpoint, secret, network);
+            if let Err(err) = provider.ping().await {
+                errors.push(Output::Error {
+                    id: None,
+                    error_code: "provider_unreachable".to_string(),
+                    error: format!("afpay_rpc.{rpc_name} ({}): {err}", rpc_cfg.endpoint),
+                    hint: Some("check endpoint address and that the daemon is running".to_string()),
+                    retryable: true,
+                    trace: Trace::from_duration(0),
+                });
+            }
         }
     }
     errors

@@ -123,6 +123,7 @@ pub(crate) fn trace_from(start: Instant) -> Trace {
 }
 
 /// Query limits from each unique downstream afpay_rpc node.
+#[cfg(feature = "rpc")]
 pub(crate) async fn query_downstream_limits(config: &RuntimeConfig) -> Vec<DownstreamLimitNode> {
     let mut result = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -162,6 +163,12 @@ pub(crate) async fn query_downstream_limits(config: &RuntimeConfig) -> Vec<Downs
         result.push(node);
     }
     result
+}
+
+/// Stub when rpc feature is disabled.
+#[cfg(not(feature = "rpc"))]
+pub(crate) async fn query_downstream_limits(_config: &RuntimeConfig) -> Vec<DownstreamLimitNode> {
+    Vec::new()
 }
 
 /// Extract `token=<value>` from a transfer target URI query string.

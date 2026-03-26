@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/RPC/REST modes",
@@ -11,12 +11,9 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Rewrite CLI architecture from monolithic cli.rs/interactive.rs into modular mode system (mode/cli.rs, mode/interactive.rs, mode/pipe.rs, mode/session.rs, mode/tui.rs) with shared session backend, enabling multiple frontend modes to share command parsing and execution logic",
-    "Add full-screen TUI mode with sidebar wallet navigation — ratatui-based terminal UI with sidebar groups/wallets, inline send/receive/create/close forms, balance detail, history browser, spend limit management, global config editor, and real-time status bar",
-    "Add backup/restore commands for data portability — global and per-network backup/restore using tar+zstd archives with PostgreSQL pg_dump/psql support, merge vs full-overwrite modes, and extra directory mapping",
-    "Add TUI Data view for backup/restore operations with form-like Backup/Restore mode switcher, inline text editing, async execution via spawn_blocking, and status badges",
-    "Add copyable token/invoice extraction in TUI — detect long token/bolt11/invoice/address fields in command output, display in dedicated strip, and copy to system clipboard via y hotkey (pbcopy/wl-copy/xclip)",
-    "Refactor clap argument parsing into standalone args.rs with docgen binary for auto-generated CLI reference"
+    "Feature-gate RPC, backup, and Lightning dependencies behind optional Cargo features (rpc, backup, ln), reducing the docgen-only dependency tree from 315 to 84 crates and enabling leaner builds",
+    "Replace direct tar/volume operations in container backup/restore scripts with afpay global backup/restore CLI commands, ensuring format consistency across all deployment modes",
+    "Replace --help with recursive plain-text output via agent-first-data cli_render_help, and add --help-markdown for Markdown documentation generation — agents get the full CLI interface in one call"
   ],
   "bonds": [],
   "tree": {

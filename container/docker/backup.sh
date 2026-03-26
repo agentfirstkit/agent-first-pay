@@ -3,13 +3,11 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 RUNTIME="${CONTAINER_RUNTIME:-docker}"
-HELPER_IMAGE="${CONTAINER_HELPER_IMAGE:-busybox:1.36}"
+COMPOSE="${COMPOSE_CMD:-$RUNTIME compose}"
 STAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-BACKUP_PATH="${1:-$SCRIPT_DIR/backups/afpay-docker-backup-${STAMP}.tar.gz}"
+BACKUP_PATH="${1:-$SCRIPT_DIR/backups/afpay-docker-backup-${STAMP}.tar.zst}"
 INCLUDE_BITCOIND="${INCLUDE_BITCOIND:-false}"
-AFPAY_VOLUME="${AFPAY_VOLUME:-afpay-data}"
-PHOENIXD_VOLUME="${PHOENIXD_VOLUME:-phoenixd-data}"
-BITCOIND_VOLUME="${BITCOIND_VOLUME:-bitcoind-data}"
+SERVICE_NAME="${SERVICE_NAME:-afpay}"
 
 case "$INCLUDE_BITCOIND" in
     true|false) ;;
@@ -24,56 +22,33 @@ if ! command -v "$RUNTIME" >/dev/null 2>&1; then
     exit 1
 fi
 
-TMP_PARENT="${CONTAINER_BACKUP_TMPDIR:-$SCRIPT_DIR/backups/.tmp}"
-mkdir -p "$TMP_PARENT"
-TMP_DIR=$(mktemp -d "${TMP_PARENT%/}/afpay-docker-backup.XXXXXX")
-cleanup() {
-    rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT INT TERM
+mkdir -p "$(dirname "$BACKUP_PATH")"
 
-BUNDLE_DIR="$TMP_DIR/bundle"
-mkdir -p "$BUNDLE_DIR" "$(dirname "$BACKUP_PATH")"
-
-cat > "$BUNDLE_DIR/manifest.env" <<EOF
-BACKUP_KIND=docker-volume
-CREATED_AT_UTC=${STAMP}
-RUNTIME=${RUNTIME}
-HELPER_IMAGE=${HELPER_IMAGE}
-AFPAY_VOLUME=${AFPAY_VOLUME}
-PHOENIXD_VOLUME=${PHOENIXD_VOLUME}
-BITCOIND_VOLUME=${BITCOIND_VOLUME}
-INCLUDE_BITCOIND=${INCLUDE_BITCOIND}
-EOF
-
-archive_volume() {
-    archive_name=$1
-    volume_name=$2
-
-    if ! "$RUNTIME" volume inspect "$volume_name" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    if ! "$RUNTIME" run --rm \
-        -v "${volume_name}:/source:ro" \
-        "$HELPER_IMAGE" \
-        sh -eu -c "find /source -mindepth 1 -maxdepth 1 -print -quit | grep -q ." \
-        >/dev/null 2>&1; then
-        return 0
-    fi
-
-    "$RUNTIME" run --rm \
-        -v "${volume_name}:/source:ro" \
-        "$HELPER_IMAGE" \
-        tar -C /source -czf - . > "$BUNDLE_DIR/${archive_name}.tar.gz"
-}
-
-archive_volume afpay "$AFPAY_VOLUME"
-archive_volume phoenixd "$PHOENIXD_VOLUME"
-
-if [ "$INCLUDE_BITCOIND" = "true" ]; then
-    archive_volume bitcoind "$BITCOIND_VOLUME"
+# Resolve the running container name
+CONTAINER=$($COMPOSE -f "$SCRIPT_DIR/compose.yaml" ps -q "$SERVICE_NAME" 2>/dev/null)
+if [ -z "$CONTAINER" ]; then
+    echo "container '$SERVICE_NAME' is not running; start it first with ./up.sh" >&2
+    exit 1
 fi
 
-tar -C "$BUNDLE_DIR" -czf "$BACKUP_PATH" .
+# Build afpay global backup command with extra dirs for phoenixd/bitcoind
+EXTRA_ARGS=""
+if "$RUNTIME" exec "$CONTAINER" test -d /data/phoenixd 2>/dev/null; then
+    EXTRA_ARGS="$EXTRA_ARGS --extra-dir phoenixd=/data/phoenixd"
+fi
+if [ "$INCLUDE_BITCOIND" = "true" ]; then
+    if "$RUNTIME" exec "$CONTAINER" test -d /data/bitcoind 2>/dev/null; then
+        EXTRA_ARGS="$EXTRA_ARGS --extra-dir bitcoind=/data/bitcoind"
+    fi
+fi
+
+# Run backup inside the container, stream archive to host
+# shellcheck disable=SC2086
+"$RUNTIME" exec "$CONTAINER" \
+    afpay global backup --output /tmp/afpay-backup.tar.zst $EXTRA_ARGS
+
+# Copy archive from container to host
+"$RUNTIME" cp "$CONTAINER:/tmp/afpay-backup.tar.zst" "$BACKUP_PATH"
+"$RUNTIME" exec "$CONTAINER" rm -f /tmp/afpay-backup.tar.zst
+
 printf 'Backup written to %s\n' "$BACKUP_PATH"

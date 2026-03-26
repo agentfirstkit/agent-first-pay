@@ -1250,12 +1250,14 @@ where
 
 /// Returns true if the string looks like a BOLT12 offer (`lno1…`),
 /// optionally with a `?amount=<sats>` suffix. Case-insensitive.
+#[allow(dead_code)]
 pub fn is_bolt12_offer(s: &str) -> bool {
     s.len() >= 4 && s[..4].eq_ignore_ascii_case("lno1")
 }
 
 /// Split a BOLT12 offer string into the raw offer and an optional amount-sats.
 /// Accepts `lno1...` or `lno1...?amount=1000`. Case-insensitive prefix detection.
+#[allow(dead_code)]
 pub fn parse_bolt12_offer_parts(s: &str) -> (String, Option<u64>) {
     if let Some(idx) = s.find("?amount=") {
         let offer = s[..idx].to_string();

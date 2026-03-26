@@ -10,6 +10,7 @@ pub mod cashu;
 pub mod evm;
 #[cfg(any(feature = "ln-nwc", feature = "ln-phoenixd", feature = "ln-lnbits"))]
 pub mod ln;
+#[cfg(feature = "rpc")]
 pub mod remote;
 #[cfg(feature = "sol")]
 pub mod sol;

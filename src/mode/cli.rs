@@ -2,6 +2,7 @@ use crate::args::CliRequest;
 use crate::config;
 use crate::handler::{self, App};
 use crate::output_fmt;
+#[cfg(feature = "rpc")]
 use crate::provider::remote;
 use crate::store;
 use crate::types::*;
@@ -93,6 +94,7 @@ pub(super) async fn run(req: CliRequest) {
     std::process::exit(if had_error { 1 } else { 0 });
 }
 
+#[cfg(feature = "rpc")]
 pub(super) async fn run_remote(req: CliRequest) {
     let resolved_dir = req
         .data_dir

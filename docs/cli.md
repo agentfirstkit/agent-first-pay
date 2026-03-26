@@ -1,10 +1,11 @@
-<!-- Generated from src/cli.rs. Do not edit by hand. -->
+<!-- Generated. Do not edit by hand. -->
 
 # afpay CLI Reference
 
-> Generated from `src/cli.rs`.
 > Regenerate with `./scripts/generate-cli-doc.sh`.
 > See [../README.md](../README.md) for setup and examples, and [architecture.md](architecture.md) for deployment details.
+
+# Command-Line Help for `afpay`
 
 This document contains the help content for the `afpay` command-line program.
 
@@ -1684,12 +1685,3 @@ Remove a spend limit rule by ID
 List current limit status
 
 **Usage:** `afpay limit list`
-
-
-
-<hr/>
-
-<small><i>
-    This document was generated automatically by
-    <a href="https://crates.io/crates/clap-markdown"><code>clap-markdown</code></a>.
-</i></small>

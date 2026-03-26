@@ -2,7 +2,7 @@
 set -eu
 
 if [ $# -lt 1 ]; then
-    echo "usage: $0 /path/to/backup.tar.gz" >&2
+    echo "usage: $0 /path/to/backup.tar.zst" >&2
     exit 1
 fi
 
@@ -15,30 +15,19 @@ if [ ! -f "$ARCHIVE_PATH" ]; then
     exit 1
 fi
 
-TMP_DIR=$(mktemp -d)
-cleanup() {
-    rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT INT TERM
+EXTRA_ARGS=""
+if [ -d "$DATA_ROOT/phoenixd" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --extra-dir phoenixd=$DATA_ROOT/phoenixd"
+fi
+if [ -d "$DATA_ROOT/bitcoind" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --extra-dir bitcoind=$DATA_ROOT/bitcoind"
+fi
 
-tar -C "$TMP_DIR" -xzf "$ARCHIVE_PATH"
-
-restore_dir() {
-    archive_name=$1
-    target_dir=$2
-    archive_file="$TMP_DIR/${archive_name}.tar.gz"
-
-    if [ ! -f "$archive_file" ]; then
-        return 0
-    fi
-
-    mkdir -p "$target_dir"
-    find "$target_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-    tar -C "$target_dir" -xzf "$archive_file"
-}
-
-restore_dir afpay "$DATA_ROOT/afpay"
-restore_dir phoenixd "$DATA_ROOT/phoenixd"
-restore_dir bitcoind "$DATA_ROOT/bitcoind"
+# shellcheck disable=SC2086
+afpay global restore \
+    --data-dir "$DATA_ROOT/afpay" \
+    --dangerously-overwrite \
+    "$ARCHIVE_PATH" \
+    $EXTRA_ARGS
 
 printf 'Restore completed from %s\n' "$ARCHIVE_PATH"
