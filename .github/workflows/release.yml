@@ -49,9 +49,14 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            macOS)   brew install protobuf ;;
+            Linux)   sudo apt-get update && sudo apt-get install -y protobuf-compiler ;;
+            Windows) choco install -y protoc ;;
+          esac
+          protoc --version
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --features rest
