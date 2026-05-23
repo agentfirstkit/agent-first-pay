@@ -2,20 +2,32 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.6.1",
-  "domain": "cmn.dev",
-  "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
-  "synopsis": "Agent-first cryptocurrency micropayment tool — multi-network wallet (Cashu, Lightning, Solana, EVM, Bitcoin), send/receive, spend limits, pipe/RPC/REST modes",
+  "version": "0.7.0",
+  "domain": "agentfirstkit.com",
+  "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
+  "synopsis": "A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control.",
   "intent": [
     "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
   "license": "MIT",
   "mutations": [
-    "Feature-gate RPC, backup, and Lightning dependencies behind optional Cargo features (rpc, backup, ln), reducing the docgen-only dependency tree from 315 to 84 crates and enabling leaner builds",
-    "Replace direct tar/volume operations in container backup/restore scripts with afpay global backup/restore CLI commands, ensuring format consistency across all deployment modes",
-    "Replace --help with recursive plain-text output via agent-first-data cli_render_help, and add --help-markdown for Markdown documentation generation — agents get the full CLI interface in one call"
+    "Migrate to the agentfirstkit identity",
+    "Rewrite README around agent ergonomics, with the full guide in docs/overview.md",
+    "Add backup/restore commands and a TUI Data view",
+    "Harden security and remote flows",
+    "Fix spend-limit assets and receive watchers",
+    "Feature-gate rpc, backup, and ln dependencies for leaner builds",
+    "Major dependency bumps: alloy 1→2, bdk_wallet 2→3, redb 3→4, sqlx 0.8→0.9 — stay aligned with upstream releases",
+    "Bump agent-first-data dependency to 0.8"
   ],
-  "bonds": [],
+  "bonds": [
+    {
+      "relation": "depends_on",
+      "uri": "cmn://agentfirstkit.com/b3.DRSaYD5qjBZoBHEukpEoRzDoBk3aangKVgYo8hBrftqZ",
+      "id": "agent-first-data",
+      "reason": "All request/response fields use Agent-First Data suffix conventions and output formats"
+    }
+  ],
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
     "exclude_names": [

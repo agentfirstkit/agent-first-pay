@@ -41,6 +41,7 @@ pub struct SolProvider {
 
 const INVALID_SOL_WALLET_ADDRESS: &str = "invalid:sol-wallet-secret";
 const MAX_CHAIN_HISTORY_SCAN: usize = 200;
+const DEFAULT_SOL_SEND_FEE_LAMPORTS: u64 = 5000;
 const SOL_MEMO_PROGRAM_ID: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SPL_ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
@@ -49,6 +50,8 @@ const SPL_ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25e
 struct SolTransferTarget {
     recipient_address: String,
     amount_lamports: u64,
+    /// Spend-limit asset label: "native" for SOL, symbol or mint for SPL.
+    token_label: String,
     /// If set, this is an SPL token transfer instead of the native token.
     token_mint: Option<Pubkey>,
     /// Reference key for order binding (per strain-payment-method-solana).
@@ -175,6 +178,7 @@ impl SolProvider {
             .map_err(|e| PayError::InvalidAmount(format!("invalid sol recipient address: {e}")))?;
 
         let mut amount_lamports: Option<u64> = None;
+        let mut token_label = "native".to_string();
         let mut token_mint: Option<Pubkey> = None;
         let mut reference: Option<Pubkey> = None;
         for pair in query.split('&') {
@@ -194,8 +198,10 @@ impl SolProvider {
                 }
                 "token" => {
                     if value == "native" {
+                        token_label = "native".to_string();
                         // Explicit native token — no SPL mint
                     } else {
+                        token_label = value.to_ascii_lowercase();
                         // Try as known symbol first, then as raw mint address
                         let cluster = rpc_endpoints
                             .first()
@@ -237,9 +243,32 @@ impl SolProvider {
         Ok(SolTransferTarget {
             recipient_address: recipient_address.to_string(),
             amount_lamports,
+            token_label,
             token_mint,
             reference,
         })
+    }
+
+    fn spend_debits_for_target(target: &SolTransferTarget) -> Vec<SpendDebit> {
+        if target.token_mint.is_some() {
+            vec![
+                SpendDebit {
+                    amount_native: target.amount_lamports,
+                    token: Some(target.token_label.clone()),
+                },
+                SpendDebit {
+                    amount_native: DEFAULT_SOL_SEND_FEE_LAMPORTS,
+                    token: Some("native".to_string()),
+                },
+            ]
+        } else {
+            vec![SpendDebit {
+                amount_native: target
+                    .amount_lamports
+                    .saturating_add(DEFAULT_SOL_SEND_FEE_LAMPORTS),
+                token: Some("native".to_string()),
+            }]
+        }
     }
 
     fn load_sol_wallet(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
@@ -1526,11 +1555,13 @@ impl PayProvider for SolProvider {
         let meta = self.load_sol_wallet(&resolved)?;
         let endpoints = Self::rpc_endpoints_for_wallet(&meta)?;
         let target = Self::parse_transfer_target(to, &endpoints)?;
+        let spend_debits = Self::spend_debits_for_target(&target);
         Ok(SendQuoteInfo {
             wallet: resolved,
             amount_native: target.amount_lamports,
-            fee_estimate_native: 5000,
+            fee_estimate_native: DEFAULT_SOL_SEND_FEE_LAMPORTS,
             fee_unit: "lamports".to_string(),
+            spend_debits,
         })
     }
 
@@ -1593,7 +1624,7 @@ impl PayProvider for SolProvider {
         }
 
         let mut merged: Vec<HistoryRecord> = merged_by_id.into_values().collect();
-        merged.sort_by(|a, b| b.created_at_epoch_s.cmp(&a.created_at_epoch_s));
+        merged.sort_by_key(|record| std::cmp::Reverse(record.created_at_epoch_s));
 
         let start = merged.len().min(offset);
         let end = merged.len().min(offset.saturating_add(limit));
@@ -1780,7 +1811,9 @@ impl PayProvider for SolProvider {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{SolGetTransactionResult, SolProvider, SOL_MEMO_PROGRAM_ID};
+    use super::{
+        SolGetTransactionResult, SolProvider, DEFAULT_SOL_SEND_FEE_LAMPORTS, SOL_MEMO_PROGRAM_ID,
+    };
     use crate::provider::PayProvider;
     use crate::store::wallet::{self, WalletMetadata};
     use crate::store::StorageBackend;
@@ -1885,6 +1918,35 @@ mod tests {
             target.token_mint.unwrap().to_string(),
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         );
+    }
+
+    #[test]
+    fn spend_debits_keep_spl_amount_and_native_fee_separate() {
+        let endpoints = vec!["https://api.mainnet-beta.solana.com".to_string()];
+        let target = SolProvider::parse_transfer_target(
+            "solana:8nTKRhLQDcnCaS5s8Z4KZPb1i9ddfbfQDeJpw7g4QxjV?amount-lamports=1000000&token=usdc",
+            &endpoints,
+        )
+        .unwrap();
+        let debits = SolProvider::spend_debits_for_target(&target);
+        assert_eq!(debits.len(), 2);
+        assert_eq!(debits[0].amount_native, 1_000_000);
+        assert_eq!(debits[0].token.as_deref(), Some("usdc"));
+        assert_eq!(debits[1].amount_native, DEFAULT_SOL_SEND_FEE_LAMPORTS);
+        assert_eq!(debits[1].token.as_deref(), Some("native"));
+    }
+
+    #[test]
+    fn spend_debits_include_native_sol_in_one_native_debit() {
+        let target = SolProvider::parse_transfer_target(
+            "solana:8nTKRhLQDcnCaS5s8Z4KZPb1i9ddfbfQDeJpw7g4QxjV?amount-lamports=123",
+            &[],
+        )
+        .unwrap();
+        let debits = SolProvider::spend_debits_for_target(&target);
+        assert_eq!(debits.len(), 1);
+        assert_eq!(debits[0].amount_native, 123 + DEFAULT_SOL_SEND_FEE_LAMPORTS);
+        assert_eq!(debits[0].token.as_deref(), Some("native"));
     }
 
     #[test]

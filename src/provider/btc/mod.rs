@@ -608,6 +608,10 @@ impl PayProvider for BtcProvider {
             amount_native: target.amount_sats,
             fee_estimate_native,
             fee_unit: "sats".to_string(),
+            spend_debits: vec![SpendDebit {
+                amount_native: target.amount_sats.saturating_add(fee_estimate_native),
+                token: None,
+            }],
         })
     }
 

@@ -3709,17 +3709,12 @@ fn handle_main_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
         }
         KeyCode::Down => {
             match app.view {
-                TuiView::History => {
-                    if !app.history_records.is_empty() {
-                        app.selected_history =
-                            min(app.selected_history + 1, app.history_records.len() - 1);
-                    }
+                TuiView::History if !app.history_records.is_empty() => {
+                    app.selected_history =
+                        min(app.selected_history + 1, app.history_records.len() - 1);
                 }
-                TuiView::Limits => {
-                    if !app.limit_records.is_empty() {
-                        app.selected_limit =
-                            min(app.selected_limit + 1, app.limit_records.len() - 1);
-                    }
+                TuiView::Limits if !app.limit_records.is_empty() => {
+                    app.selected_limit = min(app.selected_limit + 1, app.limit_records.len() - 1);
                 }
                 TuiView::CommandResult | TuiView::WalletDetail => {
                     app.output_scroll = app.output_scroll.saturating_sub(1);
@@ -3850,11 +3845,9 @@ fn handle_data_form_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
     let max_field = data_max_field(app);
 
     match key.code {
-        KeyCode::Up => {
-            if app.data_field_cursor > 0 {
-                app.data_field_cursor -= 1;
-                app.data_cursor_chars = data_field_text_len(app);
-            }
+        KeyCode::Up if app.data_field_cursor > 0 => {
+            app.data_field_cursor -= 1;
+            app.data_cursor_chars = data_field_text_len(app);
         }
         KeyCode::Down => {
             if app.data_field_cursor >= max_field {
@@ -3919,10 +3912,8 @@ fn handle_data_form_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
                 }
             }
         }
-        KeyCode::Char(' ') if !is_text => {
-            if app.data_cursor == 1 && app.data_field_cursor == 2 {
-                app.data_restore_overwrite = !app.data_restore_overwrite;
-            }
+        KeyCode::Char(' ') if !is_text && app.data_cursor == 1 && app.data_field_cursor == 2 => {
+            app.data_restore_overwrite = !app.data_restore_overwrite;
         }
         KeyCode::F(5) => {
             return TuiAction::RunDataOp;
@@ -3931,10 +3922,8 @@ fn handle_data_form_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
             app.focus = TuiFocus::Sidebar;
             return TuiAction::None;
         }
-        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if is_text {
-                data_field_insert(app, ch);
-            }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) && is_text => {
+            data_field_insert(app, ch);
         }
         _ => {}
     }

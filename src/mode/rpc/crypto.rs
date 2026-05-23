@@ -1,17 +1,37 @@
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, KeyInit};
-use sha2::{Digest, Sha256};
+use hkdf::Hkdf;
+use sha2::Sha256;
+
+const HKDF_SALT: &[u8] = b"afpay-rpc-v1";
+const HKDF_INFO_AES_GCM: &[u8] = b"afpay-rpc-v1/aes-256-gcm";
+const AES_GCM_NONCE_LEN: usize = 12;
+const MIN_SECRET_BYTES: usize = 32;
 
 pub struct Cipher {
     key: [u8; 32],
 }
 
 impl Cipher {
-    /// Derive a 32-byte AES-256 key from an arbitrary secret string via SHA-256.
+    /// Validate that an operator-supplied RPC PSK is high-entropy enough for production use.
+    pub fn validate_secret(secret: &str) -> Result<(), String> {
+        let secret = secret.trim();
+        if secret.len() < MIN_SECRET_BYTES {
+            return Err(format!(
+                "RPC secret must be at least {MIN_SECRET_BYTES} bytes; generate one with: openssl rand -base64 32"
+            ));
+        }
+        if secret.as_bytes().windows(2).all(|w| w[0] == w[1]) {
+            return Err("RPC secret must not be a repeated single character".to_string());
+        }
+        Ok(())
+    }
+
+    /// Derive a 32-byte AES-256 key from the PSK using HKDF-SHA256.
     pub fn from_secret(secret: &str) -> Self {
-        let hash = Sha256::digest(secret.as_bytes());
         let mut key = [0u8; 32];
-        key.copy_from_slice(&hash);
+        let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), secret.as_bytes());
+        let _ = hk.expand(HKDF_INFO_AES_GCM, &mut key);
         Self { key }
     }
 
@@ -30,6 +50,12 @@ impl Cipher {
 
     /// Decrypt ciphertext: AES-256-GCM decrypt → zstd decompress.
     pub fn decrypt(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+        if nonce.len() != AES_GCM_NONCE_LEN {
+            return Err(format!(
+                "invalid nonce length: expected {AES_GCM_NONCE_LEN}, got {}",
+                nonce.len()
+            ));
+        }
         let cipher =
             Aes256Gcm::new_from_slice(&self.key).map_err(|e| format!("cipher init: {e}"))?;
         let nonce = aes_gcm::Nonce::from_slice(nonce);
@@ -62,5 +88,18 @@ mod tests {
         let c2 = Cipher::from_secret("key-b");
         let (nonce, ct) = c1.encrypt(b"secret").ok().unwrap(); // test-only
         assert!(c2.decrypt(&nonce, &ct).is_err());
+    }
+
+    #[test]
+    fn validates_secret_strength() {
+        assert!(Cipher::validate_secret("short").is_err());
+        assert!(Cipher::validate_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_err());
+        assert!(Cipher::validate_secret("0123456789abcdef0123456789abcdef").is_ok());
+    }
+
+    #[test]
+    fn bad_nonce_length_fails() {
+        let cipher = Cipher::from_secret("0123456789abcdef0123456789abcdef");
+        assert!(cipher.decrypt(&[], b"ciphertext").is_err());
     }
 }

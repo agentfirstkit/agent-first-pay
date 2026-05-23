@@ -1,7 +1,5 @@
 use crate::provider::PayError;
 use crate::store::wallet;
-#[cfg(feature = "redb")]
-use crate::store::wallet::load_wallet_metadata;
 use crate::store::PayStore;
 use crate::types::*;
 use std::time::Instant;
@@ -69,12 +67,9 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             match get_provider(&app.providers, network) {
                 Some(p) => match p.create_wallet(&request).await {
                     Ok(info) => {
-                        // Sync wallet metadata to store (for non-redb backends).
-                        #[cfg(feature = "redb")]
                         if let Some(store) = app.store.as_ref() {
-                            if let Ok(meta) =
-                                load_wallet_metadata(&app.config.read().await.data_dir, &info.id)
-                            {
+                            if store.load_wallet_metadata(&info.id).is_err() {
+                                let meta = metadata_from_wallet_create(&info, &request);
                                 let _ = store.save_wallet_metadata(&meta);
                             }
                         }
@@ -108,6 +103,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             let start = Instant::now();
             let mut log_args =
                 serde_json::to_value(&request).unwrap_or_else(|_| serde_json::json!({}));
+            let request_for_meta = request.clone();
             if let Some(object) = log_args.as_object_mut() {
                 object.insert(
                     "operation".to_string(),
@@ -120,11 +116,9 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             match get_provider(&app.providers, Network::Ln) {
                 Some(p) => match p.create_ln_wallet(request).await {
                     Ok(info) => {
-                        #[cfg(feature = "redb")]
                         if let Some(store) = app.store.as_ref() {
-                            if let Ok(meta) =
-                                load_wallet_metadata(&app.config.read().await.data_dir, &info.id)
-                            {
+                            if store.load_wallet_metadata(&info.id).is_err() {
+                                let meta = metadata_from_ln_wallet_create(&info, &request_for_meta);
                                 let _ = store.save_wallet_metadata(&meta);
                             }
                         }
@@ -280,41 +274,49 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             )
             .await;
             if let Some(wallet_id) = wallet {
-                let meta = match require_store(app).and_then(|s| s.load_wallet_metadata(&wallet_id))
-                {
-                    Ok(m) => m,
-                    Err(_) => {
-                        emit_error(
-                            &app.writer,
-                            Some(id),
-                            &PayError::WalletNotFound(wallet_id),
-                            start,
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                let result = match get_provider(&app.providers, meta.network) {
+                let (target_network, wallet_for_call) =
+                    match resolve_wallet_for_provider(app, Some(&wallet_id), network).await {
+                        Ok(resolved) => resolved,
+                        Err(_) => {
+                            emit_error(
+                                &app.writer,
+                                Some(id),
+                                &PayError::WalletNotFound(wallet_id),
+                                start,
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                let local_meta = app
+                    .store
+                    .as_deref()
+                    .and_then(|s| s.load_wallet_metadata(&wallet_for_call).ok());
+                let result = match get_provider(&app.providers, target_network) {
                     Some(provider) => {
                         if check {
-                            match provider.check_balance(&wallet_id).await {
+                            match provider.check_balance(&wallet_for_call).await {
                                 Err(PayError::NotImplemented(_)) => {
-                                    provider.balance(&wallet_id).await
+                                    provider.balance(&wallet_for_call).await
                                 }
                                 other => other,
                             }
                         } else {
-                            provider.balance(&wallet_id).await
+                            provider.balance(&wallet_for_call).await
                         }
                     }
                     None => Err(PayError::NotImplemented(format!(
-                        "no provider for {}",
-                        meta.network
+                        "no provider for {target_network}"
                     ))),
                 };
                 match result {
                     Ok(balance) => {
-                        let summary = wallet_summary_from_meta(&meta, &wallet_id);
+                        let summary = local_meta
+                            .as_ref()
+                            .map(|meta| wallet_summary_from_meta(meta, &wallet_for_call))
+                            .unwrap_or_else(|| {
+                                remote_wallet_summary(&wallet_for_call, target_network)
+                            });
                         let items = vec![WalletBalanceItem {
                             wallet: summary,
                             balance: Some(balance),
@@ -753,5 +755,88 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
         }
 
         _ => {}
+    }
+}
+
+fn metadata_from_wallet_create(
+    info: &WalletInfo,
+    request: &WalletCreateRequest,
+) -> wallet::WalletMetadata {
+    wallet::WalletMetadata {
+        id: info.id.clone(),
+        network: info.network,
+        label: info.label.clone().or_else(|| {
+            let label = request.label.trim();
+            (!label.is_empty() && label != "default").then(|| label.to_string())
+        }),
+        mint_url: request.mint_url.clone(),
+        sol_rpc_endpoints: (!request.rpc_endpoints.is_empty())
+            .then(|| request.rpc_endpoints.clone())
+            .filter(|_| info.network == Network::Sol),
+        evm_rpc_endpoints: (!request.rpc_endpoints.is_empty())
+            .then(|| request.rpc_endpoints.clone())
+            .filter(|_| info.network == Network::Evm),
+        evm_chain_id: (info.network == Network::Evm)
+            .then_some(request.chain_id)
+            .flatten(),
+        // Do not mirror seed/backend secrets from downstream RPC nodes.
+        seed_secret: None,
+        backend: None,
+        btc_esplora_url: request.btc_esplora_url.clone(),
+        btc_network: request.btc_network.clone(),
+        btc_address_type: request.btc_address_type.clone(),
+        btc_core_url: request.btc_core_url.clone(),
+        btc_core_auth_secret: None,
+        btc_electrum_url: request.btc_electrum_url.clone(),
+        custom_tokens: None,
+        created_at_epoch_s: wallet::now_epoch_seconds(),
+        error: None,
+    }
+}
+
+fn remote_wallet_summary(wallet_id: &str, network: Network) -> WalletSummary {
+    WalletSummary {
+        id: wallet_id.to_string(),
+        network,
+        label: None,
+        address: wallet_id.to_string(),
+        backend: None,
+        mint_url: None,
+        rpc_endpoints: None,
+        chain_id: None,
+        created_at_epoch_s: 0,
+    }
+}
+
+fn metadata_from_ln_wallet_create(
+    info: &WalletInfo,
+    request: &LnWalletCreateRequest,
+) -> wallet::WalletMetadata {
+    wallet::WalletMetadata {
+        id: info.id.clone(),
+        network: Network::Ln,
+        label: info.label.clone().or_else(|| {
+            request
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty() && *label != "default")
+                .map(str::to_string)
+        }),
+        mint_url: request.endpoint.clone(),
+        sol_rpc_endpoints: None,
+        evm_rpc_endpoints: None,
+        evm_chain_id: None,
+        seed_secret: None,
+        backend: Some(request.backend.as_str().to_string()),
+        btc_esplora_url: None,
+        btc_network: None,
+        btc_address_type: None,
+        btc_core_url: None,
+        btc_core_auth_secret: None,
+        btc_electrum_url: None,
+        custom_tokens: None,
+        created_at_epoch_s: wallet::now_epoch_seconds(),
+        error: None,
     }
 }

@@ -577,6 +577,10 @@ impl PayProvider for LnProvider {
             amount_native: amount_sats,
             fee_estimate_native: fee_estimate,
             fee_unit: "sats".to_string(),
+            spend_debits: vec![SpendDebit {
+                amount_native: amount_sats.saturating_add(fee_estimate),
+                token: None,
+            }],
         })
     }
 

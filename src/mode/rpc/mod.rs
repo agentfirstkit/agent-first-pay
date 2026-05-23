@@ -3,9 +3,10 @@ pub mod crypto;
 use self::crypto::Cipher;
 use crate::handler::{self, App};
 use crate::types::*;
+use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tonic::Code;
 use tonic::{Request, Response, Status};
@@ -13,6 +14,7 @@ use tonic::{Request, Response, Status};
 pub struct RpcInit {
     pub listen: String,
     pub rpc_secret: Option<String>,
+    pub allow_public_listen: bool,
     pub log: Vec<String>,
     pub data_dir: Option<String>,
     pub startup_argv: Vec<String>,
@@ -31,6 +33,37 @@ struct AfPayService {
     cipher: Cipher,
     config: RuntimeConfig,
     rate_limiter: Option<RpcRateLimiter>,
+    replay_cache: Mutex<ReplayCache>,
+}
+
+struct ReplayCache {
+    seen: HashSet<Vec<u8>>,
+    order: VecDeque<Vec<u8>>,
+    max_entries: usize,
+}
+
+impl ReplayCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            order: VecDeque::new(),
+            max_entries,
+        }
+    }
+
+    fn insert_unique(&mut self, nonce: &[u8]) -> bool {
+        let nonce = nonce.to_vec();
+        if !self.seen.insert(nonce.clone()) {
+            return false;
+        }
+        self.order.push_back(nonce);
+        while self.order.len() > self.max_entries {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
+    }
 }
 
 /// Simple token-bucket rate limiter for RPC.
@@ -152,6 +185,21 @@ impl AfPay for AfPayService {
             None
         };
 
+        match self.replay_cache.lock() {
+            Ok(mut cache) => {
+                if !cache.insert_unique(&req.nonce) {
+                    let status = Status::unauthenticated("replayed request nonce");
+                    emit_rpc_response_log(&self.config, None, &[], Some(&status));
+                    return Err(status);
+                }
+            }
+            Err(_) => {
+                let status = Status::internal("replay cache poisoned");
+                emit_rpc_response_log(&self.config, None, &[], Some(&status));
+                return Err(status);
+            }
+        }
+
         // Decrypt request
         let plaintext = match self.cipher.decrypt(&req.nonce, &req.ciphertext) {
             Ok(plaintext) => plaintext,
@@ -262,12 +310,15 @@ impl AfPay for AfPayService {
 }
 
 pub async fn run_rpc(init: RpcInit) {
-    let secret: String = match init.rpc_secret {
+    let secret: String = match init
+        .rpc_secret
+        .or_else(|| std::env::var("AFPAY_RPC_SECRET").ok())
+    {
         Some(s) if !s.is_empty() => s,
         _ => {
             let value = agent_first_data::build_cli_error(
                 "--rpc-secret is required for RPC mode",
-                Some("pass a shared secret for client authentication"),
+                Some("pass a shared secret for client authentication or set AFPAY_RPC_SECRET"),
             );
             let rendered =
                 agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
@@ -275,6 +326,12 @@ pub async fn run_rpc(init: RpcInit) {
             std::process::exit(1);
         }
     };
+    if let Err(e) = Cipher::validate_secret(&secret) {
+        let value = agent_first_data::build_cli_error(&e, Some("use a random 32+ byte secret"));
+        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let _ = writeln!(std::io::stdout(), "{rendered}");
+        std::process::exit(1);
+    }
 
     let cipher = Cipher::from_secret(&secret);
 
@@ -323,6 +380,7 @@ pub async fn run_rpc(init: RpcInit) {
         cipher,
         config,
         rate_limiter,
+        replay_cache: Mutex::new(ReplayCache::new(8192)),
     };
 
     let addr = match init.listen.parse() {
@@ -338,6 +396,17 @@ pub async fn run_rpc(init: RpcInit) {
             std::process::exit(1);
         }
     };
+    if public_listen_requires_ack(addr) && !init.allow_public_listen {
+        let value = agent_first_data::build_cli_error(
+            "refusing to bind RPC to a non-loopback address without --public-listen",
+            Some(
+                "use the default 127.0.0.1:9400, or pass --public-listen only behind TLS/firewall",
+            ),
+        );
+        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let _ = writeln!(std::io::stdout(), "{rendered}");
+        std::process::exit(1);
+    }
 
     let server = tonic::transport::Server::builder()
         .add_service(AfPayServer::new(service))
@@ -349,6 +418,10 @@ pub async fn run_rpc(init: RpcInit) {
         let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
+}
+
+fn public_listen_requires_ack(addr: std::net::SocketAddr) -> bool {
+    !addr.ip().is_loopback()
 }
 
 fn log_event_enabled(log_filters: &[String], event: &str) -> bool {

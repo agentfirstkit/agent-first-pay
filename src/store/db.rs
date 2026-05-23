@@ -29,6 +29,7 @@ pub fn open_database(path: &Path) -> Result<Database, PayError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| PayError::InternalError(format!("mkdir {}: {e}", parent.display())))?;
+        set_private_dir_permissions(parent)?;
     }
     let db = if path.exists() {
         Database::open(path)
@@ -36,7 +37,34 @@ pub fn open_database(path: &Path) -> Result<Database, PayError> {
         Database::create(path)
     }
     .map_err(|e| PayError::InternalError(format!("open {}: {e}", path.display())))?;
+    set_private_file_permissions(path)?;
     Ok(db)
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> Result<(), PayError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| PayError::InternalError(format!("chmod 700 {}: {e}", path.display())))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> Result<(), PayError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<(), PayError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| PayError::InternalError(format!("chmod 600 {}: {e}", path.display())))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<(), PayError> {
+    Ok(())
 }
 
 pub fn open_and_migrate(

@@ -48,6 +48,8 @@ fn usdc_contract_address(chain_id: u64) -> Option<Address> {
 struct EvmTransferTarget {
     recipient_address: Address,
     amount_wei: U256,
+    /// Spend-limit asset label: "native" for ETH/gas, symbol or contract for ERC-20.
+    token_label: String,
     /// If set, this is an ERC-20 token transfer instead of the chain's native token.
     token_contract: Option<Address>,
 }
@@ -160,6 +162,7 @@ impl EvmProvider {
             .map_err(|e| PayError::InvalidAmount(format!("invalid evm recipient address: {e}")))?;
 
         let mut amount_wei: Option<U256> = None;
+        let mut token_label = "native".to_string();
         let mut token_contract: Option<Address> = None;
 
         for pair in query.split('&') {
@@ -184,8 +187,10 @@ impl EvmProvider {
                 }
                 "token" => {
                     if value == "native" {
+                        token_label = "native".to_string();
                         // Explicit native token — no ERC-20 contract
                     } else if let Some(known) = tokens::resolve_evm_token(chain_id, value) {
+                        token_label = value.to_ascii_lowercase();
                         token_contract = known.address.parse().ok();
                         if token_contract.is_none() {
                             return Err(PayError::InvalidAmount(format!(
@@ -193,6 +198,7 @@ impl EvmProvider {
                             )));
                         }
                     } else if value.starts_with("0x") || value.starts_with("0X") {
+                        token_label = value.to_ascii_lowercase();
                         token_contract = Some(value.parse().map_err(|e| {
                             PayError::InvalidAmount(format!("invalid token contract address: {e}"))
                         })?);
@@ -218,8 +224,31 @@ impl EvmProvider {
         Ok(EvmTransferTarget {
             recipient_address,
             amount_wei,
+            token_label,
             token_contract,
         })
+    }
+
+    fn spend_debits_for_target(target: &EvmTransferTarget, fee_gwei: u64) -> Vec<SpendDebit> {
+        let fee_wei = gwei_to_wei_saturating(fee_gwei);
+        let amount_wei = u256_to_u64_saturating(target.amount_wei);
+        if target.token_contract.is_some() {
+            vec![
+                SpendDebit {
+                    amount_native: amount_wei,
+                    token: Some(target.token_label.clone()),
+                },
+                SpendDebit {
+                    amount_native: fee_wei,
+                    token: Some("native".to_string()),
+                },
+            ]
+        } else {
+            vec![SpendDebit {
+                amount_native: amount_wei.saturating_add(fee_wei),
+                token: Some("native".to_string()),
+            }]
+        }
     }
 
     // Provider is built inline in withdraw() to avoid complex generic return types.
@@ -1097,6 +1126,14 @@ fn parse_hex_u256(raw: &str) -> Option<U256> {
     U256::from_str_radix(hex, 16).ok()
 }
 
+fn u256_to_u64_saturating(value: U256) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
+}
+
+fn gwei_to_wei_saturating(value: u64) -> u64 {
+    value.saturating_mul(1_000_000_000)
+}
+
 fn normalize_address(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let body = trimmed
@@ -1547,10 +1584,12 @@ impl PayProvider for EvmProvider {
             .await
             .unwrap_or(0);
 
+        let amount_wei_u64 = u256_to_u64_saturating(transfer_target.amount_wei);
+        let spend_debits = Self::spend_debits_for_target(&transfer_target, fee_gwei);
+
         // amount_native in the same unit as the transfer
         let amount_native = if transfer_target.token_contract.is_some() {
-            let val: u64 = transfer_target.amount_wei.try_into().unwrap_or(u64::MAX);
-            val
+            amount_wei_u64
         } else {
             let gwei = transfer_target.amount_wei / U256::from(1_000_000_000u64);
             gwei.try_into().unwrap_or(u64::MAX)
@@ -1561,6 +1600,7 @@ impl PayProvider for EvmProvider {
             amount_native,
             fee_estimate_native: fee_gwei,
             fee_unit: "gwei".to_string(),
+            spend_debits,
         })
     }
 
@@ -1795,6 +1835,34 @@ mod tests {
         .expect("parse usdc transfer");
         assert!(target.token_contract.is_some());
         assert_eq!(target.amount_wei, U256::from(1_000_000u64));
+    }
+
+    #[test]
+    fn spend_debits_keep_erc20_amount_and_native_gas_separate() {
+        let target = EvmProvider::parse_transfer_target(
+            "ethereum:0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045?amount-wei=1000000&token=usdc",
+            CHAIN_ID_BASE,
+        )
+        .expect("parse usdc transfer");
+        let debits = EvmProvider::spend_debits_for_target(&target, 21);
+        assert_eq!(debits.len(), 2);
+        assert_eq!(debits[0].amount_native, 1_000_000);
+        assert_eq!(debits[0].token.as_deref(), Some("usdc"));
+        assert_eq!(debits[1].amount_native, 21_000_000_000);
+        assert_eq!(debits[1].token.as_deref(), Some("native"));
+    }
+
+    #[test]
+    fn spend_debits_include_native_eth_in_one_wei_debit() {
+        let target = EvmProvider::parse_transfer_target(
+            "ethereum:0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045?amount-wei=1000000000000000",
+            CHAIN_ID_BASE,
+        )
+        .expect("parse native eth transfer");
+        let debits = EvmProvider::spend_debits_for_target(&target, 21);
+        assert_eq!(debits.len(), 1);
+        assert_eq!(debits[0].amount_native, 1_000_021_000_000_000);
+        assert_eq!(debits[0].token.as_deref(), Some("native"));
     }
 
     #[test]

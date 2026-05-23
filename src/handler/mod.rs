@@ -3,6 +3,8 @@ mod helpers;
 mod history;
 mod limit;
 mod pay;
+mod receive_watch;
+mod spend_guard;
 mod wallet;
 
 #[cfg(any(
@@ -378,6 +380,7 @@ pub async fn dispatch(app: &App, input: Input) {
                 .writer
                 .send(Output::Version {
                     version: crate::config::VERSION.to_string(),
+                    protocol_version: JSON_PROTOCOL_VERSION,
                     trace: PongTrace {
                         uptime_s: app.start_time.elapsed().as_secs(),
                         requests_total: app.requests_total.load(Ordering::Relaxed),

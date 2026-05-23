@@ -29,7 +29,7 @@ pub struct CustomToken {
     pub decimals: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WalletMetadata {
     pub id: String,
     pub network: Network,
@@ -67,6 +67,34 @@ pub struct WalletMetadata {
     pub error: Option<String>,
 }
 
+impl std::fmt::Debug for WalletMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalletMetadata")
+            .field("id", &self.id)
+            .field("network", &self.network)
+            .field("label", &self.label)
+            .field("mint_url", &self.mint_url)
+            .field("sol_rpc_endpoints", &self.sol_rpc_endpoints)
+            .field("evm_rpc_endpoints", &self.evm_rpc_endpoints)
+            .field("evm_chain_id", &self.evm_chain_id)
+            .field("seed_secret", &self.seed_secret.as_ref().map(|_| "***"))
+            .field("backend", &self.backend)
+            .field("btc_esplora_url", &self.btc_esplora_url)
+            .field("btc_network", &self.btc_network)
+            .field("btc_address_type", &self.btc_address_type)
+            .field("btc_core_url", &self.btc_core_url)
+            .field(
+                "btc_core_auth_secret",
+                &self.btc_core_auth_secret.as_ref().map(|_| "***"),
+            )
+            .field("btc_electrum_url", &self.btc_electrum_url)
+            .field("custom_tokens", &self.custom_tokens)
+            .field("created_at_epoch_s", &self.created_at_epoch_s)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 // ═══════════════════════════════════════════
 // Shared helpers (always available)
 // ═══════════════════════════════════════════
@@ -83,6 +111,12 @@ pub fn generate_transaction_identifier() -> Result<String, PayError> {
     let mut buf = [0u8; 8];
     getrandom::fill(&mut buf).map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
     Ok(format!("tx_{}", hex::encode(buf)))
+}
+
+pub fn generate_request_identifier() -> Result<String, PayError> {
+    let mut buf = [0u8; 16];
+    getrandom::fill(&mut buf).map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+    Ok(format!("req_{}", hex::encode(buf)))
 }
 
 pub fn now_epoch_seconds() -> u64 {
@@ -155,6 +189,7 @@ pub fn save_wallet_metadata(
     std::fs::create_dir_all(&root).map_err(|e| {
         PayError::InternalError(format!("create wallets dir {}: {e}", root.display()))
     })?;
+    set_private_dir_permissions(&root)?;
 
     let wallet_dir = root.join(&wallet_metadata.id);
     let wallet_data_dir = wallet_dir.join("wallet-data");
@@ -164,6 +199,8 @@ pub fn save_wallet_metadata(
             wallet_data_dir.display()
         ))
     })?;
+    set_private_dir_permissions(&wallet_dir)?;
+    set_private_dir_permissions(&wallet_data_dir)?;
 
     let wallet_metadata_json = serde_json::to_string(wallet_metadata)
         .map_err(|e| PayError::InternalError(format!("serialize wallet metadata: {e}")))?;
@@ -202,6 +239,19 @@ pub fn save_wallet_metadata(
         .commit()
         .map_err(|e| PayError::InternalError(format!("core commit wallet metadata: {e}")))?;
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> Result<(), PayError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| PayError::InternalError(format!("chmod 700 {}: {e}", path.display())))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> Result<(), PayError> {
     Ok(())
 }
 
@@ -452,6 +502,42 @@ mod tests {
         assert!(id.starts_with("tx_"), "should start with tx_: {id}");
         assert_eq!(id.len(), 19, "tx_ + 16 hex chars = 19: {id}");
         assert!(id[3..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generate_request_id_format() {
+        let id = generate_request_identifier().unwrap();
+        assert!(id.starts_with("req_"), "should start with req_: {id}");
+        assert_eq!(id.len(), 36, "req_ + 32 hex chars = 36: {id}");
+        assert!(id[4..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn wallet_metadata_debug_redacts_secrets() {
+        let meta = WalletMetadata {
+            id: "w_aabbccdd".to_string(),
+            network: Network::Btc,
+            label: Some("btc".to_string()),
+            mint_url: None,
+            sol_rpc_endpoints: None,
+            evm_rpc_endpoints: None,
+            evm_chain_id: None,
+            seed_secret: Some("seed-secret-value".to_string()),
+            backend: Some("core-rpc".to_string()),
+            btc_esplora_url: None,
+            btc_network: Some("signet".to_string()),
+            btc_address_type: Some("taproot".to_string()),
+            btc_core_url: Some("http://127.0.0.1:8332".to_string()),
+            btc_core_auth_secret: Some("core-auth-secret-value".to_string()),
+            btc_electrum_url: None,
+            custom_tokens: None,
+            created_at_epoch_s: 1,
+            error: None,
+        };
+        let rendered = format!("{meta:?}");
+        assert!(!rendered.contains("seed-secret-value"));
+        assert!(!rendered.contains("core-auth-secret-value"));
+        assert!(rendered.contains("***"));
     }
 
     #[cfg(feature = "redb")]

@@ -126,6 +126,7 @@ pub trait PayProvider: Send + Sync {
     }
 
     /// Connectivity check. Remote providers ping the RPC endpoint; local providers no-op.
+    #[allow(dead_code)]
     async fn ping(&self) -> Result<(), PayError> {
         Ok(())
     }

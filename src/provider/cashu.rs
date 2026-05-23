@@ -771,6 +771,13 @@ impl PayProvider for CashuProvider {
             amount_native: quote.amount.to_u64(),
             fee_estimate_native: quote.fee_reserve.to_u64(),
             fee_unit: "sats".to_string(),
+            spend_debits: vec![SpendDebit {
+                amount_native: quote
+                    .amount
+                    .to_u64()
+                    .saturating_add(quote.fee_reserve.to_u64()),
+                token: None,
+            }],
         })
     }
 

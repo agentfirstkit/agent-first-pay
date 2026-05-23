@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 pub struct RestInit {
     pub listen: String,
     pub api_key: Option<String>,
+    pub allow_public_listen: bool,
     pub log: Vec<String>,
     pub data_dir: Option<String>,
     pub startup_argv: Vec<String>,
@@ -138,12 +139,15 @@ fn now_ms() -> u64 {
 }
 
 pub async fn run_rest(init: RestInit) {
-    let api_key: String = match init.api_key {
+    let api_key: String = match init
+        .api_key
+        .or_else(|| std::env::var("AFPAY_REST_API_KEY").ok())
+    {
         Some(s) if !s.is_empty() => s,
         _ => {
             let value = agent_first_data::build_cli_error(
                 "--rest-api-key is required for REST mode",
-                Some("pass an API key for bearer authentication"),
+                Some("pass an API key for bearer authentication or set AFPAY_REST_API_KEY"),
             );
             let rendered =
                 agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
@@ -220,6 +224,17 @@ pub async fn run_rest(init: RestInit) {
             std::process::exit(1);
         }
     };
+    if public_listen_requires_ack(addr) && !init.allow_public_listen {
+        let value = agent_first_data::build_cli_error(
+            "refusing to bind REST to a non-loopback address without --public-listen",
+            Some(
+                "use the default 127.0.0.1:9401, or pass --public-listen only behind TLS/firewall",
+            ),
+        );
+        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let _ = writeln!(std::io::stdout(), "{rendered}");
+        std::process::exit(1);
+    }
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -238,6 +253,10 @@ pub async fn run_rest(init: RestInit) {
         let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
+}
+
+fn public_listen_requires_ack(addr: std::net::SocketAddr) -> bool {
+    !addr.ip().is_loopback()
 }
 
 fn check_auth(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {

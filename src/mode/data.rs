@@ -146,6 +146,7 @@ pub(crate) fn do_global_backup(
 
     let file =
         std::fs::File::create(archive_path).map_err(|e| format!("create archive file: {e}"))?;
+    set_private_file_permissions(archive_p)?;
     let enc = zstd::Encoder::new(file, 3).map_err(|e| format!("init zstd encoder: {e}"))?;
     let enc = enc.auto_finish();
     let mut tar = tar::Builder::new(enc);
@@ -243,9 +244,7 @@ pub(crate) fn do_global_restore(
             if let Ok(rel) = entry_path.strip_prefix("data") {
                 if !rel.as_os_str().is_empty() {
                     let dest = data_path.join(rel);
-                    ensure_parent(&dest)?;
-                    entry
-                        .unpack(&dest)
+                    safe_unpack_entry(&mut entry, data_path, rel, &dest)
                         .map_err(|e| format!("extract '{}': {e}", rel.display()))?;
                 }
                 continue;
@@ -264,9 +263,7 @@ pub(crate) fn do_global_restore(
                 }
                 if let Some((_, target)) = extra_dirs.iter().find(|(l, _)| l == &label) {
                     let dest = Path::new(target).join(&inner);
-                    ensure_parent(&dest)?;
-                    entry
-                        .unpack(&dest)
+                    safe_unpack_entry(&mut entry, Path::new(target), &inner, &dest)
                         .map_err(|e| format!("extract extra '{label}/{}': {e}", inner.display()))?;
                 }
                 continue;
@@ -334,6 +331,7 @@ fn do_network_backup(
 
     let file =
         std::fs::File::create(archive_path).map_err(|e| format!("create archive file: {e}"))?;
+    set_private_file_permissions(archive_p)?;
     let enc = zstd::Encoder::new(file, 3).map_err(|e| format!("init zstd encoder: {e}"))?;
     let enc = enc.auto_finish();
     let mut tar = tar::Builder::new(enc);
@@ -441,13 +439,12 @@ fn do_network_restore(
                 if inner.as_os_str().is_empty() {
                     continue;
                 }
-                let dest = Path::new(data_dir)
+                let root = Path::new(data_dir)
                     .join("wallets")
                     .join(&wallet_id)
-                    .join("wallet-data")
-                    .join(&inner);
-                ensure_parent(&dest)?;
-                entry.unpack(&dest).map_err(|e| {
+                    .join("wallet-data");
+                let dest = root.join(&inner);
+                safe_unpack_entry(&mut entry, &root, &inner, &dest).map_err(|e| {
                     format!(
                         "extract wallet-data for '{wallet_id}/{}': {e}",
                         inner.display()
@@ -678,11 +675,128 @@ fn clear_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_parent(dest: &Path) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create directory '{}': {e}", parent.display()))?;
+fn safe_unpack_entry<R: std::io::Read>(
+    entry: &mut tar::Entry<'_, R>,
+    root: &Path,
+    rel: &Path,
+    dest: &Path,
+) -> Result<(), String> {
+    validate_archive_relative_path(rel)?;
+    let entry_type = entry.header().entry_type();
+    if !(entry_type.is_file() || entry_type.is_dir()) {
+        return Err(format!(
+            "unsupported archive entry type for '{}'",
+            rel.display()
+        ));
     }
+    ensure_safe_parent(root, dest)?;
+    if let Ok(meta) = std::fs::symlink_metadata(dest) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to overwrite symlink '{}'",
+                dest.display()
+            ));
+        }
+    }
+    entry
+        .unpack(dest)
+        .map(|_| ())
+        .map_err(|e| format!("safe unpack '{}': {e}", rel.display()))
+}
+
+fn validate_archive_relative_path(rel: &Path) -> Result<(), String> {
+    use std::path::Component;
+
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) if !part.is_empty() => {}
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "unsafe archive path '{}': absolute paths and '..' are not allowed",
+                    rel.display()
+                ));
+            }
+            _ => {
+                return Err(format!("unsafe archive path '{}'", rel.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_safe_parent(root: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(root)
+        .map_err(|e| format!("create root directory '{}': {e}", root.display()))?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize root '{}': {e}", root.display()))?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| format!("destination has no parent: '{}'", dest.display()))?;
+    let rel_parent = parent.strip_prefix(root).map_err(|_| {
+        format!(
+            "destination '{}' is outside restore root '{}'",
+            dest.display(),
+            root.display()
+        )
+    })?;
+
+    let mut current = root.to_path_buf();
+    for component in rel_parent.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(format!(
+                "unsafe destination parent '{}'",
+                rel_parent.display()
+            ));
+        };
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(format!(
+                        "refusing to extract through symlink '{}'",
+                        current.display()
+                    ));
+                }
+                if !meta.is_dir() {
+                    return Err(format!(
+                        "restore parent '{}' exists and is not a directory",
+                        current.display()
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)
+                    .map_err(|e| format!("create directory '{}': {e}", current.display()))?;
+            }
+            Err(e) => return Err(format!("inspect '{}': {e}", current.display())),
+        }
+    }
+
+    let parent_canon = parent
+        .canonicalize()
+        .map_err(|e| format!("canonicalize parent '{}': {e}", parent.display()))?;
+    if !parent_canon.starts_with(&root_canon) {
+        return Err(format!(
+            "destination '{}' escapes restore root '{}'",
+            dest.display(),
+            root.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod 600 '{}': {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 

@@ -9,6 +9,8 @@ use crate::types::{ExchangeRateConfig, SpendLimit, SpendLimitStatus, SpendScope}
 #[cfg(feature = "redb")]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use tokio::sync::Mutex;
 
 #[cfg(feature = "redb")]
@@ -40,7 +42,7 @@ const SPEND_VERSION: u64 = 1;
 #[cfg(feature = "redb")]
 const FX_CACHE_VERSION: u64 = 1;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct SpendContext {
     pub network: String,
     pub wallet: Option<String>,
@@ -70,6 +72,8 @@ struct SpendReservation {
     created_at_epoch_ms: u64,
     expires_at_epoch_ms: u64,
     finalized_at_epoch_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +166,7 @@ impl SpendLedger {
 
     /// Add a single spend limit rule. Generates and assigns a rule_id, returns it.
     pub async fn add_limit(&self, limit: &mut SpendLimit) -> Result<String, PayError> {
+        normalize_limit(limit);
         validate_limit(limit, self.exchange_rate.as_ref())?;
 
         let _guard = self.mu.lock().await;
@@ -194,7 +199,9 @@ impl SpendLedger {
 
     /// Replace all spend limits (used by config patch / pipe mode).
     pub async fn set_limits(&self, limits: &[SpendLimit]) -> Result<(), PayError> {
-        for limit in limits {
+        let mut limits = limits.to_vec();
+        for limit in &mut limits {
+            normalize_limit(limit);
             validate_limit(limit, self.exchange_rate.as_ref())?;
         }
 
@@ -202,9 +209,9 @@ impl SpendLedger {
 
         match &self.backend {
             #[cfg(feature = "redb")]
-            SpendBackend::Redb { .. } => self.set_limits_redb(limits),
+            SpendBackend::Redb { .. } => self.set_limits_redb(&limits),
             #[cfg(feature = "postgres")]
-            SpendBackend::Postgres { .. } => self.set_limits_postgres(limits).await,
+            SpendBackend::Postgres { .. } => self.set_limits_postgres(&limits).await,
             SpendBackend::None => Err(PayError::NotImplemented(
                 "no storage backend for spend limits".to_string(),
             )),
@@ -234,14 +241,15 @@ impl SpendLedger {
                 "network cannot be empty for spend check".to_string(),
             ));
         }
+        let request_hash = spend_request_hash(op_id, ctx);
 
         let _guard = self.mu.lock().await;
 
         match &self.backend {
             #[cfg(feature = "redb")]
-            SpendBackend::Redb { .. } => self.reserve_redb(op_id, ctx).await,
+            SpendBackend::Redb { .. } => self.reserve_redb(op_id, ctx, &request_hash).await,
             #[cfg(feature = "postgres")]
-            SpendBackend::Postgres { .. } => self.reserve_postgres(op_id, ctx).await,
+            SpendBackend::Postgres { .. } => self.reserve_postgres(op_id, ctx, &request_hash).await,
             SpendBackend::None => Err(PayError::NotImplemented(
                 "no storage backend for spend limits".to_string(),
             )),
@@ -440,7 +448,12 @@ impl SpendLedger {
         Ok(out)
     }
 
-    async fn reserve_redb(&self, op_id: &str, ctx: &SpendContext) -> Result<u64, PayError> {
+    async fn reserve_redb(
+        &self,
+        op_id: &str,
+        ctx: &SpendContext,
+        request_hash: &str,
+    ) -> Result<u64, PayError> {
         let now = now_epoch_ms();
         let db = self.open_spend_db()?;
 
@@ -485,7 +498,17 @@ impl SpendLedger {
                 .map_err(|e| PayError::InternalError(format!("spend read op index: {e}")))?
             {
                 let existing_id = existing.value();
-                return Ok(existing_id);
+                let reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
+                    PayError::InternalError(format!("spend open reservation table: {e}"))
+                })?;
+                let status = reservation_table
+                    .get(existing_id)
+                    .map_err(|e| PayError::InternalError(format!("spend read reservation: {e}")))?
+                    .map(|value| decode::<SpendReservation>(value.value()))
+                    .transpose()?
+                    .map(|reservation| reservation.status)
+                    .unwrap_or(ReservationStatus::Pending);
+                return Err(duplicate_reservation_error(op_id, existing_id, &status));
             }
 
             let mut reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
@@ -552,6 +575,7 @@ impl SpendLedger {
                 created_at_epoch_ms: now,
                 expires_at_epoch_ms: now.saturating_add(300_000),
                 finalized_at_epoch_ms: None,
+                request_hash: Some(request_hash.to_string()),
             };
             encoded_blobs.push(encode(&reservation)?);
             let encoded = encoded_blobs
@@ -791,7 +815,12 @@ impl SpendLedger {
         Ok(out)
     }
 
-    async fn reserve_postgres(&self, op_id: &str, ctx: &SpendContext) -> Result<u64, PayError> {
+    async fn reserve_postgres(
+        &self,
+        op_id: &str,
+        ctx: &SpendContext,
+        request_hash: &str,
+    ) -> Result<u64, PayError> {
         use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
 
         let pool = self.pg_pool()?;
@@ -832,15 +861,19 @@ impl SpendLedger {
             .map_err(|e| PayError::InternalError(format!("pg advisory lock: {e}")))?;
 
         // Check for existing reservation with same op_id (idempotency)
-        let existing: Option<(i64,)> =
-            sqlx::query_as("SELECT reservation_id FROM spend_reservations WHERE op_id = $1")
-                .bind(op_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| PayError::InternalError(format!("pg check op_id: {e}")))?;
+        let existing: Option<(i64, serde_json::Value)> = sqlx::query_as(
+            "SELECT reservation_id, reservation FROM spend_reservations WHERE op_id = $1",
+        )
+        .bind(op_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PayError::InternalError(format!("pg check op_id: {e}")))?;
 
-        if let Some((rid,)) = existing {
-            return Ok(rid as u64);
+        if let Some((rid, reservation_json)) = existing {
+            let status = serde_json::from_value::<SpendReservation>(reservation_json)
+                .map(|reservation| reservation.status)
+                .unwrap_or(ReservationStatus::Pending);
+            return Err(duplicate_reservation_error(op_id, rid as u64, &status));
         }
 
         // Expire pending reservations
@@ -899,6 +932,7 @@ impl SpendLedger {
             created_at_epoch_ms: now,
             expires_at_epoch_ms: now.saturating_add(300_000),
             finalized_at_epoch_ms: None,
+            request_hash: Some(request_hash.to_string()),
         };
         let reservation_json = serde_json::to_value(&reservation)
             .map_err(|e| PayError::InternalError(format!("serialize reservation: {e}")))?;
@@ -1154,7 +1188,18 @@ impl SpendLedger {
             ))
         })?;
 
-        let quote = self.get_or_fetch_quote(symbol, "USD").await?;
+        let quote = if symbol == "USD" {
+            let now = now_epoch_ms();
+            ExchangeRateQuote {
+                pair: "USD/USD".to_string(),
+                source: "identity".to_string(),
+                price: 1.0,
+                fetched_at_epoch_ms: now,
+                expires_at_epoch_ms: now.saturating_add(86_400_000),
+            }
+        } else {
+            self.get_or_fetch_quote(symbol, "USD").await?
+        };
 
         // Block if the quote has fully expired (fetch must have failed silently
         // in a prior call, or the clock jumped).
@@ -1349,15 +1394,91 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn spend_request_hash(op_id: &str, ctx: &SpendContext) -> String {
+    let mut hasher = DefaultHasher::new();
+    op_id.hash(&mut hasher);
+    ctx.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn reservation_status_label(status: &ReservationStatus) -> &'static str {
+    match status {
+        ReservationStatus::Pending => "pending",
+        ReservationStatus::Confirmed => "confirmed",
+        ReservationStatus::Cancelled => "cancelled",
+        ReservationStatus::Expired => "expired",
+    }
+}
+
+fn duplicate_reservation_error(
+    op_id: &str,
+    reservation_id: u64,
+    status: &ReservationStatus,
+) -> PayError {
+    PayError::InvalidAmount(format!(
+        "duplicate spend operation id '{op_id}' already has reservation {reservation_id} ({status}); refusing to re-execute payment",
+        status = reservation_status_label(status)
+    ))
+}
+
+fn normalize_limit(rule: &mut SpendLimit) {
+    rule.network = rule
+        .network
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    rule.wallet = rule
+        .wallet
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    rule.token = rule
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| canonical_spend_token(rule.network.as_deref().unwrap_or(""), value));
+
+    if matches!(rule.scope, SpendScope::Network | SpendScope::Wallet)
+        && matches!(rule.network.as_deref(), Some("sol" | "evm"))
+        && rule.token.is_none()
+    {
+        rule.token = Some("native".to_string());
+    }
+}
+
+fn canonical_spend_token(network: &str, token: &str) -> String {
+    let token = token.trim().to_ascii_lowercase();
+    match (network, token.as_str()) {
+        ("sol", "sol" | "native" | "lamports") => "native".to_string(),
+        ("evm", "eth" | "native" | "wei") => "native".to_string(),
+        _ => token,
+    }
+}
+
 fn token_asset(network: &str, token: Option<&str>) -> Option<(&'static str, f64)> {
-    match token.map(|t| t.to_ascii_lowercase()).as_deref() {
+    let network = network.to_ascii_lowercase();
+    match token.map(|t| canonical_spend_token(&network, t)).as_deref() {
+        Some("native") => {
+            if network == "sol" {
+                Some(("SOL", 1e9))
+            } else if network == "evm" {
+                Some(("ETH", 1e18))
+            } else if network.starts_with("ln") || network == "cashu" || network == "btc" {
+                Some(("BTC", 1e8))
+            } else {
+                None
+            }
+        }
+        Some("btc" | "sat" | "sats") => Some(("BTC", 1e8)),
         Some("sol") => Some(("SOL", 1e9)),
         Some("eth") => Some(("ETH", 1e18)),
         Some("usdc" | "usdt") => Some(("USD", 1e6)),
         Some(_) => None,
         None => {
-            let p = network.to_ascii_lowercase();
-            if p.starts_with("ln") || p == "cashu" || p == "btc" {
+            if network.starts_with("ln") || network == "cashu" || network == "btc" {
                 Some(("BTC", 1e8))
             } else {
                 None
@@ -1472,7 +1593,7 @@ async fn fetch_from_source(
     };
 
     let mut req = client.get(&url);
-    if let Some(key) = &source.api_key {
+    if let Some(key) = &source.api_key_secret {
         req = req.header("Authorization", format!("Bearer {key}"));
         req = req.header("X-Api-Key", key);
     }
@@ -1656,8 +1777,9 @@ fn rule_matches_context(
     token: Option<&str>,
 ) -> bool {
     if let Some(rule_token) = &rule.token {
-        match token {
-            Some(ctx_token) if ctx_token.eq_ignore_ascii_case(rule_token) => {}
+        let normalized_rule_token = canonical_spend_token(network, rule_token);
+        match token.map(|ctx_token| canonical_spend_token(network, ctx_token)) {
+            Some(ctx_token) if ctx_token == normalized_rule_token => {}
             _ => return false,
         }
     }
@@ -1783,6 +1905,31 @@ mod tests {
 
     #[cfg(feature = "redb")]
     #[tokio::test]
+    async fn duplicate_operation_id_is_rejected_after_confirm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        ledger
+            .set_limits(&[make_limit(SpendScope::Network, Some("cashu"), None)])
+            .await
+            .unwrap();
+
+        let ctx = SpendContext {
+            network: "cashu".to_string(),
+            wallet: Some("w_01".to_string()),
+            amount_native: 100,
+            token: None,
+        };
+        let rid = ledger.reserve("op_duplicate", &ctx).await.unwrap();
+        ledger.confirm(rid).await.unwrap();
+
+        let err = ledger.reserve("op_duplicate", &ctx).await.unwrap_err();
+        assert!(matches!(err, PayError::InvalidAmount(_)));
+        assert!(err.to_string().contains("refusing to re-execute"));
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
     async fn wallet_scope_requires_wallet_context() {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
@@ -1841,5 +1988,50 @@ mod tests {
             }])
             .await
             .expect("network scope should not require exchange_rate");
+    }
+
+    #[test]
+    fn native_sol_and_evm_assets_can_be_priced_for_global_usd_limits() {
+        assert_eq!(token_asset("sol", Some("native")), Some(("SOL", 1e9)));
+        assert_eq!(token_asset("sol", Some("lamports")), Some(("SOL", 1e9)));
+        assert_eq!(token_asset("evm", Some("native")), Some(("ETH", 1e18)));
+        assert_eq!(token_asset("evm", Some("wei")), Some(("ETH", 1e18)));
+    }
+
+    #[test]
+    fn sol_and_evm_limits_without_token_normalize_to_native() {
+        let mut sol_limit = make_limit(SpendScope::Network, Some("SOL"), None);
+        normalize_limit(&mut sol_limit);
+        assert_eq!(sol_limit.network.as_deref(), Some("sol"));
+        assert_eq!(sol_limit.token.as_deref(), Some("native"));
+
+        let mut evm_limit = make_limit(SpendScope::Wallet, Some("evm"), Some("w_evm"));
+        normalize_limit(&mut evm_limit);
+        assert_eq!(evm_limit.token.as_deref(), Some("native"));
+    }
+
+    #[test]
+    fn token_limit_does_not_match_native_gas_debit() {
+        let mut sol_usdc = make_limit(SpendScope::Network, Some("sol"), None);
+        sol_usdc.token = Some("usdc".to_string());
+        normalize_limit(&mut sol_usdc);
+        assert!(rule_matches_context(&sol_usdc, "sol", None, Some("usdc")));
+        assert!(!rule_matches_context(
+            &sol_usdc,
+            "sol",
+            None,
+            Some("native")
+        ));
+
+        let mut evm_usdc = make_limit(SpendScope::Network, Some("evm"), None);
+        evm_usdc.token = Some("usdc".to_string());
+        normalize_limit(&mut evm_usdc);
+        assert!(rule_matches_context(&evm_usdc, "evm", None, Some("usdc")));
+        assert!(!rule_matches_context(
+            &evm_usdc,
+            "evm",
+            None,
+            Some("native")
+        ));
     }
 }

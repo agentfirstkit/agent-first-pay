@@ -61,7 +61,7 @@ All networks in one process. Simplest setup:
 
 ```bash
 # REST API server (curl-accessible, no specialized client needed)
-afpay --mode rest --rest-api-key "my-secret"
+afpay --mode rest --rest-api-key "my-secret"              # 127.0.0.1:9401 by default
 
 # Or selective features
 cargo build --features cashu
@@ -125,7 +125,7 @@ With `--rpc-endpoint`, the CLI forwards the request. Without it, the CLI execute
 
 ## RPC Protocol
 
-The RPC mode uses gRPC with PSK (Pre-Shared Key) payload encryption instead of TLS. A single secret handles both authentication and encryption with zero certificate management. Suitable for internal process-to-process communication where the operator controls all nodes.
+The RPC mode uses gRPC with PSK (Pre-Shared Key) payload encryption instead of TLS. The PSK must be a high-entropy 32+ byte secret; afpay derives the AES key with HKDF-SHA256, rejects duplicate request nonces during the daemon lifetime, and treats decrypt failure as auth failure. Suitable for internal process-to-process communication where the operator controls all nodes.
 
 ### Proto Definition
 
@@ -139,7 +139,7 @@ service AfPay {
 
 message EncryptedRequest {
   bytes nonce = 1;       // 12 bytes, randomly generated per request
-  bytes ciphertext = 2;  // AES-256-GCM(secret, JSON payload)
+  bytes ciphertext = 2;  // AES-256-GCM(HKDF(secret), JSON payload)
 }
 
 message EncryptedResponse {
@@ -156,9 +156,9 @@ The proto does not define business fields. The internal payload is just Input/Ou
 Client                                Server
   │                                     │
   ├─ Input → serde_json::to_vec()       │
-  ├─ AES-256-GCM encrypt(secret, nonce) │
+  ├─ HKDF(secret) → AES-GCM encrypt    │
   ├─ gRPC Call(nonce, ciphertext) ─────→│
-  │                                     ├─ decrypt(secret, nonce, ciphertext)
+  │                                     ├─ reject replayed nonce, decrypt payload
   │                                     ├─ failure → disconnect (decrypt fail = auth fail)
   │                                     ├─ success → serde_json::from_slice() → handle
   │                                     ├─ Output → serialize → encrypt
@@ -170,10 +170,13 @@ Client                                Server
 
 ```bash
 # Daemon
-afpay --mode rpc --rpc-listen 0.0.0.0:9400 --rpc-secret "64-char-hex"
+afpay --mode rpc --rpc-secret "64-char-hex"
+
+# Public bind requires an explicit acknowledgement and network hardening
+afpay --mode rpc --rpc-listen 0.0.0.0:9400 --public-listen --rpc-secret "64-char-hex"
 
 # CLI direct to remote daemon
-afpay --rpc-endpoint vps-a:9400 --rpc-secret "abc123..." send --wallet w_01 ...
+afpay --rpc-endpoint vps-a:9400 --rpc-secret "64-char-hex" send --wallet w_01 ...
 ```
 
 For multi-level (coordinator → daemon), configure `config.toml` with named `afpay_rpc` nodes (see Deployment Patterns above). Each node can have a different secret. Secrets use the `_secret` suffix and are auto-redacted in agent-first-data output.
@@ -185,13 +188,20 @@ tonic = "0.14"           # gRPC server/client
 prost = "0.14"           # protobuf
 tonic-build = "0.14"     # build.rs proto compilation
 aes-gcm = "0.10"         # AES-256-GCM encryption
+hkdf = "0.12"            # PSK key derivation
+sha2 = "0.10"            # HKDF-SHA256
 axum = "0.8"             # HTTP REST server (rest feature)
 tower-http = "0.6"       # CORS middleware (rest feature)
 ```
 
+
+### Public Listen Policy
+
+`--rpc-listen` and `--rest-listen` default to `127.0.0.1`. Binding to `0.0.0.0`, `::`, or another non-loopback address fails unless `--public-listen` is also supplied. Treat `--public-listen` as an operational acknowledgement: REST still needs TLS at a reverse proxy, and RPC should remain on a trusted private network or tunnel.
+
 ## REST API
 
-The REST mode (`--mode rest`) provides a plain HTTP API with Bearer token authentication. Unlike the RPC mode (gRPC + AES-256-GCM), REST mode is designed for direct access from any HTTP client — no specialized client or encryption library needed.
+The REST mode (`--mode rest`) provides a plain HTTP API with Bearer token authentication. Unlike the RPC mode (gRPC + AES-256-GCM), REST mode is designed for direct access from any HTTP client — no specialized client or encryption library needed. REST listens on loopback by default; use `--public-listen` only behind TLS, firewall rules, or a trusted private network.
 
 ### Protocol
 
@@ -234,14 +244,14 @@ supervisord
 | Runtime | `AFPAY_MODE` | `rest` | afpay run mode: `rest` or `rpc` |
 | Runtime | `AFPAY_PORT` | `9401` | Listen port (rest/rpc) |
 | Runtime | `AFPAY_REST_API_KEY` | auto-generated | REST Bearer token (rest mode) |
-| Runtime | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret (rpc mode) |
+| Runtime | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret (rpc mode; 32+ bytes) |
 | Runtime | `ENABLE_PHOENIXD` | `true` | Start phoenixd process |
 | Runtime | `ENABLE_BITCOIND` | `false` | Start bitcoind process |
 | Runtime | `BTC_NETWORK` | `mainnet` | bitcoind network |
 | Runtime | `BTC_RPC_PORT` | `8332` | bitcoind RPC port |
 | Runtime | `BTC_PRUNE_MB` | `550` | bitcoind prune target in MiB (`0` disables pruning) |
 
-Secrets are auto-generated on first run and persisted to the data volume. The entrypoint prints connection info (endpoint + secret/key) to stdout on startup.
+Secrets are auto-generated on first run and persisted to private files in the data volume. The entrypoint prints endpoint and secret file locations, but not secret values, and passes secrets through environment variables instead of process arguments.
 
 ```bash
 # REST mode (default) — curl-accessible
@@ -318,6 +328,8 @@ Spend tracking uses a reservation-based model. Each send is first reserved again
 **PostgreSQL backend**: Same data model stored in `spend_rules`, `spend_reservations`, `spend_events` tables. Multi-process concurrency via `pg_advisory_xact_lock` — the reserve operation acquires an advisory lock within a transaction to prevent concurrent check-then-write races.
 
 Exchange rate quotes (for `global-usd-cents` scope) are cached in the storage backend — `exchange-rate-cache.redb` or the `exchange_rate_cache` PostgreSQL table.
+
+Exchange-rate API credentials should use `api_key_secret` in `config.toml`; legacy `api_key` still deserializes for compatibility but new serialized configs use the `_secret` suffix for redaction.
 
 ### Scope Levels
 

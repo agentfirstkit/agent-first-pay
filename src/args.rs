@@ -42,12 +42,14 @@ pub enum Mode {
 #[cfg(not(feature = "rpc"))]
 pub struct RpcStub;
 
+#[cfg_attr(not(feature = "backup"), allow(dead_code))]
 pub struct DataOp {
     pub kind: DataOpKind,
     pub data_dir: Option<String>,
     pub output: agent_first_data::OutputFormat,
 }
 
+#[cfg_attr(not(feature = "backup"), allow(dead_code))]
 pub enum DataOpKind {
     GlobalBackup {
         output_path: Option<String>,
@@ -78,6 +80,7 @@ pub struct CliRequest {
     pub log: Vec<String>,
     pub data_dir: Option<String>,
     pub rpc_endpoint: Option<String>,
+    #[cfg_attr(not(feature = "rpc"), allow(dead_code))]
     pub rpc_secret: Option<String>,
     pub startup_argv: Vec<String>,
     pub startup_args: serde_json::Value,
@@ -206,7 +209,7 @@ pub struct AfpayCli {
     rpc_endpoint: Option<String>,
 
     /// Listen address for RPC daemon (rpc mode)
-    #[arg(long = "rpc-listen", default_value = "0.0.0.0:9400")]
+    #[arg(long = "rpc-listen", default_value = "127.0.0.1:9400")]
     rpc_listen: String,
 
     /// RPC encryption secret
@@ -214,12 +217,16 @@ pub struct AfpayCli {
     rpc_secret: Option<String>,
 
     /// Listen address for REST HTTP server (rest mode)
-    #[arg(long = "rest-listen", default_value = "0.0.0.0:9401")]
+    #[arg(long = "rest-listen", default_value = "127.0.0.1:9401")]
     rest_listen: String,
 
     /// API key for REST bearer authentication (rest mode)
     #[arg(long = "rest-api-key")]
     rest_api_key: Option<String>,
+
+    /// Allow binding REST/RPC to non-loopback addresses; use only behind TLS/firewall
+    #[arg(long = "public-listen")]
+    public_listen: bool,
 
     /// Wallet and data directory
     #[arg(long = "data-dir")]
@@ -1424,6 +1431,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
                 return Ok(Mode::Rpc(RpcInit {
                     listen: cli.rpc_listen,
                     rpc_secret: cli.rpc_secret,
+                    allow_public_listen: cli.public_listen,
                     log,
                     data_dir: cli.data_dir,
                     startup_argv: raw.clone(),
@@ -1441,6 +1449,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
             return Ok(Mode::Rest(RestInit {
                 listen: cli.rest_listen,
                 api_key: cli.rest_api_key,
+                allow_public_listen: cli.public_listen,
                 log,
                 data_dir: cli.data_dir,
                 startup_argv: raw.clone(),
@@ -1676,7 +1685,8 @@ pub fn parse_args() -> Result<Mode, CliError> {
         }
     };
 
-    let request_id = format!("cli_{}", std::process::id());
+    let request_id =
+        crate::store::wallet::generate_request_identifier().map_err(|e| e.to_string())?;
     let input = command_to_input(command, &request_id)?;
 
     let (rpc_endpoint, rpc_secret) =
@@ -2643,6 +2653,8 @@ fn build_startup_args(cli: &AfpayCli) -> serde_json::Value {
         "data_dir": cli.data_dir,
         "rpc_endpoint": cli.rpc_endpoint,
         "rpc_listen": cli.rpc_listen,
+        "rest_listen": cli.rest_listen,
+        "public_listen": cli.public_listen,
     })
 }
 

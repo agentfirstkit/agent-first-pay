@@ -2,7 +2,7 @@
 
 # afpay CLI Reference
 
-> Regenerate with `./scripts/generate-cli-doc.sh`.
+> Regenerate with `afpay --help-markdown`.
 > See [../README.md](../README.md) for setup and examples, and [architecture.md](architecture.md) for deployment details.
 
 # Command-Line Help for `afpay`
@@ -144,17 +144,18 @@ Agent-first cryptocurrency micropayment tool
 
   Default value: `cli`
 
-  Possible values: `cli`, `pipe`, `interactive`, `tui`, `rpc`
+  Possible values: `cli`, `pipe`, `interactive`, `tui`, `rpc`, `rest`
 
 * `--rpc-endpoint <RPC_ENDPOINT>` — Connect to remote RPC daemon (cli mode)
 * `--rpc-listen <RPC_LISTEN>` — Listen address for RPC daemon (rpc mode)
 
-  Default value: `0.0.0.0:9400`
+  Default value: `127.0.0.1:9400`
 * `--rpc-secret <RPC_SECRET>` — RPC encryption secret
 * `--rest-listen <REST_LISTEN>` — Listen address for REST HTTP server (rest mode)
 
-  Default value: `0.0.0.0:9401`
+  Default value: `127.0.0.1:9401`
 * `--rest-api-key <REST_API_KEY>` — API key for REST bearer authentication (rest mode)
+* `--public-listen` — Allow binding REST/RPC to non-loopback addresses; use only behind TLS/firewall
 * `--data-dir <DATA_DIR>` — Wallet and data directory
 * `--output <OUTPUT>` — Output format
 

@@ -5,6 +5,8 @@
 
 Use `docker compose -f container/docker/compose.yaml up --build` for the standard flow, or `./container/apple-container/up.sh` on macOS when you want to run through Apple `container`.
 
+The Docker entrypoint stores the REST API key or RPC PSK under the afpay data volume with private file permissions and passes it via environment variable. It does not print secret values or include them in the `afpay` process arguments.
+
 ## Backup and Restore
 
 - `container/apple-container/backup.sh` and `container/apple-container/restore.sh` back up the Apple Container CLI bind-mounted data directories.

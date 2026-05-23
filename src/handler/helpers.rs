@@ -226,6 +226,130 @@ pub(crate) fn wallet_summary_from_meta(
     }
 }
 
+pub(crate) async fn resolve_wallet_for_provider(
+    app: &App,
+    wallet: Option<&str>,
+    network: Option<Network>,
+) -> Result<(Network, String), PayError> {
+    let wallet = wallet.map(str::trim).filter(|value| !value.is_empty());
+
+    if let Some(wallet_id) = wallet {
+        if let Some(store) = app.store.as_deref() {
+            if let Ok(meta) = store.load_wallet_metadata(wallet_id) {
+                if let Some(expected) = network {
+                    if meta.network != expected {
+                        return Err(PayError::InvalidAmount(format!(
+                            "wallet {wallet_id} is {}, not {expected}",
+                            meta.network
+                        )));
+                    }
+                }
+                return Ok((meta.network, meta.id));
+            }
+        }
+
+        if let Some(expected) = network {
+            // Remote/coordinator mode: the wallet may exist only on the downstream node.
+            return Ok((expected, wallet_id.to_string()));
+        }
+
+        let matches = provider_wallet_candidates(app, None, Some(wallet_id)).await?;
+        return select_wallet_candidate(matches, network, Some(wallet_id));
+    }
+
+    let local = local_wallet_candidates(app, network)?;
+    if !local.is_empty() {
+        return select_wallet_candidate(local, network, None);
+    }
+
+    let remote = provider_wallet_candidates(app, network, None).await?;
+    select_wallet_candidate(remote, network, None)
+}
+
+fn local_wallet_candidates(
+    app: &App,
+    network: Option<Network>,
+) -> Result<Vec<(Network, String)>, PayError> {
+    let Some(store) = app.store.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let wallets = store.list_wallet_metadata(network)?;
+    Ok(wallets
+        .into_iter()
+        .map(|meta| (meta.network, meta.id))
+        .collect())
+}
+
+async fn provider_wallet_candidates(
+    app: &App,
+    network: Option<Network>,
+    wallet_or_label: Option<&str>,
+) -> Result<Vec<(Network, String)>, PayError> {
+    let mut candidates = Vec::new();
+    let mut first_error: Option<PayError> = None;
+
+    for (network_key, provider) in &app.providers {
+        if let Some(expected) = network {
+            if *network_key != expected {
+                continue;
+            }
+        }
+        match provider.list_wallets().await {
+            Ok(wallets) => {
+                for wallet in wallets {
+                    if let Some(needle) = wallet_or_label {
+                        if wallet.id != needle && wallet.label.as_deref() != Some(needle) {
+                            continue;
+                        }
+                    }
+                    candidates.push((wallet.network, wallet.id));
+                }
+            }
+            Err(PayError::NotImplemented(_)) | Err(PayError::WalletNotFound(_)) => {}
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+    }
+    Ok(candidates)
+}
+
+fn select_wallet_candidate(
+    candidates: Vec<(Network, String)>,
+    network: Option<Network>,
+    requested_wallet: Option<&str>,
+) -> Result<(Network, String), PayError> {
+    match candidates.len() {
+        0 => {
+            let msg = match (network, requested_wallet) {
+                (_, Some(wallet)) => format!("wallet {wallet} not found"),
+                (Some(network), None) => format!("no {network} wallet found"),
+                (None, None) => "no wallet found".to_string(),
+            };
+            Err(PayError::WalletNotFound(msg))
+        }
+        1 => Ok(candidates[0].clone()),
+        n => {
+            let msg = match (network, requested_wallet) {
+                (_, Some(wallet)) => {
+                    format!("wallet '{wallet}' matches {n} wallets; pass wallet ID and --network")
+                }
+                (Some(network), None) => format!("multiple {network} wallets found; pass --wallet"),
+                (None, None) => "multiple wallets found; pass --wallet".to_string(),
+            };
+            Err(PayError::InvalidAmount(msg))
+        }
+    }
+}
+
 pub(crate) fn log_enabled(log: &[String], event: &str) -> bool {
     if log.is_empty() {
         return false;

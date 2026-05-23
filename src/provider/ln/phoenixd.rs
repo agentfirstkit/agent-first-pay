@@ -371,7 +371,7 @@ impl LnBackend for PhoenixdBackend {
                 preimage: p.payment_preimage,
             });
         }
-        payments.sort_by(|a, b| b.created_at_epoch_s.cmp(&a.created_at_epoch_s));
+        payments.sort_by_key(|payment| std::cmp::Reverse(payment.created_at_epoch_s));
         payments.truncate(limit);
         Ok(payments)
     }

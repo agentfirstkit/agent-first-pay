@@ -168,13 +168,12 @@ pub fn wrap_remote_limit_topology(outputs: &mut [serde_json::Value], endpoint: &
                 value["limits"] = serde_json::Value::Array(vec![]);
                 value["downstream"] = serde_json::Value::Array(vec![node]);
             }
-            "limit_exceeded" => {
-                // If no origin, stamp the endpoint so the client knows which node rejected
+            "limit_exceeded"
                 if value.get("origin").is_none()
-                    || value.get("origin") == Some(&serde_json::Value::Null)
-                {
-                    value["origin"] = serde_json::Value::String(endpoint.to_string());
-                }
+                    || value.get("origin") == Some(&serde_json::Value::Null) =>
+            {
+                // If no origin, stamp the endpoint so the client knows which node rejected
+                value["origin"] = serde_json::Value::String(endpoint.to_string());
             }
             _ => {}
         }
@@ -197,6 +196,115 @@ fn log_event_enabled(log: &[String], event: &str) -> bool {
 use crate::provider::{HistorySyncStats, PayError, PayProvider};
 use crate::types::*;
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static REMOTE_REQUEST_FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Deserialize)]
+struct WalletCreatedOut {
+    wallet: String,
+    address: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    mnemonic: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WalletListOut {
+    #[serde(default)]
+    wallets: Vec<WalletSummary>,
+}
+
+#[derive(Deserialize)]
+struct WalletBalancesOut {
+    #[serde(default)]
+    wallets: Vec<WalletBalanceItem>,
+}
+
+#[derive(Deserialize)]
+struct LegacyWalletBalanceOut {
+    #[serde(default)]
+    balance: Option<BalanceInfo>,
+}
+
+#[derive(Deserialize)]
+struct ReceiveInfoOut {
+    receive_info: ReceiveInfo,
+}
+
+#[derive(Deserialize)]
+struct ReceiveClaimedOut {
+    amount: Amount,
+}
+
+#[derive(Deserialize)]
+struct CashuSentOut {
+    wallet: String,
+    transaction_id: String,
+    status: TxStatus,
+    #[serde(default)]
+    fee: Option<Amount>,
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct CashuReceivedOut {
+    wallet: String,
+    amount: Amount,
+    #[serde(default)]
+    memo: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SentOut {
+    wallet: String,
+    transaction_id: String,
+    amount: Amount,
+    #[serde(default)]
+    fee: Option<Amount>,
+    #[serde(default)]
+    preimage: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RestoredOut {
+    wallet: String,
+    unspent: u64,
+    spent: u64,
+    pending: u64,
+    unit: String,
+}
+
+#[derive(Deserialize)]
+struct HistoryOut {
+    #[serde(default)]
+    items: Vec<HistoryRecord>,
+}
+
+#[derive(Deserialize)]
+struct HistoryStatusOut {
+    transaction_id: String,
+    status: TxStatus,
+    #[serde(default)]
+    confirmations: Option<u32>,
+    #[serde(default)]
+    preimage: Option<String>,
+    #[serde(default)]
+    item: Option<HistoryRecord>,
+}
+
+#[derive(Deserialize)]
+struct HistoryUpdatedOut {
+    #[serde(default)]
+    records_scanned: usize,
+    #[serde(default)]
+    records_added: usize,
+    #[serde(default)]
+    records_updated: usize,
+}
 
 pub struct RemoteProvider {
     endpoint: String,
@@ -344,8 +452,60 @@ impl RemoteProvider {
         ))
     }
 
+    fn parse_output<T: DeserializeOwned>(
+        &self,
+        value: serde_json::Value,
+        label: &str,
+    ) -> Result<T, PayError> {
+        serde_json::from_value(value)
+            .map_err(|e| PayError::NetworkError(format!("parse {label}: {e}")))
+    }
+
+    fn balance_from_output(
+        &self,
+        value: serde_json::Value,
+        wallet: &str,
+    ) -> Result<BalanceInfo, PayError> {
+        if value.get("code").and_then(|v| v.as_str()) == Some("wallet_balance") {
+            let parsed: LegacyWalletBalanceOut = self.parse_output(value, "wallet_balance")?;
+            return Ok(parsed
+                .balance
+                .unwrap_or_else(|| BalanceInfo::new(0, 0, "unknown")));
+        }
+
+        let parsed: WalletBalancesOut = self.parse_output(value, "wallet_balances")?;
+        let mut wallets = parsed.wallets;
+        let item = wallets
+            .iter()
+            .position(|item| item.wallet.id == wallet)
+            .map(|idx| wallets.remove(idx))
+            .or_else(|| {
+                // Current daemon returns a single-item wallet_balances response for
+                // single-wallet balance queries. Use it even if older daemons omit id.
+                (wallets.len() == 1).then(|| wallets.remove(0))
+            });
+        let Some(item) = item else {
+            return Err(PayError::WalletNotFound(format!(
+                "wallet {wallet} not found in remote balance response"
+            )));
+        };
+        item.balance.ok_or_else(|| {
+            PayError::NetworkError(
+                item.error
+                    .unwrap_or_else(|| "remote balance response has no balance".to_string()),
+            )
+        })
+    }
+
     fn gen_id(&self) -> String {
-        format!("rpc_{}", crate::store::wallet::now_epoch_seconds())
+        crate::store::wallet::generate_request_identifier().unwrap_or_else(|_| {
+            let seq = REMOTE_REQUEST_FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!(
+                "req_fallback_{}_{}",
+                crate::store::wallet::now_epoch_seconds(),
+                seq
+            )
+        })
     }
 }
 
@@ -398,12 +558,13 @@ impl PayProvider for RemoteProvider {
             .await,
             &["wallet_created"],
         )?;
+        let parsed: WalletCreatedOut = self.parse_output(out, "wallet_created")?;
         Ok(WalletInfo {
-            id: out["wallet"].as_str().unwrap_or("").to_string(),
+            id: parsed.wallet,
             network: self.network,
-            address: out["address"].as_str().unwrap_or("").to_string(),
-            label: out["label"].as_str().map(|s| s.to_string()),
-            mnemonic: out["mnemonic"].as_str().map(|s| s.to_string()),
+            address: parsed.address,
+            label: parsed.label,
+            mnemonic: parsed.mnemonic,
         })
     }
 
@@ -424,12 +585,13 @@ impl PayProvider for RemoteProvider {
             .await,
             &["wallet_created"],
         )?;
+        let parsed: WalletCreatedOut = self.parse_output(out, "wallet_created")?;
         Ok(WalletInfo {
-            id: out["wallet"].as_str().unwrap_or("").to_string(),
+            id: parsed.wallet,
             network: self.network,
-            address: out["address"].as_str().unwrap_or("").to_string(),
-            label: out["label"].as_str().map(|s| s.to_string()),
-            mnemonic: out["mnemonic"].as_str().map(|s| s.to_string()),
+            address: parsed.address,
+            label: parsed.label,
+            mnemonic: parsed.mnemonic,
         })
     }
 
@@ -455,13 +617,8 @@ impl PayProvider for RemoteProvider {
             .await,
             &["wallet_list"],
         )?;
-        let wallets: Vec<WalletSummary> = serde_json::from_value(
-            out.get("wallets")
-                .cloned()
-                .unwrap_or(serde_json::Value::Array(vec![])),
-        )
-        .map_err(|e| PayError::NetworkError(format!("parse wallets: {e}")))?;
-        Ok(wallets)
+        let parsed: WalletListOut = self.parse_output(out, "wallet_list")?;
+        Ok(parsed.wallets)
     }
 
     async fn balance(&self, wallet: &str) -> Result<BalanceInfo, PayError> {
@@ -473,15 +630,9 @@ impl PayProvider for RemoteProvider {
                 check: false,
             })
             .await,
-            &["wallet_balance"],
+            &["wallet_balances", "wallet_balance"],
         )?;
-        let parsed = out
-            .get("balance")
-            .cloned()
-            .map(serde_json::from_value::<BalanceInfo>)
-            .transpose()
-            .map_err(|e| PayError::NetworkError(format!("parse balance: {e}")))?;
-        Ok(parsed.unwrap_or_else(|| BalanceInfo::new(0, 0, "unknown")))
+        self.balance_from_output(out, wallet)
     }
 
     async fn check_balance(&self, wallet: &str) -> Result<BalanceInfo, PayError> {
@@ -493,15 +644,9 @@ impl PayProvider for RemoteProvider {
                 check: true,
             })
             .await,
-            &["wallet_balance"],
+            &["wallet_balances", "wallet_balance"],
         )?;
-        let parsed = out
-            .get("balance")
-            .cloned()
-            .map(serde_json::from_value::<BalanceInfo>)
-            .transpose()
-            .map_err(|e| PayError::NetworkError(format!("parse balance: {e}")))?;
-        Ok(parsed.unwrap_or_else(|| BalanceInfo::new(0, 0, "unknown")))
+        self.balance_from_output(out, wallet)
     }
 
     async fn balance_all(&self) -> Result<Vec<WalletBalanceItem>, PayError> {
@@ -515,13 +660,30 @@ impl PayProvider for RemoteProvider {
             .await,
             &["wallet_balances", "wallet_balance"],
         )?;
-        // Could be wallet_balance (single) or wallet_balances (all)
-        if let Some(wallets) = out.get("wallets") {
-            let items: Vec<WalletBalanceItem> = serde_json::from_value(wallets.clone())
-                .map_err(|e| PayError::NetworkError(format!("parse balances: {e}")))?;
-            return Ok(items);
+        // Could be wallet_balance (legacy single) or wallet_balances (current).
+        if out.get("code").and_then(|v| v.as_str()) == Some("wallet_balance") {
+            let legacy: LegacyWalletBalanceOut = self.parse_output(out, "wallet_balance")?;
+            let Some(balance) = legacy.balance else {
+                return Ok(vec![]);
+            };
+            return Ok(vec![WalletBalanceItem {
+                wallet: WalletSummary {
+                    id: String::new(),
+                    network: self.network,
+                    label: None,
+                    address: String::new(),
+                    backend: None,
+                    mint_url: None,
+                    rpc_endpoints: None,
+                    chain_id: None,
+                    created_at_epoch_s: 0,
+                },
+                balance: Some(balance),
+                error: None,
+            }]);
         }
-        Ok(vec![])
+        let parsed: WalletBalancesOut = self.parse_output(out, "wallet_balances")?;
+        Ok(parsed.wallets)
     }
 
     async fn receive_info(
@@ -547,13 +709,8 @@ impl PayProvider for RemoteProvider {
             .await,
             &["receive_info"],
         )?;
-        let info: ReceiveInfo = serde_json::from_value(
-            out.get("receive_info")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        )
-        .map_err(|e| PayError::NetworkError(format!("parse receive_info: {e}")))?;
-        Ok(info)
+        let parsed: ReceiveInfoOut = self.parse_output(out, "receive_info")?;
+        Ok(parsed.receive_info)
     }
 
     async fn receive_claim(&self, wallet: &str, quote_id: &str) -> Result<u64, PayError> {
@@ -566,7 +723,8 @@ impl PayProvider for RemoteProvider {
             .await,
             &["receive_claimed"],
         )?;
-        Ok(out["amount"]["value"].as_u64().unwrap_or(0))
+        let parsed: ReceiveClaimedOut = self.parse_output(out, "receive_claimed")?;
+        Ok(parsed.amount.value)
     }
 
     async fn cashu_send(
@@ -588,14 +746,13 @@ impl PayProvider for RemoteProvider {
             .await,
             &["cashu_sent"],
         )?;
+        let parsed: CashuSentOut = self.parse_output(out, "cashu_sent")?;
         Ok(CashuSendResult {
-            wallet: out["wallet"].as_str().unwrap_or(wallet).to_string(),
-            transaction_id: out["transaction_id"].as_str().unwrap_or("").to_string(),
-            status: serde_json::from_value(out["status"].clone()).unwrap_or(TxStatus::Pending),
-            fee: out
-                .get("fee")
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            token: out["token"].as_str().unwrap_or("").to_string(),
+            wallet: parsed.wallet,
+            transaction_id: parsed.transaction_id,
+            status: parsed.status,
+            fee: parsed.fee,
+            token: parsed.token,
         })
     }
 
@@ -613,16 +770,11 @@ impl PayProvider for RemoteProvider {
             .await,
             &["cashu_received"],
         )?;
-        let amount: Amount = serde_json::from_value(
-            out.get("amount")
-                .cloned()
-                .unwrap_or(serde_json::json!({"value": 0, "unit": "sats"})),
-        )
-        .map_err(|e| PayError::NetworkError(format!("parse amount: {e}")))?;
+        let parsed: CashuReceivedOut = self.parse_output(out, "cashu_received")?;
         Ok(CashuReceiveResult {
-            wallet: out["wallet"].as_str().unwrap_or(wallet).to_string(),
-            amount,
-            memo: out["memo"].as_str().map(|s| s.to_string()),
+            wallet: parsed.wallet,
+            amount: parsed.amount,
+            memo: parsed.memo,
         })
     }
 
@@ -646,23 +798,13 @@ impl PayProvider for RemoteProvider {
             .await,
             &["sent"],
         )?;
-        let amount: Amount = serde_json::from_value(
-            out.get("amount")
-                .cloned()
-                .unwrap_or(serde_json::json!({"value": 0, "unit": "sats"})),
-        )
-        .map_err(|e| PayError::NetworkError(format!("parse amount: {e}")))?;
+        let parsed: SentOut = self.parse_output(out, "sent")?;
         Ok(SendResult {
-            wallet: out["wallet"].as_str().unwrap_or(wallet).to_string(),
-            transaction_id: out["transaction_id"].as_str().unwrap_or("").to_string(),
-            amount,
-            fee: out
-                .get("fee")
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            preimage: out
-                .get("preimage")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+            wallet: parsed.wallet,
+            transaction_id: parsed.transaction_id,
+            amount: parsed.amount,
+            fee: parsed.fee,
+            preimage: parsed.preimage,
         })
     }
 
@@ -675,12 +817,13 @@ impl PayProvider for RemoteProvider {
             .await,
             &["restored"],
         )?;
+        let parsed: RestoredOut = self.parse_output(out, "restored")?;
         Ok(RestoreResult {
-            wallet: out["wallet"].as_str().unwrap_or(wallet).to_string(),
-            unspent: out["unspent"].as_u64().unwrap_or(0),
-            spent: out["spent"].as_u64().unwrap_or(0),
-            pending: out["pending"].as_u64().unwrap_or(0),
-            unit: out["unit"].as_str().unwrap_or("sats").to_string(),
+            wallet: parsed.wallet,
+            unspent: parsed.unspent,
+            spent: parsed.spent,
+            pending: parsed.pending,
+            unit: parsed.unit,
         })
     }
 
@@ -704,13 +847,8 @@ impl PayProvider for RemoteProvider {
             .await,
             &["history"],
         )?;
-        let items: Vec<HistoryRecord> = serde_json::from_value(
-            out.get("items")
-                .cloned()
-                .unwrap_or(serde_json::Value::Array(vec![])),
-        )
-        .map_err(|e| PayError::NetworkError(format!("parse history items: {e}")))?;
-        Ok(items)
+        let parsed: HistoryOut = self.parse_output(out, "history")?;
+        Ok(parsed.items)
     }
 
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
@@ -722,23 +860,13 @@ impl PayProvider for RemoteProvider {
             .await,
             &["history_status"],
         )?;
+        let parsed: HistoryStatusOut = self.parse_output(out, "history_status")?;
         Ok(HistoryStatusInfo {
-            transaction_id: out["transaction_id"]
-                .as_str()
-                .unwrap_or(transaction_id)
-                .to_string(),
-            status: serde_json::from_value(out["status"].clone()).unwrap_or(TxStatus::Pending),
-            confirmations: out
-                .get("confirmations")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32),
-            preimage: out
-                .get("preimage")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            item: out
-                .get("item")
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            transaction_id: parsed.transaction_id,
+            status: parsed.status,
+            confirmations: parsed.confirmations,
+            preimage: parsed.preimage,
+            item: parsed.item,
         })
     }
 
@@ -753,19 +881,11 @@ impl PayProvider for RemoteProvider {
             .await,
             &["history_updated"],
         )?;
+        let parsed: HistoryUpdatedOut = self.parse_output(out, "history_updated")?;
         Ok(HistorySyncStats {
-            records_scanned: out
-                .get("records_scanned")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize,
-            records_added: out
-                .get("records_added")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize,
-            records_updated: out
-                .get("records_updated")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize,
+            records_scanned: parsed.records_scanned,
+            records_added: parsed.records_added,
+            records_updated: parsed.records_updated,
         })
     }
 }
@@ -835,5 +955,31 @@ mod tests {
             }
             other => panic!("expected LimitExceeded, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn balance_parses_current_wallet_balances_schema() {
+        let provider = RemoteProvider::new("http://127.0.0.1:1", "secret", Network::Cashu);
+        let balance = provider
+            .balance_from_output(
+                serde_json::json!({
+                    "code": "wallet_balances",
+                    "wallets": [{
+                        "id": "w_1",
+                        "network": "cashu",
+                        "address": "https://mint.example",
+                        "created_at_epoch_s": 1,
+                        "balance": {
+                            "confirmed": 42,
+                            "pending": 0,
+                            "unit": "sats"
+                        }
+                    }]
+                }),
+                "w_1",
+            )
+            .expect("balance should parse");
+        assert_eq!(balance.confirmed, 42);
+        assert_eq!(balance.unit, "sats");
     }
 }

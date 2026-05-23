@@ -10,6 +10,7 @@ PHOENIXD_DATADIR="${PHOENIXD_DATADIR:-/data/phoenixd}"
 AFPAY_PORT="${AFPAY_PORT:-9401}"
 
 mkdir -p "$AFPAY_DATA_DIR" "$BITCOIND_DATADIR" "$PHOENIXD_DATADIR"
+chmod 700 "$AFPAY_DATA_DIR" "$BITCOIND_DATADIR" "$PHOENIXD_DATADIR" 2>/dev/null || true
 
 # ── 0. Generate secret/key per mode, persist to file ──
 case "$AFPAY_MODE" in
@@ -37,33 +38,34 @@ if [ -n "$SECRET_FILE" ]; then
     elif [ -f "$SECRET_FILE" ]; then
         SECRET_VAL=$(cat "$SECRET_FILE")
     else
-        SECRET_VAL="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+        SECRET_VAL="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
         echo "$SECRET_VAL" > "$SECRET_FILE"
     fi
+    chmod 600 "$SECRET_FILE" 2>/dev/null || true
     export "$SECRET_ENV"="$SECRET_VAL"
 fi
 
 # ── 0b. Generate supervisor afpay.conf based on mode ──
 case "$AFPAY_MODE" in
     rest)
-        AFPAY_CMD="afpay --mode rest --rest-listen 0.0.0.0:${AFPAY_PORT} --rest-api-key ${SECRET_VAL} --data-dir ${AFPAY_DATA_DIR}"
+        AFPAY_CMD="afpay --mode rest --public-listen --rest-listen 0.0.0.0:${AFPAY_PORT} --data-dir ${AFPAY_DATA_DIR}"
         echo "========================================="
         echo "  afpay mode: rest"
         echo "  afpay endpoint: 0.0.0.0:${AFPAY_PORT}"
-        echo "  afpay API key:  ${SECRET_VAL}"
+        echo "  afpay API key:  configured (stored at ${SECRET_FILE})"
         echo ""
         echo "  curl -X POST http://localhost:${AFPAY_PORT}/v1/afpay \\"
-        echo "    -H 'Authorization: Bearer ${SECRET_VAL}' \\"
+        echo "    -H \"Authorization: Bearer \$(cat ${SECRET_FILE})\" \\"
         echo "    -H 'Content-Type: application/json' \\"
         echo "    -d '{\"code\":\"version\"}'"
         echo "========================================="
         ;;
     rpc)
-        AFPAY_CMD="afpay --mode rpc --rpc-listen 0.0.0.0:${AFPAY_PORT} --rpc-secret ${SECRET_VAL} --data-dir ${AFPAY_DATA_DIR}"
+        AFPAY_CMD="afpay --mode rpc --public-listen --rpc-listen 0.0.0.0:${AFPAY_PORT} --data-dir ${AFPAY_DATA_DIR}"
         echo "========================================="
         echo "  afpay mode: rpc"
         echo "  afpay endpoint: 0.0.0.0:${AFPAY_PORT}"
-        echo "  afpay RPC secret: ${SECRET_VAL}"
+        echo "  afpay RPC secret: configured (stored at ${SECRET_FILE})"
         echo "========================================="
         ;;
 esac
@@ -146,6 +148,7 @@ AFPAY_DATA_DIR=${AFPAY_DATA_DIR}
 AFPAY_REST_PORT=${AFPAY_PORT}
 AFPAY_REST_API_KEY=${SECRET_VAL}
 EOF
+chmod 600 /tmp/afpay-env.sh 2>/dev/null || true
 
 if [ "$ENABLE_BITCOIND" = "true" ]; then
     cat >> /tmp/afpay-env.sh <<EOF

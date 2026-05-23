@@ -46,7 +46,7 @@ pub fn build_startup_log(
         event: "startup".to_string(),
         request_id: None,
         version: Some(VERSION.to_string()),
-        argv,
+        argv: argv.map(sanitize_startup_argv),
         config: config.map(|c| serde_json::to_value(c).unwrap_or(serde_json::Value::Null)),
         args: Some(args),
         env: Some(serde_json::json!({
@@ -54,6 +54,40 @@ pub fn build_startup_log(
         })),
         trace: Trace::from_duration(0),
     }
+}
+
+fn sanitize_startup_argv(argv: Vec<String>) -> Vec<String> {
+    const SECRET_FLAGS: &[&str] = &[
+        "--admin-key-secret",
+        "--btc-core-auth-secret",
+        "--mnemonic-secret",
+        "--nwc-uri-secret",
+        "--password-secret",
+        "--pg-url-secret",
+        "--rest-api-key",
+        "--rpc-secret",
+    ];
+
+    let mut redact_next = false;
+    argv.into_iter()
+        .map(|arg| {
+            if redact_next {
+                redact_next = false;
+                return "***".to_string();
+            }
+            if SECRET_FLAGS.iter().any(|flag| arg == *flag) {
+                redact_next = true;
+                return arg;
+            }
+            for flag in SECRET_FLAGS {
+                let prefix = format!("{flag}=");
+                if arg.starts_with(&prefix) {
+                    return format!("{flag}=***");
+                }
+            }
+            arg
+        })
+        .collect()
 }
 
 /// Decide whether startup log should be emitted for this process.
@@ -143,5 +177,28 @@ mod tests {
     fn maybe_startup_log_enabled_with_explicit_request() {
         let out = maybe_startup_log(&[], true, None, None, serde_json::json!({"mode": "test"}));
         assert!(out.is_some());
+    }
+
+    #[test]
+    fn startup_log_redacts_secret_argv_values() -> Result<(), Box<dyn std::error::Error>> {
+        let out = build_startup_log(
+            Some(vec![
+                "afpay".to_string(),
+                "--rpc-secret".to_string(),
+                "rpc-secret-value".to_string(),
+                "--rest-api-key=rest-secret-value".to_string(),
+                "--data-dir".to_string(),
+                "/tmp/afpay".to_string(),
+            ]),
+            None,
+            serde_json::json!({"mode": "test"}),
+        );
+        let value = serde_json::to_value(out)?;
+        let rendered = value.to_string();
+        assert!(!rendered.contains("rpc-secret-value"));
+        assert!(!rendered.contains("rest-secret-value"));
+        assert!(rendered.contains("***"));
+        assert!(rendered.contains("/tmp/afpay"));
+        Ok(())
     }
 }
