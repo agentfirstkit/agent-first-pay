@@ -16,21 +16,21 @@ pub fn append_transaction_record(data_dir: &str, record: &HistoryRecord) -> Resu
     let core_path = wallet::wallet_core_database_path(data_dir, &record.wallet)?;
     let db = db::open_database(&core_path)?;
     let serialized_record = serde_json::to_string(record)
-        .map_err(|e| PayError::InternalError(format!("serialize transaction record: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("serialize transaction record: {e}")))?;
 
     let write_txn = db
         .begin_write()
-        .map_err(|e| PayError::InternalError(format!("transaction_log_store begin_write: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("transaction_log_store begin_write: {e}")))?;
     {
         let mut counter = write_txn
             .open_table(TRANSACTION_METADATA_COUNTER)
             .map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store open tx_meta_counter: {e}"))
+                PayError::internal_error(format!("transaction_log_store open tx_meta_counter: {e}"))
             })?;
         let next_sequence = counter
             .get(NEXT_TRANSACTION_SEQUENCE_KEY)
             .map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store read counter: {e}"))
+                PayError::internal_error(format!("transaction_log_store read counter: {e}"))
             })?
             .map(|v| v.value())
             .unwrap_or(0)
@@ -38,35 +38,56 @@ pub fn append_transaction_record(data_dir: &str, record: &HistoryRecord) -> Resu
         counter
             .insert(NEXT_TRANSACTION_SEQUENCE_KEY, next_sequence)
             .map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store update counter: {e}"))
+                PayError::internal_error(format!("transaction_log_store update counter: {e}"))
             })?;
 
         let mut records_by_sequence = write_txn
             .open_table(TRANSACTION_RECORD_BY_SEQUENCE)
             .map_err(|e| {
-                PayError::InternalError(format!(
+                PayError::internal_error(format!(
                     "transaction_log_store open by-sequence table: {e}"
                 ))
             })?;
         records_by_sequence
             .insert(next_sequence, serialized_record.as_str())
             .map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store append record: {e}"))
+                PayError::internal_error(format!("transaction_log_store append record: {e}"))
             })?;
 
         let mut sequence_by_transaction_id = write_txn
             .open_table(TRANSACTION_SEQUENCE_BY_TRANSACTION_ID)
             .map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store open by-id table: {e}"))
+                PayError::internal_error(format!("transaction_log_store open by-id table: {e}"))
             })?;
+        // Reject duplicate transaction_ids. `redb::Table::insert` silently
+        // overwrites existing keys, so without this check a replayed append
+        // would orphan the previous sequence row and corrupt history.
+        if sequence_by_transaction_id
+            .get(record.transaction_id.as_str())
+            .map_err(|e| {
+                PayError::internal_error(format!("transaction_log_store read tx-id index: {e}"))
+            })?
+            .is_some()
+        {
+            return Err(PayError::InternalError {
+                message: format!(
+                    "transaction_id {} already exists in wallet {}",
+                    record.transaction_id, record.wallet
+                ),
+                hint: Some(
+                    "transaction ids must be unique per wallet; this indicates a provider replay or duplicate append bug"
+                        .to_string(),
+                ),
+            });
+        }
         sequence_by_transaction_id
             .insert(record.transaction_id.as_str(), next_sequence)
             .map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store update tx-id index: {e}"))
+                PayError::internal_error(format!("transaction_log_store update tx-id index: {e}"))
             })?;
     }
     write_txn.commit().map_err(|e| {
-        PayError::InternalError(format!("transaction_log_store commit append: {e}"))
+        PayError::internal_error(format!("transaction_log_store commit append: {e}"))
     })?;
 
     Ok(())
@@ -78,7 +99,7 @@ pub fn load_wallet_transaction_records(
 ) -> Result<Vec<HistoryRecord>, PayError> {
     let core_path = match wallet::wallet_core_database_path(data_dir, wallet_id) {
         Ok(p) => p,
-        Err(PayError::WalletNotFound(_)) => return Ok(vec![]),
+        Err(PayError::WalletNotFound { .. }) => return Ok(vec![]),
         Err(e) => return Err(e),
     };
     if !core_path.exists() {
@@ -88,7 +109,7 @@ pub fn load_wallet_transaction_records(
     let db = db::open_database(&core_path)?;
     let read_txn = db
         .begin_read()
-        .map_err(|e| PayError::InternalError(format!("transaction_log_store begin_read: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("transaction_log_store begin_read: {e}")))?;
     let Ok(table) = read_txn.open_table(TRANSACTION_RECORD_BY_SEQUENCE) else {
         return Ok(vec![]);
     };
@@ -96,14 +117,14 @@ pub fn load_wallet_transaction_records(
     table
         .iter()
         .map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store iterate by-sequence: {e}"))
+            PayError::internal_error(format!("transaction_log_store iterate by-sequence: {e}"))
         })?
         .map(|entry| {
             let (_k, v) = entry.map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store read entry: {e}"))
+                PayError::internal_error(format!("transaction_log_store read entry: {e}"))
             })?;
             serde_json::from_str::<HistoryRecord>(v.value()).map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store parse record: {e}"))
+                PayError::internal_error(format!("transaction_log_store parse record: {e}"))
             })
         })
         .collect()
@@ -131,7 +152,7 @@ fn find_transaction_record_in_wallet(
 ) -> Result<Option<HistoryRecord>, PayError> {
     let core_path = match wallet::wallet_core_database_path(data_dir, wallet_id) {
         Ok(p) => p,
-        Err(PayError::WalletNotFound(_)) => return Ok(None),
+        Err(PayError::WalletNotFound { .. }) => return Ok(None),
         Err(e) => return Err(e),
     };
     if !core_path.exists() {
@@ -141,7 +162,7 @@ fn find_transaction_record_in_wallet(
     let db = db::open_database(&core_path)?;
     let read_txn = db
         .begin_read()
-        .map_err(|e| PayError::InternalError(format!("transaction_log_store begin_read: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("transaction_log_store begin_read: {e}")))?;
 
     let Ok(sequence_by_transaction_id) =
         read_txn.open_table(TRANSACTION_SEQUENCE_BY_TRANSACTION_ID)
@@ -151,7 +172,7 @@ fn find_transaction_record_in_wallet(
     let Some(sequence_guard) = sequence_by_transaction_id
         .get(transaction_id)
         .map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store read tx-id index: {e}"))
+            PayError::internal_error(format!("transaction_log_store read tx-id index: {e}"))
         })?
     else {
         return Ok(None);
@@ -162,14 +183,14 @@ fn find_transaction_record_in_wallet(
         return Ok(None);
     };
     let Some(serialized_record) = records_by_sequence.get(sequence).map_err(|e| {
-        PayError::InternalError(format!("transaction_log_store read by-sequence: {e}"))
+        PayError::internal_error(format!("transaction_log_store read by-sequence: {e}"))
     })?
     else {
         return Ok(None);
     };
 
     let record: HistoryRecord = serde_json::from_str(serialized_record.value()).map_err(|e| {
-        PayError::InternalError(format!(
+        PayError::internal_error(format!(
             "transaction_log_store parse record by sequence: {e}"
         ))
     })?;
@@ -185,7 +206,7 @@ pub fn update_transaction_record_memo(
     for wallet_metadata in &wallets {
         let core_path = match wallet::wallet_core_database_path(data_dir, &wallet_metadata.id) {
             Ok(p) => p,
-            Err(PayError::WalletNotFound(_)) => continue,
+            Err(PayError::WalletNotFound { .. }) => continue,
             Err(e) => return Err(e),
         };
         if !core_path.exists() {
@@ -196,7 +217,7 @@ pub fn update_transaction_record_memo(
         // Check if this wallet has the transaction
         let sequence = {
             let read_txn = db.begin_read().map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store begin_read: {e}"))
+                PayError::internal_error(format!("transaction_log_store begin_read: {e}"))
             })?;
             let Ok(idx_table) = read_txn.open_table(TRANSACTION_SEQUENCE_BY_TRANSACTION_ID) else {
                 continue;
@@ -209,44 +230,44 @@ pub fn update_transaction_record_memo(
 
         // Read, update, and write back
         let write_txn = db.begin_write().map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store begin_write: {e}"))
+            PayError::internal_error(format!("transaction_log_store begin_write: {e}"))
         })?;
         {
             let mut records = write_txn
                 .open_table(TRANSACTION_RECORD_BY_SEQUENCE)
                 .map_err(|e| {
-                    PayError::InternalError(format!(
+                    PayError::internal_error(format!(
                         "transaction_log_store open by-sequence table: {e}"
                     ))
                 })?;
             let updated = {
                 let serialized = records.get(sequence).map_err(|e| {
-                    PayError::InternalError(format!("transaction_log_store read by-sequence: {e}"))
+                    PayError::internal_error(format!("transaction_log_store read by-sequence: {e}"))
                 })?;
                 let Some(serialized) = serialized else {
-                    return Err(PayError::InternalError(format!(
+                    return Err(PayError::internal_error(format!(
                         "transaction {transaction_id} sequence {sequence} missing"
                     )));
                 };
                 let mut record: HistoryRecord =
                     serde_json::from_str(serialized.value()).map_err(|e| {
-                        PayError::InternalError(format!("transaction_log_store parse record: {e}"))
+                        PayError::internal_error(format!("transaction_log_store parse record: {e}"))
                     })?;
                 record.local_memo = local_memo.cloned();
                 serde_json::to_string(&record).map_err(|e| {
-                    PayError::InternalError(format!("serialize updated record: {e}"))
+                    PayError::internal_error(format!("serialize updated record: {e}"))
                 })?
             };
             records.insert(sequence, updated.as_str()).map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store update record: {e}"))
+                PayError::internal_error(format!("transaction_log_store update record: {e}"))
             })?;
         }
         write_txn.commit().map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store commit update: {e}"))
+            PayError::internal_error(format!("transaction_log_store commit update: {e}"))
         })?;
         return Ok(());
     }
-    Err(PayError::WalletNotFound(format!(
+    Err(PayError::wallet_not_found(format!(
         "transaction {transaction_id} not found"
     )))
 }
@@ -261,7 +282,7 @@ pub fn update_transaction_record_fee(
     for wallet_metadata in &wallets {
         let core_path = match wallet::wallet_core_database_path(data_dir, &wallet_metadata.id) {
             Ok(p) => p,
-            Err(PayError::WalletNotFound(_)) => continue,
+            Err(PayError::WalletNotFound { .. }) => continue,
             Err(e) => return Err(e),
         };
         if !core_path.exists() {
@@ -271,7 +292,7 @@ pub fn update_transaction_record_fee(
 
         let sequence = {
             let read_txn = db.begin_read().map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store begin_read: {e}"))
+                PayError::internal_error(format!("transaction_log_store begin_read: {e}"))
             })?;
             let Ok(idx_table) = read_txn.open_table(TRANSACTION_SEQUENCE_BY_TRANSACTION_ID) else {
                 continue;
@@ -283,47 +304,47 @@ pub fn update_transaction_record_fee(
         };
 
         let write_txn = db.begin_write().map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store begin_write: {e}"))
+            PayError::internal_error(format!("transaction_log_store begin_write: {e}"))
         })?;
         {
             let mut records = write_txn
                 .open_table(TRANSACTION_RECORD_BY_SEQUENCE)
                 .map_err(|e| {
-                    PayError::InternalError(format!(
+                    PayError::internal_error(format!(
                         "transaction_log_store open by-sequence table: {e}"
                     ))
                 })?;
             let updated = {
                 let serialized = records.get(sequence).map_err(|e| {
-                    PayError::InternalError(format!("transaction_log_store read by-sequence: {e}"))
+                    PayError::internal_error(format!("transaction_log_store read by-sequence: {e}"))
                 })?;
                 let Some(serialized) = serialized else {
-                    return Err(PayError::InternalError(format!(
+                    return Err(PayError::internal_error(format!(
                         "transaction {transaction_id} sequence {sequence} missing"
                     )));
                 };
                 let mut record: HistoryRecord =
                     serde_json::from_str(serialized.value()).map_err(|e| {
-                        PayError::InternalError(format!("transaction_log_store parse record: {e}"))
+                        PayError::internal_error(format!("transaction_log_store parse record: {e}"))
                     })?;
                 record.fee = Some(crate::types::Amount {
                     value: fee_value,
                     token: fee_unit.to_string(),
                 });
                 serde_json::to_string(&record).map_err(|e| {
-                    PayError::InternalError(format!("serialize updated record: {e}"))
+                    PayError::internal_error(format!("serialize updated record: {e}"))
                 })?
             };
             records.insert(sequence, updated.as_str()).map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store update record: {e}"))
+                PayError::internal_error(format!("transaction_log_store update record: {e}"))
             })?;
         }
         write_txn.commit().map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store commit update: {e}"))
+            PayError::internal_error(format!("transaction_log_store commit update: {e}"))
         })?;
         return Ok(());
     }
-    Err(PayError::WalletNotFound(format!(
+    Err(PayError::wallet_not_found(format!(
         "transaction {transaction_id} not found"
     )))
 }
@@ -351,7 +372,7 @@ pub fn update_transaction_record_status(
     for wallet_metadata in &wallets {
         let core_path = match wallet::wallet_core_database_path(data_dir, &wallet_metadata.id) {
             Ok(p) => p,
-            Err(PayError::WalletNotFound(_)) => continue,
+            Err(PayError::WalletNotFound { .. }) => continue,
             Err(e) => return Err(e),
         };
         if !core_path.exists() {
@@ -361,7 +382,7 @@ pub fn update_transaction_record_status(
 
         let sequence = {
             let read_txn = db.begin_read().map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store begin_read: {e}"))
+                PayError::internal_error(format!("transaction_log_store begin_read: {e}"))
             })?;
             let Ok(idx_table) = read_txn.open_table(TRANSACTION_SEQUENCE_BY_TRANSACTION_ID) else {
                 continue;
@@ -373,47 +394,123 @@ pub fn update_transaction_record_status(
         };
 
         let write_txn = db.begin_write().map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store begin_write: {e}"))
+            PayError::internal_error(format!("transaction_log_store begin_write: {e}"))
         })?;
         {
             let mut records = write_txn
                 .open_table(TRANSACTION_RECORD_BY_SEQUENCE)
                 .map_err(|e| {
-                    PayError::InternalError(format!(
+                    PayError::internal_error(format!(
                         "transaction_log_store open by-sequence table: {e}"
                     ))
                 })?;
             let updated = {
                 let serialized = records.get(sequence).map_err(|e| {
-                    PayError::InternalError(format!("transaction_log_store read by-sequence: {e}"))
+                    PayError::internal_error(format!("transaction_log_store read by-sequence: {e}"))
                 })?;
                 let Some(serialized) = serialized else {
-                    return Err(PayError::InternalError(format!(
+                    return Err(PayError::internal_error(format!(
                         "transaction {transaction_id} sequence {sequence} missing"
                     )));
                 };
                 let mut record: HistoryRecord =
                     serde_json::from_str(serialized.value()).map_err(|e| {
-                        PayError::InternalError(format!("transaction_log_store parse record: {e}"))
+                        PayError::internal_error(format!("transaction_log_store parse record: {e}"))
                     })?;
                 record.status = status;
                 record.confirmed_at_epoch_s = confirmed_at_epoch_s;
                 serde_json::to_string(&record).map_err(|e| {
-                    PayError::InternalError(format!("serialize updated record: {e}"))
+                    PayError::internal_error(format!("serialize updated record: {e}"))
                 })?
             };
             records.insert(sequence, updated.as_str()).map_err(|e| {
-                PayError::InternalError(format!("transaction_log_store update record: {e}"))
+                PayError::internal_error(format!("transaction_log_store update record: {e}"))
             })?;
         }
         write_txn.commit().map_err(|e| {
-            PayError::InternalError(format!("transaction_log_store commit update: {e}"))
+            PayError::internal_error(format!("transaction_log_store commit update: {e}"))
         })?;
         return Ok(());
     }
-    Err(PayError::WalletNotFound(format!(
+    Err(PayError::wallet_not_found(format!(
         "transaction {transaction_id} not found"
     )))
+}
+
+/// Attach reservation ids to an already-recorded transaction. Returns `Ok(())`
+/// without error when the record is not found — providers may not have written
+/// the history row yet by the time the handler reaches this call, and the
+/// reservation_ids are derivable from `Output::Sent` either way.
+pub fn update_transaction_record_reservation_ids(
+    data_dir: &str,
+    transaction_id: &str,
+    reservation_ids: &[u64],
+) -> Result<(), PayError> {
+    if reservation_ids.is_empty() {
+        return Ok(());
+    }
+    let wallets = wallet::list_wallet_metadata(data_dir, None)?;
+    for wallet_metadata in &wallets {
+        let core_path = match wallet::wallet_core_database_path(data_dir, &wallet_metadata.id) {
+            Ok(p) => p,
+            Err(PayError::WalletNotFound { .. }) => continue,
+            Err(e) => return Err(e),
+        };
+        if !core_path.exists() {
+            continue;
+        }
+        let db = db::open_database(&core_path)?;
+
+        let sequence = {
+            let read_txn = db.begin_read().map_err(|e| {
+                PayError::internal_error(format!("transaction_log_store begin_read: {e}"))
+            })?;
+            let Ok(idx_table) = read_txn.open_table(TRANSACTION_SEQUENCE_BY_TRANSACTION_ID) else {
+                continue;
+            };
+            match idx_table.get(transaction_id) {
+                Ok(Some(guard)) => guard.value(),
+                _ => continue,
+            }
+        };
+
+        let write_txn = db.begin_write().map_err(|e| {
+            PayError::internal_error(format!("transaction_log_store begin_write: {e}"))
+        })?;
+        {
+            let mut records = write_txn
+                .open_table(TRANSACTION_RECORD_BY_SEQUENCE)
+                .map_err(|e| {
+                    PayError::internal_error(format!(
+                        "transaction_log_store open by-sequence table: {e}"
+                    ))
+                })?;
+            let updated = {
+                let serialized = records.get(sequence).map_err(|e| {
+                    PayError::internal_error(format!("transaction_log_store read by-sequence: {e}"))
+                })?;
+                let Some(serialized) = serialized else {
+                    return Ok(());
+                };
+                let mut record: HistoryRecord =
+                    serde_json::from_str(serialized.value()).map_err(|e| {
+                        PayError::internal_error(format!("transaction_log_store parse record: {e}"))
+                    })?;
+                record.reservation_ids = reservation_ids.to_vec();
+                serde_json::to_string(&record).map_err(|e| {
+                    PayError::internal_error(format!("serialize updated record: {e}"))
+                })?
+            };
+            records.insert(sequence, updated.as_str()).map_err(|e| {
+                PayError::internal_error(format!("transaction_log_store update record: {e}"))
+            })?;
+        }
+        write_txn.commit().map_err(|e| {
+            PayError::internal_error(format!("transaction_log_store commit update: {e}"))
+        })?;
+        return Ok(());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -442,6 +539,7 @@ mod tests {
             confirmed_at_epoch_s: Some(1700000001),
             fee: None,
             reference_keys: None,
+            reservation_ids: Vec::new(),
         }
     }
 
@@ -454,6 +552,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some("seed".to_string()),
             backend: if network == Network::Ln {
                 Some("nwc".to_string())
@@ -491,6 +590,29 @@ mod tests {
         assert_eq!(loaded[0].amount.value, 100);
         assert_eq!(loaded[1].transaction_id, "tx_002");
         assert_eq!(loaded[1].amount.value, 200);
+    }
+
+    #[test]
+    fn append_rejects_duplicate_transaction_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+
+        ensure_wallet(dir, "w_dup", Network::Cashu);
+
+        let tx = make_tx("tx_same", "w_dup", 50);
+        append_transaction_record(dir, &tx).unwrap();
+
+        // Second append with the same transaction_id must error rather than
+        // silently overwrite the previous sequence row.
+        let err = append_transaction_record(dir, &tx).unwrap_err();
+        assert!(
+            matches!(err, PayError::InternalError { ref message, .. } if message.contains("already exists")),
+            "expected duplicate-id error, got: {err:?}"
+        );
+
+        // The original record is still readable; one row total.
+        let loaded = load_wallet_transaction_records(dir, "w_dup").unwrap();
+        assert_eq!(loaded.len(), 1);
     }
 
     #[test]
@@ -588,7 +710,7 @@ mod tests {
         let err = update_transaction_record_status(dir, "tx_missing", TxStatus::Confirmed, Some(1))
             .unwrap_err();
         assert!(
-            matches!(err, PayError::WalletNotFound(_)),
+            matches!(err, PayError::WalletNotFound { .. }),
             "expected WalletNotFound, got: {err}"
         );
     }

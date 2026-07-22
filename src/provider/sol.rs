@@ -4,15 +4,15 @@ use crate::store::wallet::{self, WalletMetadata};
 use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bip39::Mnemonic;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use solana_sdk::hash::Hash;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{keypair_from_seed_phrase_and_passphrase, Keypair, Signer};
+use solana_sdk::signature::{Keypair, Signer, keypair_from_seed_phrase_and_passphrase};
 use solana_sdk::transaction::Transaction;
 use solana_system_interface::instruction as system_instruction;
 use std::collections::HashMap;
@@ -77,7 +77,7 @@ impl SolProvider {
     fn normalize_rpc_endpoint(raw: &str) -> Result<String, PayError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "sol wallet requires --sol-rpc-endpoint".to_string(),
             ));
         }
@@ -87,7 +87,7 @@ impl SolProvider {
             format!("http://{trimmed}")
         };
         reqwest::Url::parse(&endpoint)
-            .map_err(|e| PayError::InvalidAmount(format!("invalid --sol-rpc-endpoint: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("invalid --sol-rpc-endpoint: {e}")))?;
         Ok(endpoint)
     }
 
@@ -95,7 +95,7 @@ impl SolProvider {
     fn decode_rpc_endpoint_list(raw: &str) -> Result<Vec<String>, PayError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "sol wallet requires --sol-rpc-endpoint".to_string(),
             ));
         }
@@ -103,12 +103,12 @@ impl SolProvider {
             return Ok(vec![trimmed.to_string()]);
         }
         let values = serde_json::from_str::<Vec<String>>(trimmed).map_err(|e| {
-            PayError::InvalidAmount(format!(
+            PayError::invalid_amount(format!(
                 "invalid --sol-rpc-endpoint list: expected JSON string array: {e}"
             ))
         })?;
         if values.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "--sol-rpc-endpoint requires at least one value".to_string(),
             ));
         }
@@ -125,7 +125,7 @@ impl SolProvider {
             }
         }
         if endpoints.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "--sol-rpc-endpoint requires at least one value".to_string(),
             ));
         }
@@ -134,17 +134,17 @@ impl SolProvider {
 
     fn keypair_from_seed_secret(seed_secret: &str) -> Result<Keypair, PayError> {
         seed_secret.parse::<Mnemonic>().map_err(|_| {
-            PayError::InternalError(
+            PayError::internal_error(
                 "invalid sol wallet secret: expected BIP39 mnemonic words".to_string(),
             )
         })?;
         keypair_from_seed_phrase_and_passphrase(seed_secret, "")
-            .map_err(|e| PayError::InternalError(format!("build keypair from sol mnemonic: {e}")))
+            .map_err(|e| PayError::internal_error(format!("build keypair from sol mnemonic: {e}")))
     }
 
     fn wallet_keypair(meta: &WalletMetadata) -> Result<Keypair, PayError> {
         let seed_secret = meta.seed_secret.as_deref().ok_or_else(|| {
-            PayError::InternalError(format!("wallet {} missing sol secret", meta.id))
+            PayError::internal_error(format!("wallet {} missing sol secret", meta.id))
         })?;
         Self::keypair_from_seed_secret(seed_secret)
     }
@@ -159,7 +159,7 @@ impl SolProvider {
     ) -> Result<SolTransferTarget, PayError> {
         let trimmed = to.trim();
         if trimmed.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "sol send target is empty".to_string(),
             ));
         }
@@ -170,12 +170,12 @@ impl SolProvider {
         };
         let recipient_address = recipient.trim();
         if recipient_address.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "sol send target missing recipient address".to_string(),
             ));
         }
         let _ = Pubkey::from_str(recipient_address)
-            .map_err(|e| PayError::InvalidAmount(format!("invalid sol recipient address: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("invalid sol recipient address: {e}")))?;
 
         let mut amount_lamports: Option<u64> = None;
         let mut token_label = "native".to_string();
@@ -192,7 +192,7 @@ impl SolProvider {
             match key {
                 "amount" | "amount-lamports" => {
                     let parsed = value.parse::<u64>().map_err(|_| {
-                        PayError::InvalidAmount(format!("invalid amount value '{value}'"))
+                        PayError::invalid_amount(format!("invalid amount value '{value}'"))
                     })?;
                     amount_lamports = Some(parsed);
                 }
@@ -209,13 +209,13 @@ impl SolProvider {
                             .unwrap_or("mainnet-beta");
                         if let Some(known) = tokens::resolve_sol_token(cluster, value) {
                             token_mint = Some(Pubkey::from_str(known.address).map_err(|e| {
-                                PayError::InternalError(format!(
+                                PayError::internal_error(format!(
                                     "invalid known token mint address: {e}"
                                 ))
                             })?);
                         } else {
                             token_mint = Some(Pubkey::from_str(value).map_err(|e| {
-                                PayError::InvalidAmount(format!(
+                                PayError::invalid_amount(format!(
                                     "unknown token '{value}'; provide a known symbol (native, usdc, usdt) or mint address: {e}"
                                 ))
                             })?);
@@ -224,20 +224,20 @@ impl SolProvider {
                 }
                 "reference" => {
                     reference = Some(Pubkey::from_str(value).map_err(|e| {
-                        PayError::InvalidAmount(format!("invalid reference key '{value}': {e}"))
+                        PayError::invalid_amount(format!("invalid reference key '{value}': {e}"))
                     })?);
                 }
                 _ => {}
             }
         }
         let Some(amount_lamports) = amount_lamports else {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "sol send target missing amount; use solana:<address>?amount=<u64>&token=native"
                     .to_string(),
             ));
         };
         if amount_lamports == 0 {
-            return Err(PayError::InvalidAmount("amount must be >= 1".to_string()));
+            return Err(PayError::invalid_amount("amount must be >= 1".to_string()));
         }
 
         Ok(SolTransferTarget {
@@ -274,7 +274,7 @@ impl SolProvider {
     fn load_sol_wallet(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
         let meta = self.store.load_wallet_metadata(wallet_id)?;
         if meta.network != Network::Sol {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "{wallet_id} is not a sol wallet"
             )));
         }
@@ -287,9 +287,11 @@ impl SolProvider {
         }
         let wallets = self.store.list_wallet_metadata(Some(Network::Sol))?;
         match wallets.len() {
-            0 => Err(PayError::WalletNotFound("no sol wallet found".to_string())),
+            0 => Err(PayError::wallet_not_found(
+                "no sol wallet found".to_string(),
+            )),
             1 => Ok(wallets[0].id.clone()),
-            _ => Err(PayError::InvalidAmount(
+            _ => Err(PayError::invalid_amount(
                 "multiple sol wallets found; pass --wallet".to_string(),
             )),
         }
@@ -297,7 +299,7 @@ impl SolProvider {
 
     fn rpc_endpoints_for_wallet(meta: &WalletMetadata) -> Result<Vec<String>, PayError> {
         let Some(configured) = meta.sol_rpc_endpoints.as_ref() else {
-            return Err(PayError::InternalError(format!(
+            return Err(PayError::internal_error(format!(
                 "wallet {} missing sol rpc endpoints; recreate wallet",
                 meta.id
             )));
@@ -310,7 +312,7 @@ impl SolProvider {
             }
         }
         if endpoints.is_empty() {
-            return Err(PayError::InternalError(format!(
+            return Err(PayError::internal_error(format!(
                 "wallet {} has empty sol rpc endpoints; recreate wallet",
                 meta.id
             )));
@@ -340,16 +342,16 @@ impl SolProvider {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| PayError::NetworkError(format!("sol rpc {method} request: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("sol rpc {method} request: {e}")))?;
 
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|e| PayError::NetworkError(format!("sol rpc {method} read body: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("sol rpc {method} read body: {e}")))?;
 
         if !status.is_success() {
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "sol rpc {method} {}: {}",
                 status.as_u16(),
                 body
@@ -357,18 +359,18 @@ impl SolProvider {
         }
 
         let envelope: SolRpcEnvelope<T> = serde_json::from_str(&body)
-            .map_err(|e| PayError::NetworkError(format!("sol rpc {method} decode: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("sol rpc {method} decode: {e}")))?;
 
         if let Some(error) = envelope.error {
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "sol rpc {method} {}: {}",
                 error.code, error.message
             )));
         }
 
-        envelope
-            .result
-            .ok_or_else(|| PayError::NetworkError(format!("sol rpc {method} missing result field")))
+        envelope.result.ok_or_else(|| {
+            PayError::network_error(format!("sol rpc {method} missing result field"))
+        })
     }
 
     async fn rpc_call_with_failover<T>(
@@ -389,7 +391,7 @@ impl SolProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "all sol rpc endpoints failed for {method}; {}",
             last_error.unwrap_or_else(|| "no endpoints configured".to_string())
         )))
@@ -414,7 +416,7 @@ impl SolProvider {
         if entry.err.is_some() {
             return Ok(Some(SolChainStatus {
                 status: TxStatus::Failed,
-                confirmations: entry.confirmations.map(|v| v as u32),
+                confirmations: entry.confirmations.and_then(|v| u32::try_from(v).ok()),
             }));
         }
 
@@ -450,9 +452,9 @@ impl SolProvider {
     /// Derive the Associated Token Account address for (wallet, mint).
     fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Result<Pubkey, PayError> {
         let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID)
-            .map_err(|e| PayError::InternalError(format!("invalid spl token program id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("invalid spl token program id: {e}")))?;
         let ata_program = Pubkey::from_str(SPL_ASSOCIATED_TOKEN_PROGRAM_ID)
-            .map_err(|e| PayError::InternalError(format!("invalid ata program id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("invalid ata program id: {e}")))?;
         let (ata, _bump) = Pubkey::find_program_address(
             &[wallet.as_ref(), token_program.as_ref(), mint.as_ref()],
             &ata_program,
@@ -467,9 +469,9 @@ impl SolProvider {
         mint: &Pubkey,
     ) -> Result<Instruction, PayError> {
         let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID)
-            .map_err(|e| PayError::InternalError(format!("invalid spl token program id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("invalid spl token program id: {e}")))?;
         let ata_program = Pubkey::from_str(SPL_ASSOCIATED_TOKEN_PROGRAM_ID)
-            .map_err(|e| PayError::InternalError(format!("invalid ata program id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("invalid ata program id: {e}")))?;
         let ata = Self::derive_ata(owner, mint)?;
         // System program: 11111111111111111111111111111111
         let system_program = Pubkey::default();
@@ -497,7 +499,7 @@ impl SolProvider {
         decimals: u8,
     ) -> Result<Instruction, PayError> {
         let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID)
-            .map_err(|e| PayError::InternalError(format!("invalid spl token program id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("invalid spl token program id: {e}")))?;
         // transfer_checked instruction data: [12u8, amount(8 bytes LE), decimals(1 byte)]
         let mut data = Vec::with_capacity(10);
         data.push(12u8); // transfer_checked discriminator
@@ -593,29 +595,26 @@ impl SolProvider {
                 serde_json::json!([ata.to_string()]),
             )
             .await;
-        if let Ok(val) = result {
-            if let Some(amount_str) = val
+        if let Ok(val) = result
+            && let Some(amount_str) = val
                 .get("value")
                 .and_then(|v| v.get("amount"))
                 .and_then(|v| v.as_str())
-            {
-                if let Ok(amount) = amount_str.parse::<u64>() {
-                    if amount > 0 {
-                        balance
-                            .additional
-                            .insert(format!("{symbol}_base_units"), amount);
-                        balance
-                            .additional
-                            .insert(format!("{symbol}_decimals"), decimals as u64);
-                    }
-                }
-            }
+            && let Ok(amount) = amount_str.parse::<u64>()
+            && amount > 0
+        {
+            balance
+                .additional
+                .insert(format!("{symbol}_base_units"), amount);
+            balance
+                .additional
+                .insert(format!("{symbol}_decimals"), decimals as u64);
         }
     }
 
     fn build_memo_instruction(memo_text: &str, signer: &Pubkey) -> Result<Instruction, PayError> {
         let memo_program = Pubkey::from_str(SOL_MEMO_PROGRAM_ID)
-            .map_err(|e| PayError::InternalError(format!("invalid memo program id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("invalid memo program id: {e}")))?;
         Ok(Instruction {
             program_id: memo_program,
             accounts: vec![AccountMeta::new_readonly(*signer, true)],
@@ -675,10 +674,10 @@ impl SolProvider {
                 2
             };
             for &acct_idx in ix.accounts.iter().skip(expected_count) {
-                if let Some(key) = account_keys.get(acct_idx) {
-                    if !KNOWN_PROGRAMS.contains(&key.as_str()) {
-                        refs.push(key.clone());
-                    }
+                if let Some(key) = account_keys.get(acct_idx)
+                    && !KNOWN_PROGRAMS.contains(&key.as_str())
+                {
+                    refs.push(key.clone());
                 }
             }
         }
@@ -725,7 +724,7 @@ impl SolProvider {
         }
 
         let tx: SolGetTransactionResult = serde_json::from_value(tx_value).map_err(|e| {
-            PayError::NetworkError(format!(
+            PayError::network_error(format!(
                 "sol rpc getTransaction decode {}: {e}",
                 signature.signature
             ))
@@ -753,11 +752,11 @@ impl SolProvider {
         }
 
         let delta = post as i128 - pre as i128;
-        let amount_value = if delta >= 0 {
-            delta as u64
-        } else {
-            (-delta) as u64
-        };
+        let amount_value = u64::try_from(delta.unsigned_abs()).map_err(|_| {
+            PayError::internal_error(format!(
+                "sol balance delta {delta} exceeds u64 representable range"
+            ))
+        })?;
         let direction = if delta >= 0 {
             Direction::Receive
         } else {
@@ -801,12 +800,9 @@ impl SolProvider {
             fee: fee_amount,
             reference_keys: {
                 let refs = Self::extract_reference_keys(&tx);
-                if refs.is_empty() {
-                    None
-                } else {
-                    Some(refs)
-                }
+                if refs.is_empty() { None } else { Some(refs) }
             },
+            reservation_ids: Vec::new(),
         }))
     }
 
@@ -870,7 +866,7 @@ impl SolProvider {
         }
 
         let tx: SolGetTransactionResult = serde_json::from_value(tx_value).map_err(|e| {
-            PayError::NetworkError(format!(
+            PayError::network_error(format!(
                 "sol rpc getTransaction decode {transaction_id}: {e}"
             ))
         })?;
@@ -934,12 +930,9 @@ impl SolProvider {
                 fee: fee_amount,
                 reference_keys: {
                     let refs = Self::extract_reference_keys(&tx);
-                    if refs.is_empty() {
-                        None
-                    } else {
-                        Some(refs)
-                    }
+                    if refs.is_empty() { None } else { Some(refs) }
                 },
+                reservation_ids: Vec::new(),
             },
             chain_status.confirmations,
         )))
@@ -1106,7 +1099,7 @@ impl PayProvider for SolProvider {
 
     async fn create_wallet(&self, request: &WalletCreateRequest) -> Result<WalletInfo, PayError> {
         let endpoints = if request.rpc_endpoints.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "sol wallet requires --sol-rpc-endpoint (or rpc_endpoints in JSON)".to_string(),
             ));
         } else {
@@ -1121,7 +1114,7 @@ impl PayProvider for SolProvider {
         };
         let mnemonic_str = if let Some(raw) = request.mnemonic_secret.as_deref() {
             let mnemonic: Mnemonic = raw.parse().map_err(|_| {
-                PayError::InvalidAmount(
+                PayError::invalid_amount(
                     "invalid mnemonic-secret for sol wallet: expected BIP39 words".to_string(),
                 )
             })?;
@@ -1129,17 +1122,21 @@ impl PayProvider for SolProvider {
         } else {
             let mut entropy = [0u8; 16];
             getrandom::fill(&mut entropy)
-                .map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
             let mnemonic = Mnemonic::from_entropy(&entropy)
-                .map_err(|e| PayError::InternalError(format!("mnemonic gen: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("mnemonic gen: {e}")))?;
             mnemonic.words().collect::<Vec<_>>().join(" ")
         };
         let keypair = keypair_from_seed_phrase_and_passphrase(&mnemonic_str, "").map_err(|e| {
-            PayError::InternalError(format!("build keypair from sol mnemonic: {e}"))
+            PayError::internal_error(format!("build keypair from sol mnemonic: {e}"))
         })?;
         let address = keypair.pubkey().to_string();
 
-        let wallet_id = wallet::generate_wallet_identifier()?;
+        // Derive a stable wallet_id from (network, mnemonic). Same mnemonic on
+        // the same network always yields the same id, so a re-issued
+        // create_wallet hits the load_wallet_metadata idempotency path instead
+        // of producing a sibling wallet with a fresh random id.
+        let wallet_id = wallet::derive_wallet_identifier(&[b"sol", mnemonic_str.trim().as_bytes()]);
         let normalized_label = {
             let trimmed = request.label.trim();
             if trimmed.is_empty() || trimmed == "default" {
@@ -1157,6 +1154,7 @@ impl PayProvider for SolProvider {
             sol_rpc_endpoints: Some(endpoints),
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some(mnemonic_str.clone()),
             backend: None,
             btc_esplora_url: None,
@@ -1189,7 +1187,7 @@ impl PayProvider for SolProvider {
                 .map(|(name, value)| format!("{name}={value}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(PayError::InvalidAmount(format!(
+            return Err(PayError::invalid_amount(format!(
                 "wallet {wallet_id} has non-zero balance components ({component_list}); transfer funds first"
             )));
         }
@@ -1296,7 +1294,7 @@ impl PayProvider for SolProvider {
     }
 
     async fn receive_claim(&self, _wallet: &str, _quote_id: &str) -> Result<u64, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "sol receive has no claim step".to_string(),
         ))
     }
@@ -1308,7 +1306,7 @@ impl PayProvider for SolProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "sol does not use cashu send".to_string(),
         ))
     }
@@ -1318,7 +1316,7 @@ impl PayProvider for SolProvider {
         _wallet: &str,
         _token: &str,
     ) -> Result<CashuReceiveResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "sol does not use cashu receive".to_string(),
         ))
     }
@@ -1335,7 +1333,7 @@ impl PayProvider for SolProvider {
         let endpoints = Self::rpc_endpoints_for_wallet(&meta)?;
         let transfer_target = Self::parse_transfer_target(to, &endpoints)?;
         let recipient_pubkey = Pubkey::from_str(&transfer_target.recipient_address)
-            .map_err(|e| PayError::InvalidAmount(format!("invalid sol recipient address: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("invalid sol recipient address: {e}")))?;
 
         let keypair = Self::wallet_keypair(&meta)?;
         let memo_instruction = onchain_memo
@@ -1429,12 +1427,12 @@ impl PayProvider for SolProvider {
             }
             // Add reference key as read-only non-signer account on the transfer
             // instruction (per strain-payment-method-solana convention).
-            if let Some(ref_key) = &transfer_target.reference {
-                if let Some(last_ix) = instructions.last_mut() {
-                    last_ix
-                        .accounts
-                        .push(AccountMeta::new_readonly(*ref_key, false));
-                }
+            if let Some(ref_key) = &transfer_target.reference
+                && let Some(last_ix) = instructions.last_mut()
+            {
+                last_ix
+                    .accounts
+                    .push(AccountMeta::new_readonly(*ref_key, false));
             }
             let transaction = Transaction::new_signed_with_payer(
                 &instructions,
@@ -1442,10 +1440,10 @@ impl PayProvider for SolProvider {
                 &[&keypair],
                 recent_blockhash,
             );
-            let encoded_transaction = BASE64_STANDARD.encode(
-                wincode::serialize(&transaction)
-                    .map_err(|e| PayError::InternalError(format!("serialize transaction: {e}")))?,
-            );
+            let encoded_transaction = BASE64_STANDARD
+                .encode(wincode::serialize(&transaction).map_err(|e| {
+                    PayError::internal_error(format!("serialize transaction: {e}"))
+                })?);
 
             match self
                 .rpc_call(
@@ -1471,7 +1469,7 @@ impl PayProvider for SolProvider {
             }
         }
         let transaction_id = transaction_id.ok_or_else(|| {
-            PayError::NetworkError(format!(
+            PayError::network_error(format!(
                 "all sol rpc endpoints failed for transfer: {}",
                 last_error.unwrap_or_else(|| "unknown error".to_string())
             ))
@@ -1530,6 +1528,7 @@ impl PayProvider for SolProvider {
             confirmed_at_epoch_s: None,
             fee: fee_amount.clone(),
             reference_keys: None,
+            reservation_ids: Vec::new(),
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -1654,16 +1653,15 @@ impl PayProvider for SolProvider {
             if item.onchain_memo.is_none() {
                 item.onchain_memo = chain_item.onchain_memo;
             }
-            if let Some(local) = local_sol_record.as_ref() {
-                if local.status != item.status
-                    || local.confirmed_at_epoch_s != item.confirmed_at_epoch_s
-                {
-                    let _ = self.store.update_transaction_record_status(
-                        transaction_id,
-                        item.status,
-                        item.confirmed_at_epoch_s,
-                    );
-                }
+            if let Some(local) = local_sol_record.as_ref()
+                && (local.status != item.status
+                    || local.confirmed_at_epoch_s != item.confirmed_at_epoch_s)
+            {
+                let _ = self.store.update_transaction_record_status(
+                    transaction_id,
+                    item.status,
+                    item.confirmed_at_epoch_s,
+                );
             }
             return Ok(HistoryStatusInfo {
                 transaction_id: transaction_id.to_string(),
@@ -1720,7 +1718,7 @@ impl PayProvider for SolProvider {
             });
         }
 
-        Err(PayError::WalletNotFound(format!(
+        Err(PayError::wallet_not_found(format!(
             "transaction {transaction_id} not found"
         )))
     }
@@ -1812,14 +1810,14 @@ impl PayProvider for SolProvider {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        SolGetTransactionResult, SolProvider, DEFAULT_SOL_SEND_FEE_LAMPORTS, SOL_MEMO_PROGRAM_ID,
+        DEFAULT_SOL_SEND_FEE_LAMPORTS, SOL_MEMO_PROGRAM_ID, SolGetTransactionResult, SolProvider,
     };
     use crate::provider::PayProvider;
-    use crate::store::wallet::{self, WalletMetadata};
     use crate::store::StorageBackend;
+    use crate::store::wallet::{self, WalletMetadata};
     use crate::types::{Network, WalletCreateRequest};
     use solana_sdk::pubkey::Pubkey;
-    use solana_sdk::signature::{keypair_from_seed_phrase_and_passphrase, Signer};
+    use solana_sdk::signature::{Signer, keypair_from_seed_phrase_and_passphrase};
     use std::str::FromStr;
     use std::sync::Arc;
 
@@ -1828,6 +1826,39 @@ mod tests {
         Arc::new(StorageBackend::Redb(
             crate::store::redb_store::RedbStore::new(data_dir),
         ))
+    }
+
+    #[test]
+    fn balance_delta_within_u64_range_succeeds() {
+        // Simulates the unsigned_abs path: |post - pre| must fit u64.
+        let pre: u64 = 100_000;
+        let post: u64 = 50_000;
+        let delta = post as i128 - pre as i128;
+        let amount: u64 = u64::try_from(delta.unsigned_abs()).expect("fits in u64");
+        assert_eq!(amount, 50_000);
+        assert!(delta < 0);
+    }
+
+    #[test]
+    fn balance_delta_at_u64_max_boundary_succeeds() {
+        let pre: u64 = 0;
+        let post: u64 = u64::MAX;
+        let delta = post as i128 - pre as i128;
+        let amount: u64 = u64::try_from(delta.unsigned_abs()).expect("u64::MAX fits");
+        assert_eq!(amount, u64::MAX);
+    }
+
+    #[test]
+    fn confirmations_above_u32_max_falls_back_to_none() {
+        // Real chains never hit this, but RPC responses can be corrupted. The
+        // conversion must not truncate silently — None means "lots, definitely
+        // past finality" which is the safer assumption than wrap-around.
+        let huge: u64 = (u32::MAX as u64) + 1;
+        let converted: Option<u32> = u32::try_from(huge).ok();
+        assert!(converted.is_none());
+
+        let small: u64 = 12;
+        assert_eq!(u32::try_from(small).ok(), Some(12u32));
     }
 
     #[test]
@@ -1861,6 +1892,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some(
                 "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string(),
             ),
@@ -2001,7 +2033,7 @@ mod tests {
         assert_eq!(ix.data.len(), 10);
         assert_eq!(ix.data[0], 12); // transfer_checked discriminator
         assert_eq!(ix.data[9], 6); // decimals
-                                   // 4 accounts: source, mint, dest, authority
+        // 4 accounts: source, mint, dest, authority
         assert_eq!(ix.accounts.len(), 4);
     }
 
@@ -2100,6 +2132,7 @@ mod tests {
                 sol_rpc_endpoints: Some(vec![endpoint.clone()]),
                 evm_rpc_endpoints: None,
                 evm_chain_id: None,
+                sol_cluster: None,
                 seed_secret: Some(valid_mnemonic.to_string()),
                 backend: None,
                 btc_esplora_url: None,
@@ -2125,6 +2158,7 @@ mod tests {
                 sol_rpc_endpoints: Some(vec!["https://api.devnet.solana.com".to_string()]),
                 evm_rpc_endpoints: None,
                 evm_chain_id: None,
+                sol_cluster: None,
                 seed_secret: Some("not-a-valid-mnemonic".to_string()),
                 backend: None,
                 btc_esplora_url: None,
@@ -2154,8 +2188,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_string_lossy().to_string();
         let provider = SolProvider::new(&data_dir, test_store(&data_dir));
-        let mnemonic =
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
         let wallet = provider
             .create_wallet(&WalletCreateRequest {
@@ -2171,6 +2204,7 @@ mod tests {
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster: None,
             })
             .await
             .expect("create wallet");

@@ -39,6 +39,12 @@ pub struct WalletMetadata {
     pub mint_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sol_rpc_endpoints: Option<Vec<String>>,
+    /// Solana cluster the wallet was created on: `"mainnet-beta"`, `"devnet"`,
+    /// or `"testnet"`. Pre-cluster-tagging wallets serialize without this
+    /// field; on load they remain `None` and skip the send-time cluster
+    /// check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sol_cluster: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evm_rpc_endpoints: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +81,7 @@ impl std::fmt::Debug for WalletMetadata {
             .field("label", &self.label)
             .field("mint_url", &self.mint_url)
             .field("sol_rpc_endpoints", &self.sol_rpc_endpoints)
+            .field("sol_cluster", &self.sol_cluster)
             .field("evm_rpc_endpoints", &self.evm_rpc_endpoints)
             .field("evm_chain_id", &self.evm_chain_id)
             .field("seed_secret", &self.seed_secret.as_ref().map(|_| "***"))
@@ -101,21 +108,51 @@ impl std::fmt::Debug for WalletMetadata {
 
 const WALLETS_DIR: &str = "wallets";
 
+/// Generate a random `w_<8-hex>` wallet identifier. No longer used in production
+/// (providers derive stable ids from mnemonic + network — see
+/// `derive_wallet_identifier`) but retained for tests that need an arbitrary id.
+#[allow(dead_code)]
 pub fn generate_wallet_identifier() -> Result<String, PayError> {
     let mut buf = [0u8; 4];
-    getrandom::fill(&mut buf).map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+    getrandom::fill(&mut buf).map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
     Ok(format!("w_{}", hex::encode(buf)))
+}
+
+/// Derive a stable wallet identifier from the mnemonic plus any data that
+/// distinguishes wallets sharing the same seed (mint URL for Cashu, chain id
+/// for EVM, sub-network/address-type for BTC). The same inputs produce the
+/// same id forever, so a re-issued create_wallet request finds the existing
+/// wallet via the load_wallet_metadata idempotency check instead of producing
+/// a sibling with a fresh random id.
+///
+/// Returns the same 4-byte `w_<8-hex>` shape as `generate_wallet_identifier` so
+/// downstream code that pattern-matches on the prefix (e.g. label-vs-id resolution
+/// in `resolve_wallet_id`) keeps working unchanged.
+pub fn derive_wallet_identifier(distinguishers: &[&[u8]]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    // Domain-separate from any other use of blake3 in the codebase. Bumping
+    // this string would migrate every wallet to a fresh id.
+    hasher.update(b"afpay/wallet-id/v1");
+    for piece in distinguishers {
+        // Length-prefix each piece so concatenation is unambiguous (e.g.
+        // ["ab","c"] vs ["a","bc"] hash to different ids).
+        let len = (piece.len() as u64).to_le_bytes();
+        hasher.update(&len);
+        hasher.update(piece);
+    }
+    let hash = hasher.finalize();
+    format!("w_{}", hex::encode(&hash.as_bytes()[..4]))
 }
 
 pub fn generate_transaction_identifier() -> Result<String, PayError> {
     let mut buf = [0u8; 8];
-    getrandom::fill(&mut buf).map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+    getrandom::fill(&mut buf).map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
     Ok(format!("tx_{}", hex::encode(buf)))
 }
 
 pub fn generate_request_identifier() -> Result<String, PayError> {
     let mut buf = [0u8; 16];
-    getrandom::fill(&mut buf).map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+    getrandom::fill(&mut buf).map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
     Ok(format!("req_{}", hex::encode(buf)))
 }
 
@@ -145,7 +182,7 @@ pub fn wallet_directory_path(data_dir: &str, wallet_id: &str) -> Result<PathBuf,
     if dir.is_dir() {
         Ok(dir)
     } else {
-        Err(PayError::WalletNotFound(format!(
+        Err(PayError::wallet_not_found(format!(
             "wallet {wallet_id} not found"
         )))
     }
@@ -161,7 +198,7 @@ pub(crate) fn parse_wallet_metadata(
     wallet_id: &str,
 ) -> Result<WalletMetadata, PayError> {
     serde_json::from_str(raw)
-        .map_err(|e| PayError::InternalError(format!("parse wallet {wallet_id}: {e}")))
+        .map_err(|e| PayError::internal_error(format!("parse wallet {wallet_id}: {e}")))
 }
 
 // ═══════════════════════════════════════════
@@ -187,14 +224,14 @@ pub fn save_wallet_metadata(
 ) -> Result<(), PayError> {
     let root = wallets_root(data_dir);
     std::fs::create_dir_all(&root).map_err(|e| {
-        PayError::InternalError(format!("create wallets dir {}: {e}", root.display()))
+        PayError::internal_error(format!("create wallets dir {}: {e}", root.display()))
     })?;
     set_private_dir_permissions(&root)?;
 
     let wallet_dir = root.join(&wallet_metadata.id);
     let wallet_data_dir = wallet_dir.join("wallet-data");
     std::fs::create_dir_all(&wallet_data_dir).map_err(|e| {
-        PayError::InternalError(format!(
+        PayError::internal_error(format!(
             "create wallet dir {}: {e}",
             wallet_data_dir.display()
         ))
@@ -203,41 +240,41 @@ pub fn save_wallet_metadata(
     set_private_dir_permissions(&wallet_data_dir)?;
 
     let wallet_metadata_json = serde_json::to_string(wallet_metadata)
-        .map_err(|e| PayError::InternalError(format!("serialize wallet metadata: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("serialize wallet metadata: {e}")))?;
 
     // catalog.redb: unified wallet index
     let catalog_db = open_catalog(&root)?;
     let catalog_txn = catalog_db
         .begin_write()
-        .map_err(|e| PayError::InternalError(format!("catalog begin_write: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("catalog begin_write: {e}")))?;
     {
         let mut table = catalog_txn
             .open_table(CATALOG_WALLET_BY_ID)
-            .map_err(|e| PayError::InternalError(format!("catalog open wallet_by_id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("catalog open wallet_by_id: {e}")))?;
         table
             .insert(wallet_metadata.id.as_str(), wallet_metadata_json.as_str())
-            .map_err(|e| PayError::InternalError(format!("catalog insert wallet: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("catalog insert wallet: {e}")))?;
     }
     catalog_txn
         .commit()
-        .map_err(|e| PayError::InternalError(format!("catalog commit: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("catalog commit: {e}")))?;
 
     // core.redb: per-wallet authoritative metadata
     let core_db = open_core(&wallet_dir.join("core.redb"))?;
     let core_txn = core_db
         .begin_write()
-        .map_err(|e| PayError::InternalError(format!("core begin_write: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("core begin_write: {e}")))?;
     {
         let mut table = core_txn
             .open_table(CORE_METADATA_KEY_VALUE)
-            .map_err(|e| PayError::InternalError(format!("core open metadata_kv: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("core open metadata_kv: {e}")))?;
         table
             .insert(CORE_WALLET_METADATA_KEY, wallet_metadata_json.as_str())
-            .map_err(|e| PayError::InternalError(format!("core write wallet metadata: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("core write wallet metadata: {e}")))?;
     }
     core_txn
         .commit()
-        .map_err(|e| PayError::InternalError(format!("core commit wallet metadata: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("core commit wallet metadata: {e}")))?;
 
     Ok(())
 }
@@ -247,7 +284,7 @@ fn set_private_dir_permissions(path: &Path) -> Result<(), PayError> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| PayError::InternalError(format!("chmod 700 {}: {e}", path.display())))
+        .map_err(|e| PayError::internal_error(format!("chmod 700 {}: {e}", path.display())))
 }
 
 #[cfg(not(unix))]
@@ -265,13 +302,13 @@ pub fn load_wallet_metadata(data_dir: &str, wallet_id: &str) -> Result<WalletMet
         let db = open_catalog(&root)?;
         let read_txn = db
             .begin_read()
-            .map_err(|e| PayError::InternalError(format!("catalog begin_read: {e}")))?;
-        if let Ok(table) = read_txn.open_table(CATALOG_WALLET_BY_ID) {
-            if let Some(value) = table.get(wallet_id).map_err(|e| {
-                PayError::InternalError(format!("catalog read wallet {wallet_id}: {e}"))
-            })? {
-                return parse_wallet_metadata(value.value(), wallet_id);
-            }
+            .map_err(|e| PayError::internal_error(format!("catalog begin_read: {e}")))?;
+        if let Ok(table) = read_txn.open_table(CATALOG_WALLET_BY_ID)
+            && let Some(value) = table.get(wallet_id).map_err(|e| {
+                PayError::internal_error(format!("catalog read wallet {wallet_id}: {e}"))
+            })?
+        {
+            return parse_wallet_metadata(value.value(), wallet_id);
         }
     }
 
@@ -283,15 +320,15 @@ pub fn load_wallet_metadata(data_dir: &str, wallet_id: &str) -> Result<WalletMet
             let db = db::open_database(&core_path)?;
             let read_txn = db
                 .begin_read()
-                .map_err(|e| PayError::InternalError(format!("core begin_read: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("core begin_read: {e}")))?;
             let Ok(table) = read_txn.open_table(CORE_METADATA_KEY_VALUE) else {
-                return Err(PayError::WalletNotFound(format!(
+                return Err(PayError::wallet_not_found(format!(
                     "wallet {wallet_id} not found"
                 )));
             };
             if let Some(value) = table
                 .get(CORE_WALLET_METADATA_KEY)
-                .map_err(|e| PayError::InternalError(format!("core read wallet metadata: {e}")))?
+                .map_err(|e| PayError::internal_error(format!("core read wallet metadata: {e}")))?
             {
                 return parse_wallet_metadata(value.value(), wallet_id);
             }
@@ -305,25 +342,26 @@ pub fn load_wallet_metadata(data_dir: &str, wallet_id: &str) -> Result<WalletMet
             let db = open_catalog(&root)?;
             let read_txn = db
                 .begin_read()
-                .map_err(|e| PayError::InternalError(format!("catalog begin_read: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("catalog begin_read: {e}")))?;
             if let Ok(table) = read_txn.open_table(CATALOG_WALLET_BY_ID) {
                 for entry in table
                     .iter()
-                    .map_err(|e| PayError::InternalError(format!("catalog iterate: {e}")))?
+                    .map_err(|e| PayError::internal_error(format!("catalog iterate: {e}")))?
                 {
-                    let (key, value) = entry
-                        .map_err(|e| PayError::InternalError(format!("catalog read entry: {e}")))?;
-                    if let Ok(meta) = parse_wallet_metadata(value.value(), key.value()) {
-                        if meta.label.as_deref() == Some(wallet_id) {
-                            return Ok(meta);
-                        }
+                    let (key, value) = entry.map_err(|e| {
+                        PayError::internal_error(format!("catalog read entry: {e}"))
+                    })?;
+                    if let Ok(meta) = parse_wallet_metadata(value.value(), key.value())
+                        && meta.label.as_deref() == Some(wallet_id)
+                    {
+                        return Ok(meta);
                     }
                 }
             }
         }
     }
 
-    Err(PayError::WalletNotFound(format!(
+    Err(PayError::wallet_not_found(format!(
         "wallet {wallet_id} not found"
     )))
 }
@@ -342,7 +380,7 @@ pub fn list_wallet_metadata(
     let db = open_catalog(&root)?;
     let read_txn = db
         .begin_read()
-        .map_err(|e| PayError::InternalError(format!("catalog begin_read: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("catalog begin_read: {e}")))?;
     let Ok(table) = read_txn.open_table(CATALOG_WALLET_BY_ID) else {
         return Ok(vec![]);
     };
@@ -350,10 +388,10 @@ pub fn list_wallet_metadata(
     let mut wallets = Vec::new();
     for entry in table
         .iter()
-        .map_err(|e| PayError::InternalError(format!("catalog iterate wallets: {e}")))?
+        .map_err(|e| PayError::internal_error(format!("catalog iterate wallets: {e}")))?
     {
         let (key, value) = entry
-            .map_err(|e| PayError::InternalError(format!("catalog read wallet entry: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("catalog read wallet entry: {e}")))?;
         let wallet_metadata: WalletMetadata = match serde_json::from_str(value.value()) {
             Ok(m) => m,
             Err(e) => WalletMetadata {
@@ -364,6 +402,7 @@ pub fn list_wallet_metadata(
                 sol_rpc_endpoints: None,
                 evm_rpc_endpoints: None,
                 evm_chain_id: None,
+                sol_cluster: None,
                 seed_secret: None,
                 backend: None,
                 btc_esplora_url: None,
@@ -377,10 +416,10 @@ pub fn list_wallet_metadata(
                 error: Some(format!("corrupt metadata: {e}")),
             },
         };
-        if let Some(network) = network {
-            if wallet_metadata.network != network {
-                continue;
-            }
+        if let Some(network) = network
+            && wallet_metadata.network != network
+        {
+            continue;
         }
         wallets.push(wallet_metadata);
     }
@@ -399,25 +438,25 @@ pub fn delete_wallet_metadata(data_dir: &str, wallet_id: &str) -> Result<(), Pay
         let db = open_catalog(&root)?;
         let write_txn = db
             .begin_write()
-            .map_err(|e| PayError::InternalError(format!("catalog begin_write: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("catalog begin_write: {e}")))?;
         {
             let mut table = write_txn
                 .open_table(CATALOG_WALLET_BY_ID)
-                .map_err(|e| PayError::InternalError(format!("catalog open wallet_by_id: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("catalog open wallet_by_id: {e}")))?;
             let _ = table
                 .remove(wallet_id)
-                .map_err(|e| PayError::InternalError(format!("catalog remove wallet: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("catalog remove wallet: {e}")))?;
         }
         write_txn
             .commit()
-            .map_err(|e| PayError::InternalError(format!("catalog commit delete: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("catalog commit delete: {e}")))?;
     }
 
     // Remove wallet directory (core.redb + wallet-data/*)
     let wallet_dir = root.join(wallet_id);
     if wallet_dir.exists() {
         std::fs::remove_dir_all(&wallet_dir)
-            .map_err(|e| PayError::InternalError(format!("delete wallet dir: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("delete wallet dir: {e}")))?;
     }
 
     Ok(())
@@ -440,11 +479,11 @@ pub fn resolve_wallet_id(data_dir: &str, id_or_label: &str) -> Result<String, Pa
         .filter(|w| w.label.as_deref() == Some(id_or_label))
         .collect();
     match matches.len() {
-        0 => Err(PayError::WalletNotFound(format!(
+        0 => Err(PayError::wallet_not_found(format!(
             "no wallet found with ID or label '{id_or_label}'"
         ))),
         1 => Ok(matches.remove(0).id.clone()),
-        n => Err(PayError::InvalidAmount(format!(
+        n => Err(PayError::invalid_amount(format!(
             "label '{id_or_label}' matches {n} wallets — use wallet ID instead"
         ))),
     }
@@ -497,6 +536,35 @@ mod tests {
     }
 
     #[test]
+    fn derive_wallet_id_format_matches_random_shape() {
+        let id = derive_wallet_identifier(&[b"sol", b"abandon ability ..."]);
+        assert!(id.starts_with("w_"), "should start with w_: {id}");
+        assert_eq!(id.len(), 10, "w_ + 8 hex chars = 10: {id}");
+        assert!(id[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn derive_wallet_id_is_deterministic_and_input_sensitive() {
+        // Same inputs always yield the same id.
+        let id_a = derive_wallet_identifier(&[b"sol", b"abandon abandon"]);
+        let id_b = derive_wallet_identifier(&[b"sol", b"abandon abandon"]);
+        assert_eq!(id_a, id_b);
+
+        // Different mnemonic → different id.
+        let id_diff_mnemonic = derive_wallet_identifier(&[b"sol", b"about above ..."]);
+        assert_ne!(id_a, id_diff_mnemonic);
+
+        // Different network with same mnemonic → different id (no cross-net collision).
+        let id_diff_net = derive_wallet_identifier(&[b"evm", b"abandon abandon"]);
+        assert_ne!(id_a, id_diff_net);
+
+        // Length-prefixing prevents concatenation ambiguity.
+        let id_concat_ambiguity_a = derive_wallet_identifier(&[b"ab", b"c"]);
+        let id_concat_ambiguity_b = derive_wallet_identifier(&[b"a", b"bc"]);
+        assert_ne!(id_concat_ambiguity_a, id_concat_ambiguity_b);
+    }
+
+    #[test]
     fn generate_tx_id_format() {
         let id = generate_transaction_identifier().unwrap();
         assert!(id.starts_with("tx_"), "should start with tx_: {id}");
@@ -522,6 +590,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some("seed-secret-value".to_string()),
             backend: Some("core-rpc".to_string()),
             btc_esplora_url: None,
@@ -553,6 +622,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string()),
             backend: None,
             btc_esplora_url: None,
@@ -586,7 +656,7 @@ mod tests {
         let dir = tmp.path().to_str().unwrap();
         let err = load_wallet_metadata(dir, "w_00000000").unwrap_err();
         assert!(
-            matches!(err, PayError::WalletNotFound(_)),
+            matches!(err, PayError::WalletNotFound { .. }),
             "expected WalletNotFound, got: {err}"
         );
     }
@@ -605,6 +675,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: None,
             backend: None,
             btc_esplora_url: None,
@@ -625,6 +696,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: None,
             backend: Some("nwc".to_string()),
             btc_esplora_url: None,
@@ -674,6 +746,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some("seed".to_string()),
             backend: None,
             btc_esplora_url: None,

@@ -4,8 +4,8 @@ use crate::store::wallet::WalletMetadata;
 use async_trait::async_trait;
 use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client, RpcApi};
 use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
-use bdk_wallet::bitcoin::Transaction;
 use bdk_wallet::Wallet;
+use bdk_wallet::bitcoin::Transaction;
 use std::sync::Arc;
 
 pub(crate) struct CoreRpcSource {
@@ -19,7 +19,9 @@ impl CoreRpcSource {
             .btc_core_url
             .as_deref()
             .ok_or_else(|| {
-                PayError::InternalError("btc_core_url is required for core-rpc backend".to_string())
+                PayError::internal_error(
+                    "btc_core_url is required for core-rpc backend".to_string(),
+                )
             })?
             .to_string();
 
@@ -38,7 +40,7 @@ impl CoreRpcSource {
 
     fn make_client(&self) -> Result<Client, PayError> {
         Client::new(&self.url, self.auth.clone())
-            .map_err(|e| PayError::NetworkError(format!("bitcoind rpc client: {e}")))
+            .map_err(|e| PayError::network_error(format!("bitcoind rpc client: {e}")))
     }
 
     fn sync_blocks(&self, wallet: &mut Wallet) -> Result<(), PayError> {
@@ -48,16 +50,16 @@ impl CoreRpcSource {
 
         while let Some(block) = emitter
             .next_block()
-            .map_err(|e| PayError::NetworkError(format!("bitcoind next_block: {e}")))?
+            .map_err(|e| PayError::network_error(format!("bitcoind next_block: {e}")))?
         {
             wallet
                 .apply_block_connected_to(&block.block, block.block_height(), block.connected_to())
-                .map_err(|e| PayError::InternalError(format!("apply block: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("apply block: {e}")))?;
         }
 
         let mempool = emitter
             .mempool()
-            .map_err(|e| PayError::NetworkError(format!("bitcoind mempool: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("bitcoind mempool: {e}")))?;
         let txs: Vec<(Arc<Transaction>, u64)> = mempool.update;
         wallet.apply_unconfirmed_txs(txs);
 
@@ -80,7 +82,7 @@ impl BtcChainSource for CoreRpcSource {
         let client = self.make_client()?;
         client
             .send_raw_transaction(tx)
-            .map_err(|e| PayError::NetworkError(format!("broadcast tx: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("broadcast tx: {e}")))?;
         Ok(())
     }
 }

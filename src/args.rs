@@ -4,7 +4,7 @@ use crate::mode::rest::RestInit;
 use crate::mode::rpc::RpcInit;
 use crate::types::*;
 use agent_first_data::OutputFormat;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -14,15 +14,11 @@ use std::io::Write;
 
 pub struct CliError {
     pub message: String,
-    pub hint: Option<String>,
 }
 
 impl From<String> for CliError {
     fn from(message: String) -> Self {
-        Self {
-            message,
-            hint: None,
-        }
+        Self { message }
     }
 }
 
@@ -37,10 +33,40 @@ pub enum Mode {
     #[cfg(feature = "rest")]
     Rest(RestInit),
     Data(DataOp),
+    SkillAdmin(SkillAdminRequest),
+    Container(ContainerRequest),
+}
+
+/// Payload for `afpay container …`, handled by `crate::container`.
+pub struct ContainerRequest {
+    pub action: ContainerCliAction,
+    pub output: OutputFormat,
 }
 
 #[cfg(not(feature = "rpc"))]
 pub struct RpcStub;
+
+// ── Agent Skill administration ──────────────
+// The CLI-facing enums below convert to `agent_first_data::skill` enums in
+// `crate::skill_admin`, so every spore installs its skill through the same admin.
+
+pub struct SkillAdminRequest {
+    pub action: SkillAdminAction,
+    pub output: OutputFormat,
+}
+
+pub enum SkillAdminAction {
+    Status(SkillAdminOptions),
+    Install(SkillAdminOptions),
+    Uninstall(SkillAdminOptions),
+}
+
+pub struct SkillAdminOptions {
+    pub agent: SkillAgentSelection,
+    pub scope: SkillScope,
+    pub skills_dir: Option<String>,
+    pub force: bool,
+}
 
 #[cfg_attr(not(feature = "backup"), allow(dead_code))]
 pub struct DataOp {
@@ -95,6 +121,11 @@ pub struct PipeInit {
     pub startup_argv: Vec<String>,
     pub startup_args: serde_json::Value,
     pub startup_requested: bool,
+    /// True when the operator passed `--public-listen`. Pipe scrubs the raw
+    /// serde error detail from the wire response in this mode so an attacker
+    /// poking at the schema does not get field names and byte offsets back.
+    /// The full detail still goes to the daemon log when enabled.
+    pub scrub_parse_errors: bool,
 }
 
 #[allow(dead_code)]
@@ -156,6 +187,11 @@ struct CommonSendArgs {
     /// Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
     #[arg(long = "local-memo", value_parser = parse_memo_kv)]
     local_memo: Vec<(String, String)>,
+    /// Opaque idempotency key (≤128 chars). A second send with the same key and
+    /// identical body replays the first response instead of re-broadcasting;
+    /// a different body returns idempotency_conflict. Persisted for 24h.
+    #[arg(long = "idempotency-key")]
+    idempotency_key: Option<String>,
 }
 
 #[derive(clap::Args, Clone)]
@@ -194,10 +230,11 @@ enum RuntimeMode {
 
 #[derive(Parser)]
 #[command(
-    name = "afpay",
+    name = env!("DISPLAY_NAME"),
     bin_name = "afpay",
     version,
-    about = "Agent-first cryptocurrency micropayment tool"
+    about = env!("CARGO_PKG_DESCRIPTION"),
+    long_about = concat!(env!("DISPLAY_NAME"), " - ", env!("CARGO_PKG_DESCRIPTION")),
 )]
 pub struct AfpayCli {
     /// Run mode
@@ -235,6 +272,14 @@ pub struct AfpayCli {
     /// Output format
     #[arg(long, default_value = "json")]
     output: String,
+
+    /// Redirect stdout bytes to this file
+    #[arg(long = "stdout-file", value_name = "PATH", global = true)]
+    stdout_file: Option<String>,
+
+    /// Redirect stderr bytes to this file
+    #[arg(long = "stderr-file", value_name = "PATH", global = true)]
+    stderr_file: Option<String>,
 
     /// Log filters (comma-separated)
     #[arg(long = "log", value_delimiter = ',')]
@@ -308,6 +353,180 @@ enum PayCommand {
         #[command(subcommand)]
         action: LimitAction,
     },
+    /// Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
+    Skill {
+        #[command(subcommand)]
+        action: SkillCliAction,
+    },
+    /// Build and run the afpay daemon container (Docker, Podman, or Apple) from the embedded recipe
+    Container {
+        #[command(subcommand)]
+        action: ContainerCliAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCliAction {
+    /// Show whether the skill is installed, valid, and up to date.
+    Status(SkillTargetArgs),
+    /// Install or refresh the skill.
+    Install(SkillWriteArgs),
+    /// Remove a managed skill.
+    Uninstall(SkillWriteArgs),
+}
+
+#[derive(Args)]
+struct SkillTargetArgs {
+    /// Agent to manage. Defaults to every agent that supports the requested scope.
+    #[arg(long = "agent", value_enum, default_value_t = SkillAgentSelection::All)]
+    agent: SkillAgentSelection,
+    /// Skill scope.
+    #[arg(long = "scope", value_enum, default_value_t = SkillScope::Personal)]
+    scope: SkillScope,
+    /// Directory that contains skill folders. Requires an explicit single --agent.
+    #[arg(long = "skills-dir")]
+    skills_dir: Option<String>,
+}
+
+#[derive(Args)]
+struct SkillWriteArgs {
+    #[command(flatten)]
+    target: SkillTargetArgs,
+    /// Overwrite or remove a skill this tool did not manage.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SkillAgentSelection {
+    /// Manage every agent that supports the requested scope.
+    All,
+    /// Manage the Codex local skill under $CODEX_HOME/skills.
+    Codex,
+    /// Manage the Claude Code skill under ~/.claude/skills or .claude/skills.
+    #[value(name = "claude-code", alias = "claude")]
+    ClaudeCode,
+    /// Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills.
+    Opencode,
+    /// Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills.
+    Hermes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SkillScope {
+    /// Install under the user-level skills directory.
+    Personal,
+    /// Install under the current workspace's skills directory.
+    Workspace,
+}
+
+// ── Container orchestration (afpay container …) ──────────────
+// Builds and runs the afpay daemon image locally; handled by `crate::container`.
+
+#[derive(Subcommand)]
+pub enum ContainerCliAction {
+    /// Build the image if missing and run the daemon; print the client command.
+    Install(ContainerInstallArgs),
+    /// Stop and remove the container (--purge also removes the image and cache).
+    Uninstall(ContainerUninstallArgs),
+    /// Report whether the daemon is running, with its endpoint and client command.
+    Status(ContainerStatusArgs),
+    /// Stream the container logs (raw passthrough).
+    Logs(ContainerLogsArgs),
+}
+
+#[derive(Args)]
+pub struct ContainerCommonArgs {
+    /// Container runtime: docker, podman, or apple (auto-detected if omitted).
+    #[arg(long, value_enum)]
+    pub runtime: Option<ContainerRuntimeArg>,
+    /// Container name.
+    #[arg(long, default_value = "afpay")]
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct ContainerInstallArgs {
+    #[command(flatten)]
+    pub common: ContainerCommonArgs,
+    /// Daemon port, published on 127.0.0.1.
+    #[arg(long, default_value_t = 9401)]
+    pub port: u16,
+    /// Server mode: rest (HTTP + bearer key) or rpc (gRPC + PSK).
+    #[arg(long, value_enum, default_value_t = ContainerModeArg::Rest)]
+    pub mode: ContainerModeArg,
+    /// Optional bundled daemon to install and enable (repeatable): phoenixd, bitcoind.
+    #[arg(long = "with", value_name = "DAEMON")]
+    pub with: Vec<String>,
+    /// Operator allowlist entry (repeatable), `<category>=<url>`. afpay refuses to
+    /// expose a public listener without one. Categories: mint, esplora, sol-rpc,
+    /// evm-rpc, btc-core, btc-electrum, ln.
+    #[arg(long = "allow", value_name = "CATEGORY=URL")]
+    pub allow: Vec<String>,
+    /// Bitcoin network when --with bitcoind: mainnet or signet.
+    #[arg(long = "btc-network", default_value = "mainnet")]
+    pub btc_network: String,
+    /// bitcoind RPC port when --with bitcoind.
+    #[arg(long = "btc-rpc-port", default_value_t = 8332)]
+    pub btc_rpc_port: u16,
+    /// bitcoind prune target (MB) when --with bitcoind.
+    #[arg(long = "btc-prune-mb", default_value_t = 550)]
+    pub btc_prune_mb: u32,
+    /// Cargo feature set for --from-source builds (defaults to the Dockerfile's set).
+    #[arg(long)]
+    pub features: Option<String>,
+    /// Rebuild the image even if it already exists.
+    #[arg(long)]
+    pub rebuild: bool,
+    /// Build the full image from a source checkout instead of downloading the prebuilt release.
+    #[arg(long = "from-source")]
+    pub from_source: bool,
+    /// Source checkout to build from with --from-source (default: current dir).
+    #[arg(long, value_name = "DIR")]
+    pub context: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ContainerUninstallArgs {
+    #[command(flatten)]
+    pub common: ContainerCommonArgs,
+    /// Also remove the built image and the cached build context.
+    #[arg(long)]
+    pub purge: bool,
+}
+
+#[derive(Args)]
+pub struct ContainerStatusArgs {
+    #[command(flatten)]
+    pub common: ContainerCommonArgs,
+    /// Published port, used to format the endpoint and client command.
+    #[arg(long, default_value_t = 9401)]
+    pub port: u16,
+    /// Server mode, used to pick the secret file (rest-api-key vs rpc-secret).
+    #[arg(long, value_enum, default_value_t = ContainerModeArg::Rest)]
+    pub mode: ContainerModeArg,
+}
+
+#[derive(Args)]
+pub struct ContainerLogsArgs {
+    #[command(flatten)]
+    pub common: ContainerCommonArgs,
+    /// Follow the log output.
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ContainerRuntimeArg {
+    Docker,
+    Podman,
+    Apple,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ContainerModeArg {
+    Rest,
+    Rpc,
 }
 
 fn parse_extra_dir(s: &str) -> Result<(String, String), String> {
@@ -358,13 +577,17 @@ enum GlobalCommand {
 
 #[derive(Subcommand)]
 enum GlobalConfigAction {
-    /// Show current runtime configuration
-    Show,
-    /// Update runtime configuration
+    /// Get a config value by dot-path key (omit key to show all)
+    Get {
+        /// Dot-path key (e.g. log, exchange_rate.ttl_s)
+        key: Option<String>,
+    },
+    /// Set a config value by dot-path key
     Set {
-        /// Log filters (comma-separated: startup,cashu,ln,sol,wallet,all,off)
-        #[arg(long, value_delimiter = ',')]
-        log: Option<Vec<String>>,
+        /// Dot-path key (e.g. log, exchange_rate.ttl_s)
+        key: String,
+        /// Value(s) to set
+        values: Vec<String>,
     },
 }
 
@@ -815,6 +1038,10 @@ enum SolWalletAction {
         /// Optional label
         #[arg(long)]
         label: Option<String>,
+        /// Solana cluster tag. Stored on the wallet; sends to a different
+        /// cluster are rejected. Accepted: mainnet-beta, devnet, testnet.
+        #[arg(long = "sol-cluster")]
+        sol_cluster: Option<String>,
     },
     /// Close a Solana wallet
     Close {
@@ -855,6 +1082,10 @@ enum EvmCommand {
         /// Token: "native" for chain native, "usdc" or contract address for ERC-20
         #[arg(long)]
         token: String,
+        /// Optional chain_id pin. When set, the daemon verifies the wallet's
+        /// chain_id matches before broadcasting. Mismatch returns wrong_chain.
+        #[arg(long = "chain-id")]
+        chain_id: Option<u64>,
         #[command(flatten)]
         common: CommonSendArgs,
     },
@@ -1216,6 +1447,27 @@ enum LimitAction {
     },
     /// List current limit status
     List,
+    /// Manually reconcile a stuck spend-ledger reservation (operator-only).
+    ///
+    /// Use when AccountingInconsistent fired (money sent but ledger could not
+    /// confirm) or when a BTC settlement crossed the reservation TTL. Pass
+    /// `--confirm` if the payment actually succeeded (writes a spend event so
+    /// the limit reflects the spend), or `--cancel` if it did not.
+    Reconcile {
+        /// Reservation ID (numeric, from limit_list / Output::Sent.reservation_ids).
+        #[arg(long = "reservation-id")]
+        reservation_id: u64,
+        /// Mark the reservation Confirmed (mutually exclusive with --cancel).
+        #[arg(long, group = "reconcile_action")]
+        confirm: bool,
+        /// Mark the reservation Cancelled (mutually exclusive with --confirm).
+        #[arg(long, group = "reconcile_action")]
+        cancel: bool,
+        /// Required audit note (1..=512 chars) — why this reservation is being
+        /// forced to a terminal state.
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1344,35 +1596,53 @@ pub fn parse_args() -> Result<Mode, CliError> {
     let raw: Vec<String> = std::env::args().collect();
     let startup_requested = raw.iter().any(|a| a == "--log");
 
-    // --help: recursive plain-text help (all subcommands expanded)
-    if raw.iter().any(|a| a == "--help" || a == "-h") {
-        let subcommand_path: Vec<&str> = raw[1..]
-            .iter()
-            .take_while(|a| !a.starts_with('-'))
-            .map(|s| s.as_str())
-            .collect();
-        let cmd = AfpayCli::command();
-        let _ = writeln!(
-            std::io::stdout(),
-            "{}",
-            agent_first_data::cli_render_help(&cmd, &subcommand_path)
-        );
-        std::process::exit(0);
+    let build = match env!("GIT_SHA") {
+        "unknown" => None,
+        sha => Some(sha),
+    };
+    match agent_first_data::cli_handle_version_or_continue(
+        &raw,
+        &AfpayCli::command(),
+        "afpay",
+        Some(env!("DISPLAY_NAME")),
+        crate::config::VERSION,
+        build,
+    ) {
+        Ok(Some(version)) => {
+            let _ = write!(std::io::stdout(), "{version}");
+            std::process::exit(0);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let stdout = std::io::stdout();
+            let mut emitter = agent_first_data::CliEmitter::new(stdout.lock(), OutputFormat::Json)
+                .with_strict_protocol();
+            if emitter.emit_error("cli_error", &err.to_string()).is_err() {
+                std::process::exit(4);
+            }
+            std::process::exit(2);
+        }
     }
-    // --help-markdown: Markdown for doc generation
-    if raw.iter().any(|a| a == "--help-markdown") {
-        let subcommand_path: Vec<&str> = raw[1..]
-            .iter()
-            .take_while(|a| !a.starts_with('-'))
-            .map(|s| s.as_str())
-            .collect();
-        let cmd = AfpayCli::command();
-        let _ = writeln!(
-            std::io::stdout(),
-            "{}",
-            agent_first_data::cli_render_help_markdown(&cmd, &subcommand_path)
-        );
-        std::process::exit(0);
+
+    match agent_first_data::cli_handle_help_or_continue(
+        &raw,
+        &AfpayCli::command(),
+        &agent_first_data::HelpConfig::human_cli_default(),
+    ) {
+        Ok(Some(help)) => {
+            let _ = write!(std::io::stdout(), "{help}");
+            std::process::exit(0);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let stdout = std::io::stdout();
+            let mut emitter = agent_first_data::CliEmitter::new(stdout.lock(), OutputFormat::Json)
+                .with_strict_protocol();
+            if emitter.emit_error("cli_error", &err.to_string()).is_err() {
+                std::process::exit(4);
+            }
+            std::process::exit(2);
+        }
     }
 
     let cli = match AfpayCli::try_parse_from(&raw) {
@@ -1386,8 +1656,10 @@ pub fn parse_args() -> Result<Mode, CliError> {
             return Err(e.to_string().into());
         }
     };
+    let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
     let output = agent_first_data::cli_parse_output(&cli.output).map_err(CliError::from)?;
-    let log = agent_first_data::cli_parse_log_filters(&cli.log);
+    let log_filters = agent_first_data::cli_parse_log_filters(&cli.log);
+    let log = log_filters.as_slice().to_vec();
     let startup_args = build_startup_args(&cli);
 
     match cli.mode {
@@ -1399,6 +1671,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
                 startup_argv: raw.clone(),
                 startup_args,
                 startup_requested,
+                scrub_parse_errors: cli.public_listen,
             }));
         }
         RuntimeMode::Interactive => {
@@ -1432,7 +1705,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
                     listen: cli.rpc_listen,
                     rpc_secret: cli.rpc_secret,
                     allow_public_listen: cli.public_listen,
-                    log,
+                    log: log_filters.clone(),
                     data_dir: cli.data_dir,
                     startup_argv: raw.clone(),
                     startup_args: startup_args.clone(),
@@ -1677,11 +1950,20 @@ pub fn parse_args() -> Result<Mode, CliError> {
                 output,
             }));
         }
+        Some(PayCommand::Skill { action }) => {
+            return Ok(Mode::SkillAdmin(SkillAdminRequest {
+                action: skill_admin_action(action),
+                output,
+            }));
+        }
+        Some(PayCommand::Container { action }) => {
+            return Ok(Mode::Container(ContainerRequest { action, output }));
+        }
         Some(cmd) => cmd,
         None => {
             return Err("no subcommand provided; run with --help for usage"
                 .to_string()
-                .into())
+                .into());
         }
     };
 
@@ -1704,6 +1986,27 @@ pub fn parse_args() -> Result<Mode, CliError> {
         startup_requested,
         dry_run: cli.dry_run,
     })))
+}
+
+fn skill_admin_action(action: SkillCliAction) -> SkillAdminAction {
+    match action {
+        SkillCliAction::Status(args) => SkillAdminAction::Status(skill_options(args, false)),
+        SkillCliAction::Install(args) => {
+            SkillAdminAction::Install(skill_options(args.target, args.force))
+        }
+        SkillCliAction::Uninstall(args) => {
+            SkillAdminAction::Uninstall(skill_options(args.target, args.force))
+        }
+    }
+}
+
+fn skill_options(args: SkillTargetArgs, force: bool) -> SkillAdminOptions {
+    SkillAdminOptions {
+        agent: args.agent,
+        scope: args.scope,
+        skills_dir: args.skills_dir,
+        force,
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -1782,6 +2085,11 @@ fn validate_token_not_contract(token: &str) -> Result<(), String> {
 
 fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
     match cmd {
+        // `skill` is intercepted in `parse_args` and never reaches command dispatch.
+        PayCommand::Skill { .. } => Err("skill is handled before command dispatch".to_string()),
+        PayCommand::Container { .. } => {
+            Err("container is handled before command dispatch".to_string())
+        }
         PayCommand::Global { action } => match action {
             GlobalCommand::Limit { action } => match action {
                 GlobalLimitAction::Add { window, max_spend } => {
@@ -1801,14 +2109,15 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
                 }
             },
             GlobalCommand::Config { action } => match action {
-                GlobalConfigAction::Show => Ok(Input::ConfigShow { id: id.to_string() }),
-                GlobalConfigAction::Set { log } => Ok(Input::Config(ConfigPatch {
-                    data_dir: None,
-                    log,
-                    exchange_rate: None,
-                    afpay_rpc: None,
-                    providers: None,
-                })),
+                GlobalConfigAction::Get { key } => Ok(Input::ConfigGet {
+                    id: id.to_string(),
+                    key,
+                }),
+                GlobalConfigAction::Set { key, values } => Ok(Input::ConfigSet {
+                    id: id.to_string(),
+                    key,
+                    values,
+                }),
             },
             GlobalCommand::Backup { .. } | GlobalCommand::Restore { .. } => {
                 unreachable!("global backup/restore handled before dispatch")
@@ -1875,6 +2184,31 @@ fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
                 rule_id,
             }),
             LimitAction::List => Ok(Input::LimitList { id: id.to_string() }),
+            LimitAction::Reconcile {
+                reservation_id,
+                confirm,
+                cancel,
+                reason,
+            } => {
+                let action = match (confirm, cancel) {
+                    (true, false) => ReconcileAction::Confirm,
+                    (false, true) => ReconcileAction::Cancel,
+                    (false, false) => {
+                        return Err("limit reconcile requires --confirm or --cancel".into());
+                    }
+                    (true, true) => {
+                        return Err(
+                            "limit reconcile: --confirm and --cancel are mutually exclusive".into(),
+                        );
+                    }
+                };
+                Ok(Input::ReconcileReservation {
+                    id: id.to_string(),
+                    reservation_id,
+                    action,
+                    reason,
+                })
+            }
         },
     }
 }
@@ -2065,6 +2399,7 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
                 } else {
                     Some(mint_url)
                 },
+                idempotency_key: common.idempotency_key,
             })
         }
         CashuCommand::Receive { wallet, token } => Ok(Input::CashuReceive {
@@ -2077,9 +2412,12 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
             wallet: common.wallet.filter(|s| !s.is_empty()),
             network: Some(Network::Cashu),
             to,
+            amount: None,
             onchain_memo: common.onchain_memo,
             local_memo: memo_vec_to_map(common.local_memo),
             mints: None,
+            chain_id: None,
+            idempotency_key: common.idempotency_key,
         }),
         CashuCommand::ReceiveFromLn {
             common,
@@ -2139,6 +2477,7 @@ fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> 
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster: None,
             }),
             CashuWalletAction::Close {
                 wallet,
@@ -2273,9 +2612,12 @@ fn ln_command_to_input(cmd: LnCommand, id: &str) -> Result<Input, String> {
                 wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Ln),
                 to,
+                amount: None,
                 onchain_memo: None,
                 local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
+                chain_id: None,
+                idempotency_key: common.idempotency_key,
             })
         }
         LnCommand::Receive {
@@ -2320,6 +2662,7 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
             SolWalletAction::Create {
                 sol_rpc_endpoint,
                 label,
+                sol_cluster,
             } => Ok(Input::WalletCreate {
                 id: id.to_string(),
                 network: Network::Sol,
@@ -2335,6 +2678,7 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster,
             }),
             SolWalletAction::Close {
                 wallet,
@@ -2371,9 +2715,12 @@ fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
                 wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Sol),
                 to: target,
+                amount: None,
                 onchain_memo: common.onchain_memo,
                 local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
+                chain_id: None,
+                idempotency_key: common.idempotency_key,
             })
         }
         SolCommand::Receive {
@@ -2433,6 +2780,7 @@ fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster: None,
             }),
             EvmWalletAction::Close {
                 wallet,
@@ -2456,6 +2804,7 @@ fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
             to,
             amount,
             token,
+            chain_id,
         } => {
             validate_evm_address(&to)?;
             validate_token_not_contract(&token)?;
@@ -2465,9 +2814,12 @@ fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
                 wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Evm),
                 to: target,
+                amount: None,
                 onchain_memo: common.onchain_memo,
                 local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
+                chain_id,
+                idempotency_key: common.idempotency_key,
             })
         }
         EvmCommand::Receive {
@@ -2539,6 +2891,7 @@ fn btc_command_to_input(cmd: BtcCommand, id: &str) -> Result<Input, String> {
                 btc_core_url,
                 btc_core_auth_secret,
                 btc_electrum_url,
+                sol_cluster: None,
             }),
             BtcWalletAction::Close {
                 wallet,
@@ -2568,9 +2921,12 @@ fn btc_command_to_input(cmd: BtcCommand, id: &str) -> Result<Input, String> {
                 wallet: common.wallet.filter(|s| !s.is_empty()),
                 network: Some(Network::Btc),
                 to: target,
+                amount: None,
                 onchain_memo: common.onchain_memo,
                 local_memo: memo_vec_to_map(common.local_memo),
                 mints: None,
+                chain_id: None,
+                idempotency_key: common.idempotency_key,
             })
         }
         BtcCommand::Receive {
@@ -2951,7 +3307,9 @@ mod tests {
                 assert_eq!(mint_url.as_deref(), Some("https://mint.example"));
                 assert_eq!(
                     mnemonic_secret.as_deref(),
-                    Some("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about")
+                    Some(
+                        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+                    )
                 );
             }
             other => panic!("unexpected input: {other:?}"),

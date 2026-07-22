@@ -1,15 +1,15 @@
 use super::{
-    parse_bolt11_amount_sats, parse_bolt11_payment_hash, LnBackend, LnInvoiceResult,
-    LnInvoiceStatus, LnPayResult, LnPaymentInfo, LnPaymentStatus,
+    LnBackend, LnInvoiceResult, LnInvoiceStatus, LnPayResult, LnPaymentInfo, LnPaymentStatus,
+    parse_bolt11_amount_sats, parse_bolt11_payment_hash,
 };
 use crate::provider::PayError;
 use crate::types::BalanceInfo;
 use async_trait::async_trait;
+use nostr_wallet_connect::NWC;
 use nostr_wallet_connect::nostr::nips::nip47::{
     ListTransactionsRequest, LookupInvoiceRequest, MakeInvoiceRequest, NostrWalletConnectURI,
     PayInvoiceRequest, TransactionState, TransactionType,
 };
-use nostr_wallet_connect::NWC;
 
 pub(crate) struct NwcBackend {
     client: NWC,
@@ -18,7 +18,7 @@ pub(crate) struct NwcBackend {
 impl NwcBackend {
     pub fn new(nwc_uri: &str) -> Result<Self, PayError> {
         let uri = NostrWalletConnectURI::parse(nwc_uri)
-            .map_err(|e| PayError::InvalidAmount(format!("invalid NWC URI: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("invalid NWC URI: {e}")))?;
         Ok(Self {
             client: NWC::new(uri),
         })
@@ -41,7 +41,7 @@ impl LnBackend for NwcBackend {
             .client
             .pay_invoice(req)
             .await
-            .map_err(|e| PayError::NetworkError(format!("nwc pay_invoice: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("nwc pay_invoice: {e}")))?;
         let lookup_req = LookupInvoiceRequest {
             payment_hash: None,
             invoice: Some(bolt11.to_string()),
@@ -50,7 +50,7 @@ impl LnBackend for NwcBackend {
             .client
             .lookup_invoice(lookup_req)
             .await
-            .map_err(|e| PayError::NetworkError(format!("nwc lookup_invoice: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("nwc lookup_invoice: {e}")))?;
         let confirmed_amount_sats = if lookup.amount > 0 {
             lookup.amount.saturating_add(999) / 1000
         } else {
@@ -82,7 +82,7 @@ impl LnBackend for NwcBackend {
             .client
             .make_invoice(req)
             .await
-            .map_err(|e| PayError::NetworkError(format!("nwc make_invoice: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("nwc make_invoice: {e}")))?;
         let payment_hash = res
             .payment_hash
             .filter(|s| !s.is_empty())
@@ -103,7 +103,7 @@ impl LnBackend for NwcBackend {
             .client
             .lookup_invoice(req)
             .await
-            .map_err(|e| PayError::NetworkError(format!("nwc lookup_invoice: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("nwc lookup_invoice: {e}")))?;
         Ok(match res.state {
             Some(TransactionState::Settled) => LnInvoiceStatus::Paid {
                 confirmed_amount_sats: res.amount.saturating_add(999) / 1000,
@@ -120,7 +120,7 @@ impl LnBackend for NwcBackend {
             .client
             .get_balance()
             .await
-            .map_err(|e| PayError::NetworkError(format!("nwc get_balance: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("nwc get_balance: {e}")))?;
         Ok(BalanceInfo::new(balance_msats / 1000, 0, "sats"))
     }
 
@@ -141,7 +141,7 @@ impl LnBackend for NwcBackend {
             .client
             .list_transactions(req)
             .await
-            .map_err(|e| PayError::NetworkError(format!("nwc list_transactions: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("nwc list_transactions: {e}")))?;
         Ok(txs
             .into_iter()
             .map(|t| LnPaymentInfo {

@@ -1,18 +1,221 @@
 use crate::provider::PayError;
-use crate::spend::SpendContext;
+use crate::spend::{
+    IDEMPOTENCY_KEY_MAX_LEN, IdempotencyLookup, IdempotentReplayPayload, SpendContext,
+};
 use crate::store::PayStore;
 use crate::types::*;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
+use super::App;
 use super::helpers::*;
 use super::receive_watch::{
-    supports_onchain_receive_wait, wait_onchain_receive, ReceiveWaitOptions, ReceiveWatchRequest,
+    ReceiveWaitOptions, ReceiveWatchRequest, supports_onchain_receive_wait, wait_onchain_receive,
 };
-use super::spend_guard::{with_spend_reserve, with_spend_reserves};
-use super::App;
+use super::spend_guard::{emit_accounting_inconsistent, with_spend_reserve, with_spend_reserves};
+
+/// Outcome of [`enter_idempotent`]. When `Proceed`, the handler continues
+/// with the real send flow and is responsible for calling
+/// [`finalize_idempotent`] / [`clear_idempotent`] on terminal output. The
+/// other variants mean the handler has ALREADY emitted an Output and must
+/// return immediately.
+enum IdempotencyEntry {
+    /// No key was supplied, or the key was claimed fresh; continue normally.
+    Proceed {
+        /// Present only when the agent supplied a key — the caller threads
+        /// it back through finalize/clear so the same (key, hash) pair is
+        /// reused (preventing spoof or drift).
+        ctx: Option<(String, String)>,
+    },
+    /// Replay completed: the prior payload was re-emitted as a fresh Output.
+    Done,
+}
+
+async fn enter_idempotent_send(
+    app: &App,
+    id: &str,
+    key: Option<&str>,
+    hash: Option<&str>,
+    start: Instant,
+) -> IdempotencyEntry {
+    let Some(key) = key else {
+        return IdempotencyEntry::Proceed { ctx: None };
+    };
+    let hash = match hash {
+        Some(h) => h.to_string(),
+        None => {
+            emit_error(
+                &app.writer,
+                Some(id.to_string()),
+                &PayError::internal_error(
+                    "idempotency_key set but canonical_send_hash refused this input".to_string(),
+                ),
+                start,
+            )
+            .await;
+            return IdempotencyEntry::Done;
+        }
+    };
+    if key.len() > IDEMPOTENCY_KEY_MAX_LEN {
+        emit_error(
+            &app.writer,
+            Some(id.to_string()),
+            &PayError::invalid_amount(format!(
+                "idempotency_key length {} exceeds max {IDEMPOTENCY_KEY_MAX_LEN}",
+                key.len()
+            )),
+            start,
+        )
+        .await;
+        return IdempotencyEntry::Done;
+    }
+
+    match app.spend_ledger.idempotency_claim(key, &hash).await {
+        Ok(IdempotencyLookup::Fresh) => IdempotencyEntry::Proceed {
+            ctx: Some((key.to_string(), hash)),
+        },
+        Ok(IdempotencyLookup::Replay(payload)) => {
+            emit_replay(app, id, payload, start).await;
+            IdempotencyEntry::Done
+        }
+        Ok(IdempotencyLookup::InProgress) => {
+            let _ = app
+                .writer
+                .send(Output::Error {
+                    id: Some(id.to_string()),
+                    error_code: "idempotency_in_progress".to_string(),
+                    error: format!(
+                        "another request with idempotency_key='{key}' is still in flight"
+                    ),
+                    hint: Some(
+                        "retry after the suggested delay; on completion the original response will replay".to_string(),
+                    ),
+                    retryable: true,
+                    retry_after_ms: Some(250),
+                    trace: trace_from(start),
+                })
+                .await;
+            IdempotencyEntry::Done
+        }
+        Ok(IdempotencyLookup::Conflict) => {
+            let _ = app
+                .writer
+                .send(Output::Error {
+                    id: Some(id.to_string()),
+                    error_code: "idempotency_conflict".to_string(),
+                    error: format!(
+                        "idempotency_key='{key}' was already used with a different request body"
+                    ),
+                    hint: Some(
+                        "to reuse the key the body must be byte-identical; otherwise pick a new idempotency_key".to_string(),
+                    ),
+                    retryable: false,
+                    retry_after_ms: None,
+                    trace: trace_from(start),
+                })
+                .await;
+            IdempotencyEntry::Done
+        }
+        Err(e) => {
+            emit_error(&app.writer, Some(id.to_string()), &e, start).await;
+            IdempotencyEntry::Done
+        }
+    }
+}
+
+async fn emit_replay(app: &App, id: &str, payload: IdempotentReplayPayload, start: Instant) {
+    match payload {
+        IdempotentReplayPayload::Sent {
+            wallet,
+            transaction_id,
+            amount,
+            fee,
+            preimage,
+            reservation_ids,
+        } => {
+            let _ = app
+                .writer
+                .send(Output::Sent {
+                    id: id.to_string(),
+                    wallet,
+                    transaction_id,
+                    amount,
+                    fee,
+                    preimage,
+                    reservation_ids,
+                    trace: trace_from(start),
+                })
+                .await;
+        }
+        IdempotentReplayPayload::CashuSent {
+            wallet,
+            transaction_id,
+            status,
+            fee,
+            token,
+            reservation_ids,
+        } => {
+            let _ = app
+                .writer
+                .send(Output::CashuSent {
+                    id: id.to_string(),
+                    wallet,
+                    transaction_id,
+                    status,
+                    fee,
+                    token,
+                    reservation_ids,
+                    trace: trace_from(start),
+                })
+                .await;
+        }
+        IdempotentReplayPayload::AccountingInconsistent {
+            transaction_id,
+            reservation_ids,
+            confirm_errors,
+            hint,
+        } => {
+            let _ = app
+                .writer
+                .send(Output::AccountingInconsistent {
+                    id: id.to_string(),
+                    transaction_id,
+                    reservation_ids,
+                    confirm_errors,
+                    hint,
+                    trace: trace_from(start),
+                })
+                .await;
+        }
+    }
+}
+
+async fn finalize_idempotent(
+    app: &App,
+    ctx: Option<&(String, String)>,
+    payload: IdempotentReplayPayload,
+) {
+    if let Some((key, hash)) = ctx {
+        let _ = app
+            .spend_ledger
+            .idempotency_finalize(key, hash, payload)
+            .await;
+    }
+}
+
+async fn clear_idempotent(app: &App, ctx: Option<&(String, String)>) {
+    if let Some((key, hash)) = ctx {
+        let _ = app.spend_ledger.idempotency_clear(key, hash).await;
+    }
+}
 
 pub(crate) async fn dispatch_pay(app: &App, input: Input) {
+    // Compute the canonical body hash before destructuring so Send / CashuSend
+    // arms can compare their agent-supplied idempotency_key against a stable
+    // identity of "what is this payment moving" (excludes the request id and
+    // dry_run flag — see canonical_send_hash).
+    let send_hash = canonical_send_hash(&input);
+
     match input {
         Input::Receive {
             id,
@@ -64,7 +267,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented(format!("no provider for {target_network}")),
+                    &PayError::not_implemented(format!("no provider for {target_network}")),
                     start,
                 )
                 .await;
@@ -136,7 +339,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                         } else {
                             "deposit response missing quote_id/payment_hash".to_string()
                         };
-                        emit_error(&app.writer, Some(id), &PayError::InvalidAmount(msg), start)
+                        emit_error(&app.writer, Some(id), &PayError::invalid_amount(msg), start)
                             .await;
                         return;
                     };
@@ -164,7 +367,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                     emit_error(
                                         &app.writer,
                                         Some(id),
-                                        &PayError::NetworkError(format!(
+                                        &PayError::network_error(format!(
                                             "wait-until-paid timeout after {timeout_secs}s"
                                         )),
                                         start,
@@ -212,7 +415,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented(format!("no provider for {target_network}")),
+                    &PayError::not_implemented(format!("no provider for {target_network}")),
                     start,
                 )
                 .await;
@@ -245,6 +448,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
             onchain_memo,
             local_memo,
             mints,
+            idempotency_key,
         } => {
             let start = Instant::now();
             emit_log(
@@ -259,13 +463,27 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
             )
             .await;
 
+            let idem_ctx = match enter_idempotent_send(
+                app,
+                &id,
+                idempotency_key.as_deref(),
+                send_hash.as_deref(),
+                start,
+            )
+            .await
+            {
+                IdempotencyEntry::Proceed { ctx } => ctx,
+                IdempotencyEntry::Done => return,
+            };
+
             let wallet_str = wallet.unwrap_or_default();
             let mints_ref = mints.as_deref();
             let Some(provider) = get_provider(&app.providers, Network::Cashu) else {
+                clear_idempotent(app, idem_ctx.as_ref()).await;
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented("no provider for cashu".to_string()),
+                    &PayError::not_implemented("no provider for cashu".to_string()),
                     start,
                 )
                 .await;
@@ -283,7 +501,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                 token: None,
             };
 
-            let result = with_spend_reserve(app, &id, "cashu_send", spend_ctx, start, || {
+            let outcome = with_spend_reserve(app, &id, "cashu_send", spend_ctx, start, || {
                 provider.cashu_send(
                     &wallet_str,
                     amount.clone(),
@@ -293,18 +511,74 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
             })
             .await;
 
-            let Some(result) = result else { return };
+            let Some(outcome) = outcome else {
+                clear_idempotent(app, idem_ctx.as_ref()).await;
+                return;
+            };
 
-            match result {
+            match outcome.result {
                 Ok(r) => {
-                    if local_memo.is_some() {
-                        if let Some(s) = &app.store {
-                            let _ = s.update_transaction_record_memo(
-                                &r.transaction_id,
-                                local_memo.as_ref(),
-                            );
-                        }
+                    if local_memo.is_some()
+                        && let Some(s) = &app.store
+                    {
+                        let _ = s
+                            .update_transaction_record_memo(&r.transaction_id, local_memo.as_ref());
                     }
+                    // Cross-link the history record with the spend ledger
+                    // reservation ids — best-effort: silently no-ops when the
+                    // provider has not yet written its history row.
+                    if !outcome.confirmed_reservation_ids.is_empty()
+                        && let Some(s) = &app.store
+                    {
+                        let _ = s.update_transaction_record_reservation_ids(
+                            &r.transaction_id,
+                            &outcome.confirmed_reservation_ids,
+                        );
+                    }
+                    // AccountingInconsistent (money moved, ledger lost the debit)
+                    // is itself a terminal state for idempotency — replay must
+                    // emit the same inconsistency so the agent never retries.
+                    if !outcome.unconfirmed_reservations.is_empty() {
+                        let (reservation_ids, confirm_errors): (Vec<_>, Vec<_>) =
+                            outcome.unconfirmed_reservations.iter().cloned().unzip();
+                        let hint = "money left the wallet but the spend ledger could not record one or more debits; reconcile manually before issuing further sends to avoid double-spending the budget".to_string();
+                        finalize_idempotent(
+                            app,
+                            idem_ctx.as_ref(),
+                            IdempotentReplayPayload::AccountingInconsistent {
+                                transaction_id: r.transaction_id.clone(),
+                                reservation_ids: reservation_ids.clone(),
+                                confirm_errors: confirm_errors.clone(),
+                                hint: hint.clone(),
+                            },
+                        )
+                        .await;
+                    } else {
+                        finalize_idempotent(
+                            app,
+                            idem_ctx.as_ref(),
+                            IdempotentReplayPayload::CashuSent {
+                                wallet: r.wallet.clone(),
+                                transaction_id: r.transaction_id.clone(),
+                                status: r.status,
+                                fee: r.fee.clone(),
+                                token: r.token.clone(),
+                                reservation_ids: outcome.confirmed_reservation_ids.clone(),
+                            },
+                        )
+                        .await;
+                    }
+
+                    // Surface ledger inconsistency BEFORE the success output so
+                    // an agent sees the inconsistency first and never retries.
+                    emit_accounting_inconsistent(
+                        app,
+                        &id,
+                        &r.transaction_id,
+                        outcome.unconfirmed_reservations,
+                        start,
+                    )
+                    .await;
                     let _ = app
                         .writer
                         .send(Output::CashuSent {
@@ -314,11 +588,15 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                             status: r.status,
                             fee: r.fee,
                             token: r.token,
+                            reservation_ids: outcome.confirmed_reservation_ids,
                             trace: trace_from(start),
                         })
                         .await;
                 }
-                Err(e) => emit_error(&app.writer, Some(id), &e, start).await,
+                Err(e) => {
+                    clear_idempotent(app, idem_ctx.as_ref()).await;
+                    emit_error(&app.writer, Some(id), &e, start).await;
+                }
             }
         }
 
@@ -343,7 +621,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented("no provider for cashu".to_string()),
+                    &PayError::not_implemented("no provider for cashu".to_string()),
                     start,
                 )
                 .await;
@@ -371,9 +649,12 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
             wallet,
             network,
             to,
+            amount,
             onchain_memo,
             local_memo,
             mints,
+            chain_id,
+            idempotency_key,
         } => {
             let start = Instant::now();
             let operation_name = "send";
@@ -390,9 +671,25 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                     "operation": operation_name, "wallet": wallet.as_deref().unwrap_or("auto"),
                     "network": network.map(|c| c.to_string()).unwrap_or_else(|| "auto".to_string()),
                     "to": to_preview, "onchain_memo": onchain_memo.as_deref().unwrap_or(""),
+                    "chain_id": chain_id,
                 }),
             )
             .await;
+
+            let idem_ctx = match enter_idempotent_send(
+                app,
+                &id,
+                idempotency_key.as_deref(),
+                send_hash.as_deref(),
+                start,
+            )
+            .await
+            {
+                IdempotencyEntry::Proceed { ctx } => ctx,
+                IdempotencyEntry::Done => return,
+            };
+
+            let to = normalize_send_target(&to, amount.as_ref(), network);
 
             let wallet_arg = wallet.as_deref();
             let (target_network, wallet_for_call) =
@@ -404,17 +701,108 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                     match resolve_wallet_for_provider(app, wallet_arg, network).await {
                         Ok(resolved) => resolved,
                         Err(e) => {
+                            clear_idempotent(app, idem_ctx.as_ref()).await;
                             emit_error(&app.writer, Some(id), &e, start).await;
                             return;
                         }
                     }
                 };
 
+            // EVM chain-pinning: when the agent supplied chain_id, verify it
+            // matches the wallet before any broadcast. Catches a Base wallet
+            // being sent to from an "I expected Arbitrum" prompt — the agent
+            // gets `wrong_chain` instead of a successful send on the wrong
+            // chain that the agent has no way to detect after the fact.
+            // When chain_id is omitted we cannot refuse (would break the
+            // happy path for callers that don't track it), but we DO emit a
+            // log so an observant agent / operator can spot accidental
+            // cross-chain sends after the fact.
+            if target_network == Network::Evm {
+                let meta = app
+                    .store
+                    .as_deref()
+                    .and_then(|s| s.load_wallet_metadata(&wallet_for_call).ok());
+                let wallet_chain = meta.as_ref().and_then(|m| m.evm_chain_id).unwrap_or(8453); // Base default; mirrors EvmProvider::chain_id_for_wallet
+                if let Some(supplied) = chain_id {
+                    if supplied != wallet_chain {
+                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        emit_error(
+                            &app.writer,
+                            Some(id),
+                            &PayError::Forbidden {
+                                message: format!(
+                                    "wrong_chain: supplied chain_id {supplied} does not match wallet chain_id {wallet_chain}"
+                                ),
+                                hint: Some(
+                                    "verify the wallet is configured for the chain the agent intends; use wallet_config_set to change chain_id, or omit chain_id from the request"
+                                        .to_string(),
+                                ),
+                            },
+                            start,
+                        )
+                        .await;
+                        return;
+                    }
+                } else {
+                    emit_log(
+                        app,
+                        "evm_chain_unpinned",
+                        Some(id.clone()),
+                        serde_json::json!({
+                            "wallet": wallet_for_call,
+                            "wallet_chain_id": wallet_chain,
+                            "hint": "send proceeded without an explicit chain_id; pass `chain_id` to pin the request to the wallet's chain and get a hard refuse on mismatch",
+                        }),
+                    )
+                    .await;
+                }
+            }
+
+            // SOL cluster pinning: when the wallet was tagged with a cluster
+            // and the active RPC endpoint's hostname identifies a different
+            // one, refuse the send. Heuristic — unknown hosts (private RPC,
+            // proxy) yield no opinion and the check is skipped. This catches
+            // the common case of the wallet metadata pointing at mainnet but
+            // the rpc_endpoints having been swapped to a devnet URL.
+            if target_network == Network::Sol
+                && let Some(meta) = app
+                    .store
+                    .as_deref()
+                    .and_then(|s| s.load_wallet_metadata(&wallet_for_call).ok())
+                && let Some(expected) = meta.sol_cluster.as_deref()
+            {
+                let endpoints = meta.sol_rpc_endpoints.as_deref().unwrap_or(&[]);
+                for ep in endpoints {
+                    if let Some(detected) = sol_cluster_from_endpoint(ep)
+                        && detected != expected
+                    {
+                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        emit_error(
+                                        &app.writer,
+                                        Some(id),
+                                        &PayError::Forbidden {
+                                            message: format!(
+                                                "wrong_cluster: wallet tagged sol_cluster={expected} but rpc endpoint '{ep}' looks like {detected}"
+                                            ),
+                                            hint: Some(
+                                                "the wallet's recorded cluster does not match its configured rpc endpoint; either fix sol_rpc_endpoints via wallet_config_set or create a new wallet for the intended cluster"
+                                                    .to_string(),
+                                            ),
+                                        },
+                                        start,
+                                    )
+                                    .await;
+                        return;
+                    }
+                }
+            }
+
             let Some(provider) = get_provider(&app.providers, target_network) else {
+                clear_idempotent(app, idem_ctx.as_ref()).await;
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented(format!("no provider for {target_network}")),
+                    &PayError::not_implemented(format!("no provider for {target_network}")),
                     start,
                 )
                 .await;
@@ -429,6 +817,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                 {
                     Ok(q) => q,
                     Err(e) => {
+                        clear_idempotent(app, idem_ctx.as_ref()).await;
                         emit_error(&app.writer, Some(id), &e, start).await;
                         return;
                     }
@@ -443,7 +832,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                 Vec::new()
             };
 
-            let result = with_spend_reserves(app, &id, "send", spend_contexts, start, || {
+            let outcome = with_spend_reserves(app, &id, "send", spend_contexts, start, || {
                 provider.send(
                     &wallet_for_call,
                     &to,
@@ -453,18 +842,65 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
             })
             .await;
 
-            let Some(result) = result else { return };
+            let Some(outcome) = outcome else {
+                clear_idempotent(app, idem_ctx.as_ref()).await;
+                return;
+            };
 
-            match result {
+            match outcome.result {
                 Ok(r) => {
-                    if local_memo.is_some() {
-                        if let Some(s) = &app.store {
-                            let _ = s.update_transaction_record_memo(
-                                &r.transaction_id,
-                                local_memo.as_ref(),
-                            );
-                        }
+                    if local_memo.is_some()
+                        && let Some(s) = &app.store
+                    {
+                        let _ = s
+                            .update_transaction_record_memo(&r.transaction_id, local_memo.as_ref());
                     }
+                    if !outcome.confirmed_reservation_ids.is_empty()
+                        && let Some(s) = &app.store
+                    {
+                        let _ = s.update_transaction_record_reservation_ids(
+                            &r.transaction_id,
+                            &outcome.confirmed_reservation_ids,
+                        );
+                    }
+                    if !outcome.unconfirmed_reservations.is_empty() {
+                        let (reservation_ids, confirm_errors): (Vec<_>, Vec<_>) =
+                            outcome.unconfirmed_reservations.iter().cloned().unzip();
+                        let hint = "money left the wallet but the spend ledger could not record one or more debits; reconcile manually before issuing further sends to avoid double-spending the budget".to_string();
+                        finalize_idempotent(
+                            app,
+                            idem_ctx.as_ref(),
+                            IdempotentReplayPayload::AccountingInconsistent {
+                                transaction_id: r.transaction_id.clone(),
+                                reservation_ids,
+                                confirm_errors,
+                                hint,
+                            },
+                        )
+                        .await;
+                    } else {
+                        finalize_idempotent(
+                            app,
+                            idem_ctx.as_ref(),
+                            IdempotentReplayPayload::Sent {
+                                wallet: r.wallet.clone(),
+                                transaction_id: r.transaction_id.clone(),
+                                amount: r.amount.clone(),
+                                fee: r.fee.clone(),
+                                preimage: r.preimage.clone(),
+                                reservation_ids: outcome.confirmed_reservation_ids.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                    emit_accounting_inconsistent(
+                        app,
+                        &id,
+                        &r.transaction_id,
+                        outcome.unconfirmed_reservations,
+                        start,
+                    )
+                    .await;
                     let _ = app
                         .writer
                         .send(Output::Sent {
@@ -474,15 +910,76 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                             amount: r.amount,
                             fee: r.fee,
                             preimage: r.preimage,
+                            reservation_ids: outcome.confirmed_reservation_ids,
                             trace: trace_from(start),
                         })
                         .await;
                 }
-                Err(e) => emit_error(&app.writer, Some(id), &e, start).await,
+                Err(e) => {
+                    clear_idempotent(app, idem_ctx.as_ref()).await;
+                    emit_error(&app.writer, Some(id), &e, start).await;
+                }
             }
         }
 
         _ => {}
+    }
+}
+
+/// Embed `amount` into a BIP21-style send target when the explicit Input::Send.amount
+/// is provided and the URI does not already carry one. This lets agents pass
+/// `{to: "<address>", amount: {...}}` without hand-building network-specific URIs;
+/// existing pre-built URIs and Lightning/Cashu paths pass through unchanged.
+fn normalize_send_target(to: &str, amount: Option<&Amount>, network: Option<Network>) -> String {
+    let Some(amount) = amount else {
+        return to.to_string();
+    };
+    if to.contains("?amount=") || to.contains("&amount=") {
+        // Caller already encoded an amount; respect it (URI wins; explicit
+        // Amount is ignored to avoid silent mismatch).
+        return to.to_string();
+    }
+    let already_has_scheme = to.contains(':');
+    match network {
+        Some(Network::Btc) => {
+            if already_has_scheme {
+                if to.contains('?') {
+                    format!("{to}&amount={}", amount.value)
+                } else {
+                    format!("{to}?amount={}", amount.value)
+                }
+            } else {
+                format!("bitcoin:{to}?amount={}", amount.value)
+            }
+        }
+        Some(Network::Sol) => {
+            let qs = format!("amount={}&token={}", amount.value, amount.token);
+            if already_has_scheme {
+                if to.contains('?') {
+                    format!("{to}&{qs}")
+                } else {
+                    format!("{to}?{qs}")
+                }
+            } else {
+                format!("solana:{to}?{qs}")
+            }
+        }
+        Some(Network::Evm) => {
+            let qs = format!("amount={}&token={}", amount.value, amount.token);
+            if already_has_scheme {
+                if to.contains('?') {
+                    format!("{to}&{qs}")
+                } else {
+                    format!("{to}?{qs}")
+                }
+            } else {
+                format!("ethereum:{to}?{qs}")
+            }
+        }
+        // Lightning encodes amount in the invoice; Cashu uses CashuSend.
+        // Passing amount here is a no-op rather than an error to keep the
+        // wire surface uniform for agents that may set amount unconditionally.
+        _ => to.to_string(),
     }
 }
 

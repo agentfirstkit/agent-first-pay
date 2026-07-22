@@ -1,5 +1,4 @@
 use crate::types::*;
-use agent_first_data::cli_parse_log_filters;
 use std::path::Path;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -92,13 +91,16 @@ fn sanitize_startup_argv(argv: Vec<String>) -> Vec<String> {
 
 /// Decide whether startup log should be emitted for this process.
 /// Startup is emitted when explicit startup logging is requested or any log filter is set.
-pub fn should_emit_startup_log(log_filters: &[String], startup_requested: bool) -> bool {
+pub fn should_emit_startup_log(
+    log_filters: &agent_first_data::LogFilters,
+    startup_requested: bool,
+) -> bool {
     startup_requested || !log_filters.is_empty()
 }
 
 /// Unified startup log builder + gate used by all runtime modes.
 pub fn maybe_startup_log(
-    log_filters: &[String],
+    log_filters: &agent_first_data::LogFilters,
     startup_requested: bool,
     argv: Option<Vec<String>>,
     config: Option<&RuntimeConfig>,
@@ -128,26 +130,6 @@ impl RuntimeConfig {
         cfg.data_dir = data_dir.to_string();
         Ok(cfg)
     }
-
-    #[allow(dead_code)]
-    pub fn apply_update(&mut self, patch: ConfigPatch) {
-        if let Some(v) = patch.data_dir {
-            self.data_dir = v;
-        }
-        if let Some(v) = patch.log {
-            self.log = cli_parse_log_filters(&v);
-        }
-        if let Some(rpc_nodes) = patch.afpay_rpc {
-            for (name, cfg) in rpc_nodes {
-                self.afpay_rpc.insert(name, cfg);
-            }
-        }
-        if let Some(providers) = patch.providers {
-            for (network, rpc_name) in providers {
-                self.providers.insert(network, rpc_name);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -156,13 +138,20 @@ mod tests {
 
     #[test]
     fn maybe_startup_log_disabled_without_filters_or_request() {
-        let out = maybe_startup_log(&[], false, None, None, serde_json::json!({"mode": "test"}));
+        let filters = agent_first_data::LogFilters::new(Vec::<String>::new());
+        let out = maybe_startup_log(
+            &filters,
+            false,
+            None,
+            None,
+            serde_json::json!({"mode": "test"}),
+        );
         assert!(out.is_none());
     }
 
     #[test]
     fn maybe_startup_log_enabled_with_filters() {
-        let filters = vec!["cashu".to_string()];
+        let filters = agent_first_data::LogFilters::new(vec!["cashu".to_string()]);
         let out = maybe_startup_log(
             &filters,
             false,
@@ -175,7 +164,14 @@ mod tests {
 
     #[test]
     fn maybe_startup_log_enabled_with_explicit_request() {
-        let out = maybe_startup_log(&[], true, None, None, serde_json::json!({"mode": "test"}));
+        let filters = agent_first_data::LogFilters::new(Vec::<String>::new());
+        let out = maybe_startup_log(
+            &filters,
+            true,
+            None,
+            None,
+            serde_json::json!({"mode": "test"}),
+        );
         assert!(out.is_some());
     }
 

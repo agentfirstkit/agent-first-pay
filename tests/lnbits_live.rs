@@ -23,8 +23,8 @@
 
 use agent_first_pay::provider::ln::LnProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
-use agent_first_pay::store::redb_store::RedbStore;
 use agent_first_pay::store::StorageBackend;
+use agent_first_pay::store::redb_store::RedbStore;
 use agent_first_pay::types::{Amount, LnWalletBackend, LnWalletCreateRequest, Network};
 use std::sync::Arc;
 
@@ -147,7 +147,7 @@ async fn lnbits_live_receive_claim_unpaid() {
     let payment_hash = dep.quote_id.as_deref().unwrap_or("");
 
     match provider.receive_claim(&wallet_id, payment_hash).await {
-        Err(PayError::NetworkError(_)) => {
+        Err(PayError::NetworkError { .. }) => {
             // Expected: invoice not yet paid
         }
         Ok(amount) => {
@@ -180,7 +180,7 @@ async fn lnbits_live_send_invalid_invoice_fails() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, PayError::InvalidAmount(_)),
+        matches!(err, PayError::InvalidAmount { .. }),
         "invalid invoice should fail validation, got: {err}"
     );
 }
@@ -195,7 +195,7 @@ async fn lnbits_live_send_quote_invalid_invoice_fails() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, PayError::InvalidAmount(_)),
+        matches!(err, PayError::InvalidAmount { .. }),
         "invalid invoice should fail quote parsing, got: {err}"
     );
 }
@@ -212,7 +212,7 @@ async fn lnbits_live_wallet_not_found() {
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
-        matches!(err, PayError::WalletNotFound(_)),
+        matches!(err, PayError::WalletNotFound { .. }),
         "expected WalletNotFound, got: {err}"
     );
 }
@@ -224,7 +224,7 @@ async fn lnbits_live_receive_info_requires_amount() {
 
     let err = provider.receive_info(&wallet_id, None).await.unwrap_err();
     assert!(
-        matches!(err, PayError::InvalidAmount(_)),
+        matches!(err, PayError::InvalidAmount { .. }),
         "deposit without amount should fail, got: {err}"
     );
 }

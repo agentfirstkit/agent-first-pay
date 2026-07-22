@@ -1,8 +1,8 @@
 use crate::provider::PayError;
 use crate::store::wallet::{self, WalletMetadata};
 use crate::types::*;
-use bdk_wallet::bitcoin::bip32::Xpriv;
 use bdk_wallet::bitcoin::Network as BtcNetwork;
+use bdk_wallet::bitcoin::bip32::Xpriv;
 use bdk_wallet::chain::Merge;
 use bdk_wallet::keys::bip39::Mnemonic;
 use bdk_wallet::{KeychainKind, Wallet};
@@ -20,10 +20,10 @@ pub(crate) fn descriptors_from_mnemonic(
     address_type: &str,
 ) -> Result<(String, String), PayError> {
     let mnemonic = Mnemonic::parse(mnemonic_str)
-        .map_err(|e| PayError::InternalError(format!("invalid mnemonic: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("invalid mnemonic: {e}")))?;
     let seed = mnemonic.to_seed("");
     let xprv = Xpriv::new_master(btc_network, &seed)
-        .map_err(|e| PayError::InternalError(format!("derive master key: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("derive master key: {e}")))?;
 
     let coin_type = match btc_network {
         BtcNetwork::Bitcoin => 0,
@@ -50,7 +50,7 @@ pub(crate) fn open_bdk_wallet_with_dir(
     let seed_secret = meta
         .seed_secret
         .as_deref()
-        .ok_or_else(|| PayError::InternalError("wallet has no seed_secret".to_string()))?;
+        .ok_or_else(|| PayError::internal_error("wallet has no seed_secret".to_string()))?;
 
     let btc_net = btc_network_for_meta(meta);
     let addr_type = meta.btc_address_type.as_deref().unwrap_or("taproot");
@@ -59,25 +59,22 @@ pub(crate) fn open_bdk_wallet_with_dir(
     let changeset_path = wallet::wallet_data_directory_path_for_wallet_metadata(data_dir, meta)
         .join("bdk_changeset.json");
 
-    if changeset_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&changeset_path) {
-            if let Ok(changeset) = serde_json::from_str::<bdk_wallet::ChangeSet>(&raw) {
-                if let Ok(Some(wallet)) = Wallet::load()
-                    .descriptor(KeychainKind::External, Some(external.clone()))
-                    .descriptor(KeychainKind::Internal, Some(internal.clone()))
-                    .extract_keys()
-                    .load_wallet_no_persist(changeset)
-                {
-                    return Ok(wallet);
-                }
-            }
-        }
+    if changeset_path.exists()
+        && let Ok(raw) = std::fs::read_to_string(&changeset_path)
+        && let Ok(changeset) = serde_json::from_str::<bdk_wallet::ChangeSet>(&raw)
+        && let Ok(Some(wallet)) = Wallet::load()
+            .descriptor(KeychainKind::External, Some(external.clone()))
+            .descriptor(KeychainKind::Internal, Some(internal.clone()))
+            .extract_keys()
+            .load_wallet_no_persist(changeset)
+    {
+        return Ok(wallet);
     }
 
     Wallet::create(external, internal)
         .network(btc_net)
         .create_wallet_no_persist()
-        .map_err(|e| PayError::InternalError(format!("create bdk wallet: {e}")))
+        .map_err(|e| PayError::internal_error(format!("create bdk wallet: {e}")))
 }
 
 pub(crate) fn persist_changeset(
@@ -94,7 +91,7 @@ pub(crate) fn persist_changeset(
 
     let mut full_changeset = if changeset_path.exists() {
         let raw = std::fs::read_to_string(&changeset_path)
-            .map_err(|e| PayError::InternalError(format!("read changeset: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("read changeset: {e}")))?;
         serde_json::from_str::<bdk_wallet::ChangeSet>(&raw).unwrap_or_default()
     } else {
         bdk_wallet::ChangeSet::default()
@@ -103,9 +100,9 @@ pub(crate) fn persist_changeset(
     full_changeset.merge(wallet.take_staged().unwrap_or_default());
 
     let json = serde_json::to_string(&full_changeset)
-        .map_err(|e| PayError::InternalError(format!("serialize changeset: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("serialize changeset: {e}")))?;
     std::fs::write(&changeset_path, json)
-        .map_err(|e| PayError::InternalError(format!("write changeset: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("write changeset: {e}")))?;
     Ok(())
 }
 
@@ -113,14 +110,14 @@ pub(crate) fn wallet_address(meta: &WalletMetadata) -> Result<String, PayError> 
     let seed_secret = meta
         .seed_secret
         .as_deref()
-        .ok_or_else(|| PayError::InternalError("wallet has no seed_secret".to_string()))?;
+        .ok_or_else(|| PayError::internal_error("wallet has no seed_secret".to_string()))?;
     let btc_net = btc_network_for_meta(meta);
     let addr_type = meta.btc_address_type.as_deref().unwrap_or("taproot");
     let (external, internal) = descriptors_from_mnemonic(seed_secret, btc_net, addr_type)?;
     let wallet = Wallet::create(external, internal)
         .network(btc_net)
         .create_wallet_no_persist()
-        .map_err(|e| PayError::InternalError(format!("derive address: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("derive address: {e}")))?;
     let addr_info = wallet.peek_address(KeychainKind::External, 0);
     Ok(addr_info.address.to_string())
 }
@@ -158,16 +155,15 @@ pub(crate) fn parse_transfer_target(to: &str) -> Result<BtcTransferTarget, PayEr
     if let Some(q) = query {
         for pair in q.split('&') {
             if let Some(val) = pair.strip_prefix("amount=") {
-                amount_sats =
-                    Some(val.parse::<u64>().map_err(|e| {
-                        PayError::InvalidAmount(format!("invalid amount in URI: {e}"))
-                    })?);
+                amount_sats = Some(val.parse::<u64>().map_err(|e| {
+                    PayError::invalid_amount(format!("invalid amount in URI: {e}"))
+                })?);
             }
         }
     }
 
     let amount_sats = amount_sats.ok_or_else(|| {
-        PayError::InvalidAmount(
+        PayError::invalid_amount(
             "amount is required; use bitcoin:<addr>?amount=<sats> or <addr>?amount=<sats>"
                 .to_string(),
         )

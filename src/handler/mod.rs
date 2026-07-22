@@ -4,6 +4,8 @@ mod history;
 mod limit;
 mod pay;
 mod receive_watch;
+mod reconcile;
+pub mod schema;
 mod spend_guard;
 mod wallet;
 
@@ -28,10 +30,10 @@ use crate::spend::SpendLedger;
 use crate::store::StorageBackend;
 use crate::types::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 
 use helpers::*;
@@ -210,6 +212,7 @@ pub async fn startup_provider_validation_errors(config: &RuntimeConfig) -> Vec<O
                     "add [afpay_rpc.{rpc_name}] with endpoint and endpoint_secret to config.toml"
                 )),
                 retryable: false,
+                retry_after_ms: None,
                 trace: Trace::from_duration(0),
             });
         }
@@ -242,6 +245,7 @@ pub async fn startup_provider_validation_errors(config: &RuntimeConfig) -> Vec<O
                     error: format!("afpay_rpc.{rpc_name} ({}): {err}", rpc_cfg.endpoint),
                     hint: Some("check endpoint address and that the daemon is running".to_string()),
                     retryable: true,
+                    retry_after_ms: None,
                     trace: Trace::from_duration(0),
                 });
             }
@@ -250,7 +254,32 @@ pub async fn startup_provider_validation_errors(config: &RuntimeConfig) -> Vec<O
     errors
 }
 
-pub async fn dispatch(app: &App, input: Input) {
+pub async fn dispatch(app: &App, request: Request) {
+    let Request { dry_run, input } = request;
+
+    // Dry-run short-circuit: emit Output::DryRun for every Input variant
+    // without acquiring locks, opening providers, or hitting external services.
+    // Works uniformly across cli/pipe/rpc/rest so an agent can validate any
+    // request without side-effects regardless of transport.
+    if dry_run {
+        let params = serde_json::to_value(&input).unwrap_or(serde_json::Value::Null);
+        let command = params
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let _ = app
+            .writer
+            .send(Output::DryRun {
+                id: extract_id(&input),
+                command,
+                params,
+                trace: Trace::from_duration(0),
+            })
+            .await;
+        return;
+    }
+
     // Acquire per-operation file lock for redb write operations.
     // Postgres handles its own concurrency; no file lock needed.
     #[cfg(feature = "redb")]
@@ -272,12 +301,12 @@ pub async fn dispatch(app: &App, input: Input) {
 
     // Resolve wallet labels → wallet IDs before dispatch
     let mut input = input;
-    if let Some(store) = &app.store {
-        if let Err(e) = resolve_wallet_labels(&mut input, store.as_ref()) {
-            let id = extract_id(&input);
-            emit_error(&app.writer, id, &e, Instant::now()).await;
-            return;
-        }
+    if let Some(store) = &app.store
+        && let Err(e) = resolve_wallet_labels(&mut input, store.as_ref())
+    {
+        let id = extract_id(&input);
+        emit_error(&app.writer, id, &e, Instant::now()).await;
+        return;
     }
 
     match &input {
@@ -326,53 +355,58 @@ pub async fn dispatch(app: &App, input: Input) {
             return;
         }
 
+        // Reservation reconcile (operator action; local-only)
+        Input::ReconcileReservation { .. } => {
+            reconcile::dispatch_reconcile(app, input).await;
+            emit_migration_log(app).await;
+            return;
+        }
+
         // Inline handlers (small enough to keep in mod.rs)
-        Input::Config(_) | Input::ConfigShow { .. } | Input::Version | Input::Close => {}
+        Input::ConfigGet { .. }
+        | Input::ConfigSet { .. }
+        | Input::Version
+        | Input::Schema
+        | Input::Close => {}
     }
 
-    // Inline handlers for Config, ConfigShow, Version, Close
+    // Inline handlers for ConfigGet, ConfigSet, Version, Close
     match input {
-        Input::ConfigShow { .. } => {
-            let cfg = app.config.read().await;
-            let _ = app.writer.send(Output::Config(cfg.clone())).await;
-        }
-        Input::Config(patch) => {
+        Input::ConfigGet { key, .. } => {
             let start = Instant::now();
-            let ConfigPatch {
-                data_dir,
-                log,
-                exchange_rate,
-                afpay_rpc,
-                providers,
-            } = patch;
-
-            let mut unsupported = Vec::new();
-            if data_dir.is_some() {
-                unsupported.push("data_dir");
+            let cfg = app.config.read().await;
+            match key {
+                None => {
+                    let _ = app.writer.send(Output::Config(cfg.clone())).await;
+                }
+                Some(k) => match cfg.get_key(&k) {
+                    Ok(value) => {
+                        let _ = app
+                            .writer
+                            .send(Output::ConfigValue {
+                                key: k,
+                                value,
+                                trace: Trace::from_duration(start.elapsed().as_millis() as u64),
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        emit_error(&app.writer, None, &PayError::invalid_request(e), start).await;
+                    }
+                },
             }
-            if afpay_rpc.is_some() {
-                unsupported.push("afpay_rpc");
-            }
-            if providers.is_some() {
-                unsupported.push("providers");
-            }
-            if exchange_rate.is_some() {
-                unsupported.push("exchange_rate");
-            }
-            if !unsupported.is_empty() {
-                let err = PayError::NotImplemented(format!(
-                    "runtime config only supports 'log'; unsupported fields: {}",
-                    unsupported.join(", ")
-                ));
-                emit_error(&app.writer, None, &err, start).await;
-                return;
-            }
-
+        }
+        Input::ConfigSet { key, values, .. } => {
+            let start = Instant::now();
             let mut cfg = app.config.write().await;
-            if let Some(v) = log {
-                cfg.log = agent_first_data::cli_parse_log_filters(&v);
+            match cfg.set_key(&key, &values) {
+                Ok(()) => {
+                    let _ = app.writer.send(Output::Config(cfg.clone())).await;
+                }
+                Err(e) => {
+                    emit_error(&app.writer, None, &PayError::invalid_request(e), start).await;
+                }
             }
-            let _ = app.writer.send(Output::Config(cfg.clone())).await;
         }
 
         Input::Version => {
@@ -386,6 +420,17 @@ pub async fn dispatch(app: &App, input: Input) {
                         requests_total: app.requests_total.load(Ordering::Relaxed),
                         in_flight: app.in_flight.lock().await.len(),
                     },
+                })
+                .await;
+        }
+
+        Input::Schema => {
+            let start = Instant::now();
+            let _ = app
+                .writer
+                .send(Output::Schema {
+                    schema: schema::wire_protocol_schema(),
+                    trace: Trace::from_duration(start.elapsed().as_millis() as u64),
                 })
                 .await;
         }

@@ -1,21 +1,33 @@
 pub mod crypto;
 
-use self::crypto::Cipher;
+use self::crypto::{Cipher, HANDSHAKE_SALT_LEN};
 use crate::handler::{self, App};
 use crate::types::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tonic::Code;
 use tonic::{Request, Response, Status};
+
+/// Default replay-cache TTL for nonces within a single session. Long enough to
+/// cover normal request round-trips + modest clock drift, short enough that the
+/// cache can't grow unbounded under load.
+const REPLAY_NONCE_TTL: Duration = Duration::from_secs(120);
+/// Idle timeout for an RPC session. Sessions older than this are evicted on the
+/// next handshake or call; the client must re-handshake transparently.
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
+/// Hard cap on concurrent sessions to bound memory and keep the eviction sweep
+/// cheap. A daemon serving 1024 distinct clients at once is already extreme.
+const MAX_SESSIONS: usize = 1024;
 
 pub struct RpcInit {
     pub listen: String,
     pub rpc_secret: Option<String>,
     pub allow_public_listen: bool,
-    pub log: Vec<String>,
+    pub log: agent_first_data::LogFilters,
     pub data_dir: Option<String>,
     pub startup_argv: Vec<String>,
     pub startup_args: serde_json::Value,
@@ -27,42 +39,116 @@ pub mod proto {
 }
 
 use proto::af_pay_server::{AfPay, AfPayServer};
-use proto::{EncryptedRequest, EncryptedResponse};
+use proto::{EncryptedRequest, EncryptedResponse, HandshakeRequest, HandshakeResponse};
 
 struct AfPayService {
-    cipher: Cipher,
+    /// Server-side copy of the PSK, retained so each Handshake can re-derive
+    /// a fresh Cipher with a new per-session salt. The PSK never leaves the
+    /// process; the wire only ever sees the salt + ciphertext.
+    psk: Arc<String>,
+    sessions: Arc<Mutex<HashMap<u64, Arc<SessionEntry>>>>,
     config: RuntimeConfig,
     rate_limiter: Option<RpcRateLimiter>,
-    replay_cache: Mutex<ReplayCache>,
 }
 
+/// Per-session encryption state. Cipher is cloneable (32-byte key), so callers
+/// can pull it out under the outer lock without holding it across decrypt/encrypt.
+/// The inner mutex protects replay cache + last-used timestamp.
+struct SessionEntry {
+    cipher: Cipher,
+    inner: Mutex<SessionInner>,
+}
+
+struct SessionInner {
+    replay_cache: ReplayCache,
+    last_used: Instant,
+}
+
+/// Time-bounded replay protection. Each accepted nonce is stamped with its
+/// arrival `Instant`; entries older than `REPLAY_NONCE_TTL` are evicted on each
+/// insert. Replaying a nonce inside the TTL window is rejected; outside the
+/// window the original entry is already gone and the request would have failed
+/// AEAD decrypt anyway (session salt is fresh per handshake).
 struct ReplayCache {
-    seen: HashSet<Vec<u8>>,
-    order: VecDeque<Vec<u8>>,
-    max_entries: usize,
+    seen: HashMap<Vec<u8>, Instant>,
+    ttl: Duration,
 }
 
 impl ReplayCache {
-    fn new(max_entries: usize) -> Self {
+    fn new(ttl: Duration) -> Self {
         Self {
-            seen: HashSet::new(),
-            order: VecDeque::new(),
-            max_entries,
+            seen: HashMap::new(),
+            ttl,
         }
     }
 
-    fn insert_unique(&mut self, nonce: &[u8]) -> bool {
-        let nonce = nonce.to_vec();
-        if !self.seen.insert(nonce.clone()) {
+    fn insert_unique(&mut self, nonce: &[u8], now: Instant) -> bool {
+        self.evict_expired(now);
+        if self.seen.contains_key(nonce) {
             return false;
         }
-        self.order.push_back(nonce);
-        while self.order.len() > self.max_entries {
-            if let Some(oldest) = self.order.pop_front() {
-                self.seen.remove(&oldest);
-            }
-        }
+        self.seen.insert(nonce.to_vec(), now);
         true
+    }
+
+    fn evict_expired(&mut self, now: Instant) {
+        let ttl = self.ttl;
+        self.seen.retain(|_, t| now.duration_since(*t) < ttl);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod replay_cache_tests {
+    use super::ReplayCache;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_nonce_accepted_replay_rejected() {
+        let mut cache = ReplayCache::new(Duration::from_secs(60));
+        let now = Instant::now();
+        let nonce = [1u8, 2, 3];
+        assert!(cache.insert_unique(&nonce, now), "first sighting is unique");
+        assert!(
+            !cache.insert_unique(&nonce, now),
+            "second sighting must be rejected within TTL"
+        );
+    }
+
+    #[test]
+    fn nonce_reusable_after_ttl_expires() {
+        // Use a very short TTL so we can pin instants without sleeping.
+        let mut cache = ReplayCache::new(Duration::from_millis(10));
+        let t0 = Instant::now();
+        let nonce = [9u8, 9, 9];
+        assert!(cache.insert_unique(&nonce, t0));
+        // Same instant → still in the window → rejected.
+        assert!(!cache.insert_unique(&nonce, t0));
+        // Past the TTL → entry is evicted on insert, the nonce is fresh again.
+        let later = t0 + Duration::from_millis(50);
+        assert!(
+            cache.insert_unique(&nonce, later),
+            "nonce older than TTL is no longer protected"
+        );
+    }
+
+    #[test]
+    fn evict_drops_only_old_entries() {
+        let mut cache = ReplayCache::new(Duration::from_secs(1));
+        let t0 = Instant::now();
+        cache.insert_unique(&[1], t0);
+        cache.insert_unique(&[2], t0 + Duration::from_millis(500));
+        // Sweep at t0 + 1.2s: nonce [1] is older than 1s and should be evicted;
+        // nonce [2] is 700ms old and should survive.
+        cache.evict_expired(t0 + Duration::from_millis(1200));
+        assert!(
+            cache.insert_unique(&[1], t0 + Duration::from_millis(1200)),
+            "evicted nonce is reusable"
+        );
+        assert!(
+            !cache.insert_unique(&[2], t0 + Duration::from_millis(1200)),
+            "still-fresh nonce stays protected"
+        );
     }
 }
 
@@ -165,8 +251,122 @@ fn rpc_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+impl AfPayService {
+    /// Generate a fresh `(salt, session_id)` pair, derive a Cipher from the PSK
+    /// plus salt, and insert into the session table. Old entries are evicted
+    /// either lazily (idle TTL) or by FIFO when capacity is reached.
+    fn open_session(&self) -> Result<(Vec<u8>, u64), Status> {
+        let mut salt = vec![0u8; HANDSHAKE_SALT_LEN];
+        getrandom::fill(&mut salt).map_err(|e| Status::internal(format!("random salt: {e}")))?;
+        let mut id_bytes = [0u8; 8];
+        getrandom::fill(&mut id_bytes)
+            .map_err(|e| Status::internal(format!("random session id: {e}")))?;
+        let session_id = u64::from_le_bytes(id_bytes);
+
+        let cipher = Cipher::from_secret_with_salt(&self.psk, &salt);
+        let entry = Arc::new(SessionEntry {
+            cipher,
+            inner: Mutex::new(SessionInner {
+                replay_cache: ReplayCache::new(REPLAY_NONCE_TTL),
+                last_used: Instant::now(),
+            }),
+        });
+
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Status::internal("session table poisoned"))?;
+        // Evict by idle TTL first; cheap when there are few stale entries.
+        let cutoff = Instant::now() - SESSION_IDLE_TIMEOUT;
+        sessions.retain(|_, e| match e.inner.lock() {
+            Ok(g) => g.last_used >= cutoff,
+            Err(_) => false,
+        });
+        // Hard cap: if still above ceiling, drop the oldest entry by last_used
+        // until we're under. This is a last-resort defense — in practice idle
+        // TTL keeps us far below MAX_SESSIONS.
+        while sessions.len() >= MAX_SESSIONS {
+            let oldest_key = sessions
+                .iter()
+                .filter_map(|(k, e)| e.inner.lock().ok().map(|g| (g.last_used, *k)))
+                .min()
+                .map(|(_, k)| k);
+            match oldest_key {
+                Some(k) => {
+                    sessions.remove(&k);
+                }
+                None => break,
+            }
+        }
+        sessions.insert(session_id, entry);
+        Ok((salt, session_id))
+    }
+
+    /// Look up a session, refresh its last-used timestamp, and replay-check the
+    /// nonce. Returns the session's cipher (clone — cheap) on success.
+    fn use_session(&self, session_id: u64, nonce: &[u8]) -> Result<Cipher, Status> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Status::internal("session table poisoned"))?;
+        let entry = sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("session_expired"))?;
+        drop(sessions);
+
+        let now = Instant::now();
+        let mut inner = entry
+            .inner
+            .lock()
+            .map_err(|_| Status::internal("session inner poisoned"))?;
+        if now.duration_since(inner.last_used) >= SESSION_IDLE_TIMEOUT {
+            return Err(Status::unauthenticated("session_expired"));
+        }
+        if !inner.replay_cache.insert_unique(nonce, now) {
+            return Err(Status::unauthenticated("replayed request nonce"));
+        }
+        inner.last_used = now;
+        Ok(entry.cipher.clone())
+    }
+}
+
 #[tonic::async_trait]
 impl AfPay for AfPayService {
+    async fn handshake(
+        &self,
+        request: Request<HandshakeRequest>,
+    ) -> Result<Response<HandshakeResponse>, Status> {
+        // Rate-limit handshakes on the same token bucket as `call`. Without
+        // this, an unauthenticated peer can churn `MAX_SESSIONS` slots in a
+        // tight loop and starve legitimate clients — `open_session` is
+        // otherwise gated only by the hard cap, with a 1h idle timeout
+        // before slots free up. Keep the guard alive for the duration of
+        // session-table mutation so concurrent floods can't slip past.
+        let _rate_guard = if let Some(rl) = &self.rate_limiter {
+            match rl.try_acquire() {
+                Ok(guard) => Some(guard),
+                Err(()) => {
+                    return Err(Status::resource_exhausted("rate limit exceeded"));
+                }
+            }
+        } else {
+            None
+        };
+
+        let _req = request.into_inner();
+        // We deliberately ignore client_nonce in salt derivation right now —
+        // the server's own random salt suffices for the "defeat rainbow tables
+        // for weak PSKs" goal. Keeping the field in the proto lets a future
+        // hardening pass mix it in without a wire break.
+        let (salt, session_id) = self.open_session()?;
+        Ok(Response::new(HandshakeResponse {
+            salt,
+            session_id,
+            session_idle_timeout_s: SESSION_IDLE_TIMEOUT.as_secs(),
+        }))
+    }
+
     async fn call(
         &self,
         request: Request<EncryptedRequest>,
@@ -185,23 +385,16 @@ impl AfPay for AfPayService {
             None
         };
 
-        match self.replay_cache.lock() {
-            Ok(mut cache) => {
-                if !cache.insert_unique(&req.nonce) {
-                    let status = Status::unauthenticated("replayed request nonce");
-                    emit_rpc_response_log(&self.config, None, &[], Some(&status));
-                    return Err(status);
-                }
-            }
-            Err(_) => {
-                let status = Status::internal("replay cache poisoned");
+        let cipher = match self.use_session(req.session_id, &req.nonce) {
+            Ok(c) => c,
+            Err(status) => {
                 emit_rpc_response_log(&self.config, None, &[], Some(&status));
                 return Err(status);
             }
-        }
+        };
 
         // Decrypt request
-        let plaintext = match self.cipher.decrypt(&req.nonce, &req.ciphertext) {
+        let plaintext = match cipher.decrypt(&req.nonce, &req.ciphertext) {
             Ok(plaintext) => plaintext,
             Err(_) => {
                 emit_rpc_request_log(
@@ -224,9 +417,9 @@ impl AfPay for AfPayService {
             object.remove("id");
         }
 
-        // Parse Input
-        let input: Input = match serde_json::from_slice(&plaintext) {
-            Ok(input) => input,
+        // Parse Request (carries dry_run flag plus the Input).
+        let request: crate::types::Request = match serde_json::from_slice(&plaintext) {
+            Ok(request) => request,
             Err(e) => {
                 emit_rpc_request_log(
                     &self.config,
@@ -241,17 +434,18 @@ impl AfPay for AfPayService {
                 return Err(status);
             }
         };
-        let request_id = input_request_id(&input).map(|s| s.to_string());
+        let request_id = input_request_id(&request.input).map(|s| s.to_string());
         emit_rpc_request_log(
             &self.config,
             request_id.clone(),
             serde_json::json!({
                 "input": raw_input_value,
+                "dry_run": request.dry_run,
             }),
         );
 
         // Block local-only operations over RPC
-        if input.is_local_only() {
+        if request.input.is_local_only() {
             let status = Status::permission_denied("local-only operation");
             emit_rpc_response_log(&self.config, request_id, &[], Some(&status));
             return Err(status);
@@ -264,7 +458,7 @@ impl AfPay for AfPayService {
         app.requests_total.fetch_add(1, Ordering::Relaxed);
 
         // Dispatch
-        handler::dispatch(&app, input).await;
+        handler::dispatch(&app, request).await;
 
         // Drop app to close the sender side, then collect all outputs
         drop(app);
@@ -273,14 +467,17 @@ impl AfPay for AfPayService {
             // Mirror server-side log events to rpc daemon stdout so operators can
             // observe request flow in long-running rpc mode.
             if let Output::Log { .. } = &out {
-                let rendered = agent_first_data::cli_output(
-                    &serde_json::to_value(&out).unwrap_or(serde_json::Value::Null),
-                    agent_first_data::OutputFormat::Json,
-                );
-                let _ = writeln!(std::io::stdout(), "{rendered}");
+                crate::mode::cli::emit_output(&out, agent_first_data::OutputFormat::Json);
             }
-            let value = serde_json::to_value(&out).unwrap_or(serde_json::Value::Null);
-            outputs.push(value);
+            match crate::output_fmt::protocol_event(&out) {
+                Ok(value) => outputs.push(value),
+                Err(error) => outputs.push(
+                    agent_first_data::json_error("serialization_failed", &error)
+                        .build()
+                        .map(Into::into)
+                        .unwrap_or(serde_json::Value::Null),
+                ),
+            }
         }
 
         // Serialize outputs as JSON array
@@ -293,8 +490,8 @@ impl AfPay for AfPayService {
             }
         };
 
-        // Encrypt response
-        let (nonce, ciphertext) = match self.cipher.encrypt(&response_json) {
+        // Encrypt response with the session's Cipher (already cloned out above).
+        let (nonce, ciphertext) = match cipher.encrypt(&response_json) {
             Ok(payload) => payload,
             Err(e) => {
                 let status = Status::internal(format!("encrypt: {e}"));
@@ -305,7 +502,11 @@ impl AfPay for AfPayService {
 
         emit_rpc_response_log(&self.config, request_id, &outputs, None);
 
-        Ok(Response::new(EncryptedResponse { nonce, ciphertext }))
+        Ok(Response::new(EncryptedResponse {
+            session_id: req.session_id,
+            nonce,
+            ciphertext,
+        }))
     }
 }
 
@@ -320,20 +521,25 @@ pub async fn run_rpc(init: RpcInit) {
                 "--rpc-secret is required for RPC mode",
                 Some("pass a shared secret for client authentication or set AFPAY_RPC_SECRET"),
             );
-            let rendered =
-                agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+            let rendered = agent_first_data::render(
+                value.as_value(),
+                agent_first_data::OutputFormat::Json,
+                &agent_first_data::OutputOptions::default(),
+            );
             let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
     if let Err(e) = Cipher::validate_secret(&secret) {
         let value = agent_first_data::build_cli_error(&e, Some("use a random 32+ byte secret"));
-        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let rendered = agent_first_data::render(
+            value.as_value(),
+            agent_first_data::OutputFormat::Json,
+            &agent_first_data::OutputOptions::default(),
+        );
         let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
-
-    let cipher = Cipher::from_secret(&secret);
 
     let resolved_dir = init
         .data_dir
@@ -342,33 +548,45 @@ pub async fn run_rpc(init: RpcInit) {
         Ok(c) => c,
         Err(e) => {
             let value = agent_first_data::build_cli_error(&e, None);
-            let rendered =
-                agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+            let rendered = agent_first_data::render(
+                value.as_value(),
+                agent_first_data::OutputFormat::Json,
+                &agent_first_data::OutputOptions::default(),
+            );
             let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
     if !init.log.is_empty() {
-        config.log = init.log;
+        config.log = init.log.as_slice().to_vec();
     }
 
     // Emit startup log
+    let log_filters = agent_first_data::LogFilters::new(config.log.clone());
     if let Some(startup) = crate::config::maybe_startup_log(
-        &config.log,
+        &log_filters,
         init.startup_requested,
         Some(init.startup_argv),
         Some(&config),
         init.startup_args,
     ) {
         let value = serde_json::to_value(&startup).unwrap_or(serde_json::Value::Null);
-        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let rendered = agent_first_data::render(
+            &value,
+            agent_first_data::OutputFormat::Json,
+            &agent_first_data::OutputOptions::default(),
+        );
         let _ = writeln!(std::io::stdout(), "{rendered}");
     }
 
     let startup_errors = crate::handler::startup_provider_validation_errors(&config).await;
     for error_output in &startup_errors {
         let value = serde_json::to_value(error_output).unwrap_or(serde_json::Value::Null);
-        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let rendered = agent_first_data::render(
+            &value,
+            agent_first_data::OutputFormat::Json,
+            &agent_first_data::OutputOptions::default(),
+        );
         let _ = writeln!(std::io::stdout(), "{rendered}");
     }
     if !startup_errors.is_empty() {
@@ -376,11 +594,12 @@ pub async fn run_rpc(init: RpcInit) {
     }
 
     let rate_limiter = config.rate_limit.as_ref().map(RpcRateLimiter::new);
+    let policy = AllowlistPolicy::from_config(&config);
     let service = AfPayService {
-        cipher,
+        psk: Arc::new(secret),
+        sessions: Arc::new(Mutex::new(HashMap::new())),
         config,
         rate_limiter,
-        replay_cache: Mutex::new(ReplayCache::new(8192)),
     };
 
     let addr = match init.listen.parse() {
@@ -390,8 +609,11 @@ pub async fn run_rpc(init: RpcInit) {
                 &format!("invalid --rpc-listen address: {e}"),
                 Some("expected format: host:port (e.g. 127.0.0.1:9100)"),
             );
-            let rendered =
-                agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+            let rendered = agent_first_data::render(
+                value.as_value(),
+                agent_first_data::OutputFormat::Json,
+                &agent_first_data::OutputOptions::default(),
+            );
             let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
@@ -403,10 +625,38 @@ pub async fn run_rpc(init: RpcInit) {
                 "use the default 127.0.0.1:9400, or pass --public-listen only behind TLS/firewall",
             ),
         );
-        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let rendered = agent_first_data::render(
+            value.as_value(),
+            agent_first_data::OutputFormat::Json,
+            &agent_first_data::OutputOptions::default(),
+        );
         let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
+    if init.allow_public_listen
+        && let Err(msg) = policy.require_for_public_listen()
+    {
+        let value = agent_first_data::build_cli_error(
+            &msg,
+            Some(
+                "add at least one entry to allowed_mint_urls / allowed_esplora_urls / allowed_sol_rpc_endpoints / allowed_evm_rpc_endpoints in your runtime config before exposing the daemon",
+            ),
+        );
+        let rendered = agent_first_data::render(
+            value.as_value(),
+            agent_first_data::OutputFormat::Json,
+            &agent_first_data::OutputOptions::default(),
+        );
+        let _ = writeln!(std::io::stdout(), "{rendered}");
+        std::process::exit(1);
+    }
+    let banner = serde_json::json!({"code": "startup", "policy": policy.banner()});
+    let rendered = agent_first_data::render(
+        &banner,
+        agent_first_data::OutputFormat::Json,
+        &agent_first_data::OutputOptions::default(),
+    );
+    let _ = writeln!(std::io::stdout(), "{rendered}");
 
     let server = tonic::transport::Server::builder()
         .add_service(AfPayServer::new(service))
@@ -414,7 +664,11 @@ pub async fn run_rpc(init: RpcInit) {
 
     if let Err(e) = server.await {
         let value = agent_first_data::build_cli_error(&format!("RPC server error: {e}"), None);
-        let rendered = agent_first_data::cli_output(&value, agent_first_data::OutputFormat::Json);
+        let rendered = agent_first_data::render(
+            value.as_value(),
+            agent_first_data::OutputFormat::Json,
+            &agent_first_data::OutputOptions::default(),
+        );
         let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
@@ -422,16 +676,6 @@ pub async fn run_rpc(init: RpcInit) {
 
 fn public_listen_requires_ack(addr: std::net::SocketAddr) -> bool {
     !addr.ip().is_loopback()
-}
-
-fn log_event_enabled(log_filters: &[String], event: &str) -> bool {
-    if log_filters.is_empty() {
-        return false;
-    }
-    let ev = event.to_ascii_lowercase();
-    log_filters
-        .iter()
-        .any(|f| f == "*" || f == "all" || ev.starts_with(f.as_str()))
 }
 
 fn emit_rpc_request_log(
@@ -456,16 +700,16 @@ fn emit_rpc_response_log(
         "has_error": has_output_error || status.is_some(),
         "outputs": outputs,
     });
-    if let Some(status) = status {
-        if let Some(object) = args.as_object_mut() {
-            object.insert(
-                "grpc_error".to_string(),
-                serde_json::json!({
-                    "code": grpc_code_name(status.code()),
-                    "message": status.message(),
-                }),
-            );
-        }
+    if let Some(status) = status
+        && let Some(object) = args.as_object_mut()
+    {
+        object.insert(
+            "grpc_error".to_string(),
+            serde_json::json!({
+                "code": grpc_code_name(status.code()),
+                "message": status.message(),
+            }),
+        );
     }
     emit_rpc_log(config, "rpc_response", request_id, args);
 }
@@ -476,7 +720,7 @@ fn emit_rpc_log(
     request_id: Option<String>,
     args: serde_json::Value,
 ) {
-    if !log_event_enabled(&config.log, event) {
+    if !agent_first_data::LogFilters::new(config.log.clone()).enabled(event) {
         return;
     }
     let log = Output::Log {
@@ -489,9 +733,10 @@ fn emit_rpc_log(
         env: None,
         trace: Trace::from_duration(0),
     };
-    let rendered = agent_first_data::cli_output(
+    let rendered = agent_first_data::render(
         &serde_json::to_value(&log).unwrap_or(serde_json::Value::Null),
         agent_first_data::OutputFormat::Json,
+        &agent_first_data::OutputOptions::default(),
     );
     let _ = writeln!(std::io::stdout(), "{rendered}");
 }
@@ -539,10 +784,15 @@ fn input_request_id(input: &Input) -> Option<&str> {
         | Input::LimitRemove { id, .. }
         | Input::LimitList { id, .. }
         | Input::LimitSet { id, .. }
+        | Input::ReconcileReservation { id, .. }
         | Input::WalletConfigShow { id, .. }
         | Input::WalletConfigSet { id, .. }
         | Input::WalletConfigTokenAdd { id, .. }
         | Input::WalletConfigTokenRemove { id, .. } => Some(id.as_str()),
-        Input::Config(_) | Input::ConfigShow { .. } | Input::Version | Input::Close => None,
+        Input::ConfigGet { .. }
+        | Input::ConfigSet { .. }
+        | Input::Version
+        | Input::Schema
+        | Input::Close => None,
     }
 }

@@ -1,0 +1,10 @@
+# Build-context excludes for container/docker/Dockerfile (BuildKit reads the
+# <dockerfile>.dockerignore next to the Dockerfile). Paths are relative to the
+# build context, which is the spore root.
+target/
+.git/
+.DS_Store
+*.tmp
+# Local runtime state — wallet data, secrets, backups — never belongs in a build.
+container/apple-container/data/
+container/apple-container/backups/

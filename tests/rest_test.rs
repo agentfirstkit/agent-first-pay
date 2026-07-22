@@ -2,14 +2,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use agent_first_pay::handler::{self, App};
-use agent_first_pay::types::{Input, Output, RuntimeConfig};
+use agent_first_pay::types::{Input, Output, Request as AfPayRequest, RuntimeConfig};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::routing::post;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 use tower::ServiceExt as _;
 
@@ -102,7 +102,7 @@ async fn handle_call(
     let app = Arc::new(App::new(config, tx, Some(true), store));
     app.requests_total.fetch_add(1, Ordering::Relaxed);
 
-    handler::dispatch(&app, input).await;
+    handler::dispatch(&app, AfPayRequest::from_input(input)).await;
     drop(app);
 
     let mut outputs = Vec::new();

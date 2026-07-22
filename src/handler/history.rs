@@ -3,8 +3,8 @@ use crate::store::PayStore;
 use crate::types::*;
 use std::time::Instant;
 
-use super::helpers::*;
 use super::App;
+use super::helpers::*;
 
 pub(crate) async fn dispatch_history(app: &App, input: Input) {
     match input {
@@ -32,18 +32,18 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                 if let Some(store) = app.store.as_deref() {
                     match store.load_wallet_metadata(wallet_id) {
                         Ok(meta) => {
-                            if let Some(expected_network) = network {
-                                if meta.network != expected_network {
-                                    let _ = app
-                                        .writer
-                                        .send(Output::History {
-                                            id,
-                                            items: Vec::new(),
-                                            trace: trace_from(start),
-                                        })
-                                        .await;
-                                    return;
-                                }
+                            if let Some(expected_network) = network
+                                && meta.network != expected_network
+                            {
+                                let _ = app
+                                    .writer
+                                    .send(Output::History {
+                                        id,
+                                        items: Vec::new(),
+                                        trace: trace_from(start),
+                                    })
+                                    .await;
+                                return;
                             }
                             match store.load_wallet_transaction_records(wallet_id) {
                                 Ok(mut records) => {
@@ -56,7 +56,7 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                                 }
                             }
                         }
-                        Err(PayError::WalletNotFound(_)) => {}
+                        Err(PayError::WalletNotFound { .. }) => {}
                         Err(e) => {
                             emit_error(&app.writer, Some(id), &e, start).await;
                             return;
@@ -77,7 +77,7 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                         emit_error(
                             &app.writer,
                             Some(id),
-                            &PayError::NotImplemented(format!(
+                            &PayError::not_implemented(format!(
                                 "network {target_network} not enabled"
                             )),
                             start,
@@ -136,7 +136,8 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                         };
                         let wallets = match provider.list_wallets().await {
                             Ok(wallets) => wallets,
-                            Err(PayError::NotImplemented(_)) | Err(PayError::WalletNotFound(_)) => {
+                            Err(PayError::NotImplemented { .. })
+                            | Err(PayError::WalletNotFound { .. }) => {
                                 continue;
                             }
                             Err(e) => {
@@ -147,8 +148,8 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                         for wallet in wallets {
                             match provider.history_list(&wallet.id, fetch_limit, 0).await {
                                 Ok(mut records) => all_txs.append(&mut records),
-                                Err(PayError::NotImplemented(_))
-                                | Err(PayError::WalletNotFound(_)) => {}
+                                Err(PayError::NotImplemented { .. })
+                                | Err(PayError::WalletNotFound { .. }) => {}
                                 Err(e) => {
                                     emit_error(&app.writer, Some(id), &e, start).await;
                                     return;
@@ -197,7 +198,7 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
             }) {
                 Some(network) => match app.providers.get(&network) {
                     Some(provider) => provider.history_status(&transaction_id).await,
-                    None => Err(PayError::NotImplemented(format!(
+                    None => Err(PayError::not_implemented(format!(
                         "no provider for {network}"
                     ))),
                 },
@@ -210,8 +211,8 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                                 found = Some(info);
                                 break;
                             }
-                            Err(PayError::NotImplemented(_)) | Err(PayError::WalletNotFound(_)) => {
-                            }
+                            Err(PayError::NotImplemented { .. })
+                            | Err(PayError::WalletNotFound { .. }) => {}
                             Err(e) => {
                                 if first_error.is_none() {
                                     first_error = Some(e);
@@ -221,7 +222,7 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                     }
                     found.ok_or_else(|| {
                         first_error.unwrap_or_else(|| {
-                            PayError::WalletNotFound(format!(
+                            PayError::wallet_not_found(format!(
                                 "transaction {transaction_id} not found"
                             ))
                         })
@@ -269,7 +270,7 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                     };
                 let sync_result = match get_provider(&app.providers, target_network) {
                     Some(provider) => provider.history_sync(&wallet_for_call, sync_limit).await,
-                    None => Err(PayError::NotImplemented(format!(
+                    None => Err(PayError::not_implemented(format!(
                         "network {target_network} not enabled"
                     ))),
                 };
@@ -308,7 +309,7 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                             emit_error(
                                 &app.writer,
                                 Some(id),
-                                &PayError::NotImplemented(format!(
+                                &PayError::not_implemented(format!(
                                     "network {network_key} not enabled"
                                 )),
                                 start,
@@ -331,9 +332,8 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                     let wallet_ids = if wallet_ids.is_empty() {
                         match provider.list_wallets().await {
                             Ok(wallets) => wallets.into_iter().map(|wallet| wallet.id).collect(),
-                            Err(PayError::NotImplemented(_)) | Err(PayError::WalletNotFound(_)) => {
-                                Vec::new()
-                            }
+                            Err(PayError::NotImplemented { .. })
+                            | Err(PayError::WalletNotFound { .. }) => Vec::new(),
                             Err(e) => {
                                 emit_error(&app.writer, Some(id), &e, start).await;
                                 return;
@@ -353,8 +353,8 @@ pub(crate) async fn dispatch_history(app: &App, input: Input) {
                                 totals.records_updated =
                                     totals.records_updated.saturating_add(stats.records_updated);
                             }
-                            Err(PayError::NotImplemented(_)) | Err(PayError::WalletNotFound(_)) => {
-                            }
+                            Err(PayError::NotImplemented { .. })
+                            | Err(PayError::WalletNotFound { .. }) => {}
                             Err(e) => {
                                 emit_error(&app.writer, Some(id), &e, start).await;
                                 return;

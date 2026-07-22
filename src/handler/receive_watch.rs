@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-use super::helpers::{emit_error, emit_error_hint, evm_receive_token_matches, trace_from};
 use super::App;
+use super::helpers::{emit_error, emit_error_hint, evm_receive_token_matches, trace_from};
 
 const DEFAULT_WAIT_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_WAIT_POLL_INTERVAL_MS: u64 = 1000;
@@ -29,14 +29,14 @@ impl ReceiveWaitOptions {
     ) -> Result<Self, PayError> {
         let timeout_secs = wait_timeout_s.unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS);
         if timeout_secs == 0 {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "wait_timeout_s must be >= 1".to_string(),
             ));
         }
 
         let poll_interval_ms = wait_poll_interval_ms.unwrap_or(DEFAULT_WAIT_POLL_INTERVAL_MS);
         if poll_interval_ms == 0 {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "wait_poll_interval_ms must be >= 1".to_string(),
             ));
         }
@@ -106,7 +106,7 @@ impl ReceiveWatcher for SolReceiveWatcher {
             emit_error_hint(
                 &req.app.writer,
                 Some(req.id.clone()),
-                &PayError::InvalidAmount(
+                &PayError::invalid_amount(
                     "sol receive --wait requires a match condition".to_string(),
                 ),
                 req.start,
@@ -210,7 +210,7 @@ impl ReceiveWatcher for EvmReceiveWatcher {
             emit_error_hint(
                 &req.app.writer,
                 Some(req.id.clone()),
-                &PayError::InvalidAmount("evm receive --wait requires --amount".to_string()),
+                &PayError::invalid_amount("evm receive --wait requires --amount".to_string()),
                 req.start,
                 Some("pass --amount"),
             )
@@ -269,10 +269,10 @@ impl ReceiveWatcher for EvmReceiveWatcher {
                 .as_ref()
                 .map(|(_, delta)| *delta)
                 .unwrap_or(native_increase);
-            if let Some(expected) = amount_to_watch {
-                if observed_value != expected {
-                    continue;
-                }
+            if let Some(expected) = amount_to_watch
+                && observed_value != expected
+            {
+                continue;
             }
 
             match sync_history(req.provider, &req.wallet, req.options.sync_limit).await {
@@ -306,15 +306,15 @@ impl ReceiveWatcher for EvmReceiveWatcher {
                 if known_receive_ids.contains(&item.transaction_id) {
                     continue;
                 }
-                if let Some(expected) = amount_to_watch {
-                    if item.amount.value != expected {
-                        continue;
-                    }
+                if let Some(expected) = amount_to_watch
+                    && item.amount.value != expected
+                {
+                    continue;
                 }
-                if let Some(expected_token) = token_to_watch.as_deref() {
-                    if !evm_receive_token_matches(expected_token, &item.amount.token) {
-                        continue;
-                    }
+                if let Some(expected_token) = token_to_watch.as_deref()
+                    && !evm_receive_token_matches(expected_token, &item.amount.token)
+                {
+                    continue;
                 }
                 if let Some(expected_memo) = memo_to_watch.as_deref() {
                     let mut memo_matches = item.onchain_memo.as_deref() == Some(expected_memo);
@@ -328,8 +328,8 @@ impl ReceiveWatcher for EvmReceiveWatcher {
                                 memo_matches = chain_memo == expected_memo;
                             }
                             Ok(None)
-                            | Err(PayError::NotImplemented(_))
-                            | Err(PayError::WalletNotFound(_)) => {}
+                            | Err(PayError::NotImplemented { .. })
+                            | Err(PayError::WalletNotFound { .. }) => {}
                             Err(e) if e.retryable() => continue 'evm_wait,
                             Err(e) => {
                                 memo_lookup_error = Some(e);
@@ -418,10 +418,10 @@ impl ReceiveWatcher for BtcReceiveWatcher {
             if observed_delta == 0 {
                 continue;
             }
-            if let Some(expected) = amount_to_watch {
-                if observed_delta != expected {
-                    continue;
-                }
+            if let Some(expected) = amount_to_watch
+                && observed_delta != expected
+            {
+                continue;
             }
 
             match sync_history(req.provider, &req.wallet, req.options.sync_limit).await {
@@ -453,10 +453,10 @@ impl ReceiveWatcher for BtcReceiveWatcher {
                 if known_receive_ids.contains(&item.transaction_id) {
                     return false;
                 }
-                if let Some(expected) = amount_to_watch {
-                    if item.amount.value != expected {
-                        return false;
-                    }
+                if let Some(expected) = amount_to_watch
+                    && item.amount.value != expected
+                {
+                    return false;
                 }
                 true
             });
@@ -556,7 +556,9 @@ async fn sync_history(
     sync_limit: usize,
 ) -> Result<(), PayError> {
     match provider.history_sync(wallet, sync_limit).await {
-        Ok(_) | Err(PayError::NotImplemented(_)) | Err(PayError::WalletNotFound(_)) => Ok(()),
+        Ok(_) | Err(PayError::NotImplemented { .. }) | Err(PayError::WalletNotFound { .. }) => {
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }
@@ -678,7 +680,7 @@ async fn emit_wait_timeout(req: &ReceiveWatchRequest<'_>, message: String) {
     emit_error(
         &req.app.writer,
         Some(req.id.clone()),
-        &PayError::NetworkError(message),
+        &PayError::network_error(message),
         req.start,
     )
     .await;

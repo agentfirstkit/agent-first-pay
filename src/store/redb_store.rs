@@ -112,6 +112,18 @@ impl PayStore for RedbStore {
         )
     }
 
+    fn update_transaction_record_reservation_ids(
+        &self,
+        tx_id: &str,
+        reservation_ids: &[u64],
+    ) -> Result<(), PayError> {
+        transaction::update_transaction_record_reservation_ids(
+            &self.data_dir,
+            tx_id,
+            reservation_ids,
+        )
+    }
+
     fn drain_migration_log(&self) -> Vec<MigrationLog> {
         db::drain_migration_log()
     }

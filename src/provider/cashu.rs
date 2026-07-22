@@ -4,9 +4,9 @@ use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use async_trait::async_trait;
 use bip39::Mnemonic;
+use cdk::Amount as CdkAmount;
 use cdk::nuts::{CurrencyUnit, PaymentMethod, ProofsMethods, State, Token};
 use cdk::wallet::{ReceiveOptions, SendOptions, Wallet, WalletBuilder};
-use cdk::Amount as CdkAmount;
 #[cfg(feature = "redb")]
 use cdk_redb::wallet::WalletRedbDatabase;
 use std::collections::HashMap;
@@ -54,7 +54,7 @@ impl CashuProvider {
     fn get_mint_url(&self, meta: &WalletMetadata) -> Result<String, PayError> {
         meta.mint_url
             .clone()
-            .ok_or_else(|| PayError::InternalError("wallet has no mint_url".to_string()))
+            .ok_or_else(|| PayError::internal_error("wallet has no mint_url".to_string()))
     }
 
     async fn select_wallet_by_balance(
@@ -97,7 +97,7 @@ impl CashuProvider {
             } else {
                 String::new()
             };
-            PayError::NetworkError(format!(
+            PayError::network_error(format!(
                 "failed to query cashu wallet balances: {detail}{suffix}"
             ))
         };
@@ -146,12 +146,12 @@ impl CashuProvider {
                 if !has_healthy_wallet_on_mint && !balance_failures.is_empty() {
                     Err(unavailable_error())
                 } else {
-                    Err(PayError::InvalidAmount(format!(
+                    Err(PayError::invalid_amount(format!(
                         "insufficient balance on accepted mints; need {min_sats} sats"
                     )))
                 }
             } else {
-                Err(PayError::WalletNotFound(format!(
+                Err(PayError::wallet_not_found(format!(
                     "no wallet on accepted mints: {}; create one with: afpay cashu wallet create --mint-url <mint>",
                     mint_list.join(", ")
                 )))
@@ -174,7 +174,7 @@ impl CashuProvider {
             return Err(unavailable_error());
         }
         candidates.first().map(|(id, _)| id.clone()).ok_or_else(|| {
-            PayError::WalletNotFound("no wallet with sufficient balance".to_string())
+            PayError::wallet_not_found("no wallet with sufficient balance".to_string())
         })
     }
 
@@ -190,7 +190,7 @@ impl CashuProvider {
         // Load wallet metadata
         let meta = self.store.load_wallet_metadata(wallet_id)?;
         if meta.network != Network::Cashu {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "{wallet_id} is not a cashu wallet"
             )));
         }
@@ -198,16 +198,16 @@ impl CashuProvider {
         let seed_secret = meta
             .seed_secret
             .as_deref()
-            .ok_or_else(|| PayError::InternalError("wallet missing seed".to_string()))?;
+            .ok_or_else(|| PayError::internal_error("wallet missing seed".to_string()))?;
         let mnemonic: Mnemonic = seed_secret
             .parse()
-            .map_err(|e| PayError::InternalError(format!("parse mnemonic: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("parse mnemonic: {e}")))?;
         let seed = mnemonic.to_seed_normalized("");
 
         let mint_url = self.get_mint_url(&meta)?;
         let mint_url_parsed: cdk::mint_url::MintUrl = mint_url
             .parse()
-            .map_err(|e| PayError::InternalError(format!("parse mint url: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("parse mint url: {e}")))?;
 
         let localstore: Arc<
             dyn cdk::cdk_database::WalletDatabase<cdk::cdk_database::Error> + Send + Sync,
@@ -216,11 +216,11 @@ impl CashuProvider {
             {
                 let db = cdk_postgres::new_wallet_pg_database(url)
                     .await
-                    .map_err(|e| PayError::InternalError(format!("cdk postgres: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("cdk postgres: {e}")))?;
                 Arc::new(db)
             }
             #[cfg(not(feature = "postgres"))]
-            return Err(PayError::NotImplemented(format!(
+            return Err(PayError::not_implemented(format!(
                 "postgres feature not compiled (url: {url})"
             )));
         } else {
@@ -228,13 +228,13 @@ impl CashuProvider {
             {
                 let db_dir = self.store.wallet_data_directory_path_for_meta(&meta);
                 std::fs::create_dir_all(&db_dir)
-                    .map_err(|e| PayError::InternalError(format!("create cashu db dir: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("create cashu db dir: {e}")))?;
                 let db = WalletRedbDatabase::new(&db_dir.join("cdk-wallet.redb"))
-                    .map_err(|e| PayError::InternalError(format!("open redb: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("open redb: {e}")))?;
                 Arc::new(db)
             }
             #[cfg(not(feature = "redb"))]
-            return Err(PayError::NotImplemented(
+            return Err(PayError::not_implemented(
                 "redb feature not compiled".to_string(),
             ));
         };
@@ -245,7 +245,7 @@ impl CashuProvider {
             .localstore(localstore)
             .seed(seed)
             .build()
-            .map_err(|e| PayError::InternalError(format!("build cdk wallet: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("build cdk wallet: {e}")))?;
 
         let wallet = Arc::new(wallet);
 
@@ -268,25 +268,35 @@ impl PayProvider for CashuProvider {
     }
 
     async fn create_wallet(&self, request: &WalletCreateRequest) -> Result<WalletInfo, PayError> {
-        let id = wallet::generate_wallet_identifier()?;
         let resolved_mint = request.mint_url.as_deref().ok_or_else(|| {
-            PayError::InvalidAmount("mint_url is required for cashu wallets".to_string())
+            PayError::invalid_amount("mint_url is required for cashu wallets".to_string())
         })?;
+        let normalized_mint = normalize_mint_url(resolved_mint);
 
         let mnemonic_str = if let Some(raw) = request.mnemonic_secret.as_deref() {
             let mnemonic: Mnemonic = raw.parse().map_err(|e| {
-                PayError::InvalidAmount(format!("invalid mnemonic-secret for cashu wallet: {e}"))
+                PayError::invalid_amount(format!("invalid mnemonic-secret for cashu wallet: {e}"))
             })?;
             mnemonic.words().collect::<Vec<_>>().join(" ")
         } else {
             // Generate BIP39 12-word mnemonic (128-bit entropy)
             let mut entropy = [0u8; 16];
             getrandom::fill(&mut entropy)
-                .map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
             let mnemonic = Mnemonic::from_entropy(&entropy)
-                .map_err(|e| PayError::InternalError(format!("mnemonic gen: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("mnemonic gen: {e}")))?;
             mnemonic.words().collect::<Vec<_>>().join(" ")
         };
+
+        // Derive a stable wallet_id from (network, mint_url, mnemonic). The
+        // same mnemonic across two different mints yields different ids;
+        // re-issued requests against the same mint hit the load_wallet_metadata
+        // idempotency check.
+        let id = wallet::derive_wallet_identifier(&[
+            b"cashu",
+            normalized_mint.as_bytes(),
+            mnemonic_str.trim().as_bytes(),
+        ]);
 
         let meta = WalletMetadata {
             id: id.clone(),
@@ -299,10 +309,11 @@ impl PayProvider for CashuProvider {
                     Some(trimmed.to_string())
                 }
             },
-            mint_url: Some(normalize_mint_url(resolved_mint)),
+            mint_url: Some(normalized_mint.clone()),
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some(mnemonic_str.clone()),
             backend: None,
             btc_esplora_url: None,
@@ -330,7 +341,7 @@ impl PayProvider for CashuProvider {
         // Check balance first — only allow closing zero-balance wallets
         let bal = self.balance(wallet_id).await?;
         if bal.confirmed > 0 || bal.pending > 0 {
-            return Err(PayError::InvalidAmount(format!(
+            return Err(PayError::invalid_amount(format!(
                 "wallet {wallet_id} has {} confirmed + {} pending {}; send or withdraw first",
                 bal.confirmed, bal.pending, bal.unit
             )));
@@ -354,11 +365,11 @@ impl PayProvider for CashuProvider {
         let confirmed = w
             .total_balance()
             .await
-            .map_err(|e| PayError::NetworkError(format!("balance: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("balance: {e}")))?;
         let pending = w
             .total_pending_balance()
             .await
-            .map_err(|e| PayError::NetworkError(format!("pending balance: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("pending balance: {e}")))?;
         Ok(BalanceInfo::new(
             confirmed.to_u64(),
             pending.to_u64(),
@@ -373,13 +384,13 @@ impl PayProvider for CashuProvider {
         let unspent_proofs = w
             .get_unspent_proofs()
             .await
-            .map_err(|e| PayError::NetworkError(format!("get proofs: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("get proofs: {e}")))?;
         let states = if unspent_proofs.is_empty() {
             vec![]
         } else {
             w.check_proofs_spent(unspent_proofs.clone())
                 .await
-                .map_err(|e| PayError::NetworkError(format!("check proofs: {e}")))?
+                .map_err(|e| PayError::network_error(format!("check proofs: {e}")))?
         };
 
         // Sum only truly unspent
@@ -394,7 +405,7 @@ impl PayProvider for CashuProvider {
         let pending_amount = w
             .check_all_pending_proofs()
             .await
-            .map_err(|e| PayError::NetworkError(format!("check pending: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("check pending: {e}")))?;
 
         Ok(BalanceInfo::new(confirmed, pending_amount.to_u64(), "sats"))
     }
@@ -404,7 +415,7 @@ impl PayProvider for CashuProvider {
         let restored = w
             .restore()
             .await
-            .map_err(|e| PayError::NetworkError(format!("restore: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("restore: {e}")))?;
         Ok(RestoreResult {
             wallet: wallet_id.to_string(),
             unspent: restored.unspent.to_u64(),
@@ -422,11 +433,11 @@ impl PayProvider for CashuProvider {
             let confirmed = w
                 .total_balance()
                 .await
-                .map_err(|e| PayError::NetworkError(format!("balance: {e}")))?;
+                .map_err(|e| PayError::network_error(format!("balance: {e}")))?;
             let pending = w
                 .total_pending_balance()
                 .await
-                .map_err(|e| PayError::NetworkError(format!("pending balance: {e}")))?;
+                .map_err(|e| PayError::network_error(format!("pending balance: {e}")))?;
             items.push(WalletBalanceItem {
                 wallet: cashu_wallet_summary(meta.clone()),
                 balance: Some(BalanceInfo::new(
@@ -450,7 +461,7 @@ impl PayProvider for CashuProvider {
         let quote = w
             .mint_quote(PaymentMethod::BOLT11, cdk_amount, None, None)
             .await
-            .map_err(|e| PayError::NetworkError(format!("mint quote: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("mint quote: {e}")))?;
         Ok(ReceiveInfo {
             address: None,
             invoice: Some(quote.request),
@@ -463,10 +474,10 @@ impl PayProvider for CashuProvider {
         let proofs = w
             .mint(quote_id, cdk::amount::SplitTarget::default(), None)
             .await
-            .map_err(|e| PayError::NetworkError(format!("mint: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("mint: {e}")))?;
         let total: u64 = proofs
             .total_amount()
-            .map_err(|e| PayError::InternalError(format!("sum proofs: {e}")))?
+            .map_err(|e| PayError::internal_error(format!("sum proofs: {e}")))?
             .to_u64();
 
         // Persist claim as a receive history item so history/status can track mint deposits.
@@ -494,6 +505,7 @@ impl PayProvider for CashuProvider {
                 confirmed_at_epoch_s: Some(now),
                 fee: None,
                 reference_keys: None,
+                reservation_ids: Vec::new(),
             };
             let _ = self.store.append_transaction_record(&record);
         }
@@ -521,7 +533,7 @@ impl PayProvider for CashuProvider {
         let prepared = w
             .prepare_send(cdk_amount, send_options)
             .await
-            .map_err(|e| PayError::NetworkError(format!("prepare send: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("prepare send: {e}")))?;
         let fee_sats = prepared.fee().to_u64();
         // Release reserved proofs — this is quote-only
         let _ = prepared.cancel().await;
@@ -552,7 +564,7 @@ impl PayProvider for CashuProvider {
                     .iter()
                     .any(|m| normalize_mint_url(m) == normalized)
                 {
-                    return Err(PayError::InvalidAmount(format!(
+                    return Err(PayError::invalid_amount(format!(
                         "wallet {wallet_id} is on mint {url}, not in accepted mints: {}",
                         mint_list.join(", ")
                     )));
@@ -567,7 +579,7 @@ impl PayProvider for CashuProvider {
         let balance_before_send = w
             .total_balance()
             .await
-            .map_err(|e| PayError::NetworkError(format!("balance before send: {e}")))?
+            .map_err(|e| PayError::network_error(format!("balance before send: {e}")))?
             .to_u64();
 
         // P2P cashu token send
@@ -581,17 +593,17 @@ impl PayProvider for CashuProvider {
         let prepared = w
             .prepare_send(cdk_amount, send_options)
             .await
-            .map_err(|e| PayError::NetworkError(format!("prepare send: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("prepare send: {e}")))?;
 
         let token = prepared
             .confirm(None)
             .await
-            .map_err(|e| PayError::NetworkError(format!("confirm send: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("confirm send: {e}")))?;
 
         let balance_after_send = w
             .total_balance()
             .await
-            .map_err(|e| PayError::NetworkError(format!("balance after send: {e}")))?
+            .map_err(|e| PayError::network_error(format!("balance after send: {e}")))?
             .to_u64();
         let total_spent = balance_before_send.saturating_sub(balance_after_send);
         let fee_sats = total_spent.saturating_sub(amount.value);
@@ -628,6 +640,7 @@ impl PayProvider for CashuProvider {
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
             reference_keys: None,
+            reservation_ids: Vec::new(),
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -648,11 +661,11 @@ impl PayProvider for CashuProvider {
         let resolved_wallet = if wallet_id.is_empty() {
             // Parse token to extract mint_url
             let parsed = Token::from_str(token)
-                .map_err(|e| PayError::InvalidAmount(format!("parse token: {e}")))?;
+                .map_err(|e| PayError::invalid_amount(format!("parse token: {e}")))?;
             let mint_url_str = normalize_mint_url(
                 &parsed
                     .mint_url()
-                    .map_err(|e| PayError::InvalidAmount(format!("token mint_url: {e}")))?
+                    .map_err(|e| PayError::invalid_amount(format!("token mint_url: {e}")))?
                     .to_string(),
             );
 
@@ -678,6 +691,7 @@ impl PayProvider for CashuProvider {
                     btc_core_url: None,
                     btc_core_auth_secret: None,
                     btc_electrum_url: None,
+                    sol_cluster: None,
                 })
                 .await?
                 .id
@@ -685,21 +699,21 @@ impl PayProvider for CashuProvider {
         } else {
             // Validate mint URL matches the wallet's mint
             let parsed = Token::from_str(token)
-                .map_err(|e| PayError::InvalidAmount(format!("parse token: {e}")))?;
+                .map_err(|e| PayError::invalid_amount(format!("parse token: {e}")))?;
             let token_mint = normalize_mint_url(
                 &parsed
                     .mint_url()
-                    .map_err(|e| PayError::InvalidAmount(format!("token mint_url: {e}")))?
+                    .map_err(|e| PayError::invalid_amount(format!("token mint_url: {e}")))?
                     .to_string(),
             );
             let meta = self.store.load_wallet_metadata(wallet_id)?;
-            if let Some(wallet_mint) = meta.mint_url.as_deref() {
-                if normalize_mint_url(wallet_mint) != token_mint {
-                    return Err(PayError::InvalidAmount(format!(
-                        "token mint ({token_mint}) does not match wallet {} mint ({wallet_mint})",
-                        wallet_id
-                    )));
-                }
+            if let Some(wallet_mint) = meta.mint_url.as_deref()
+                && normalize_mint_url(wallet_mint) != token_mint
+            {
+                return Err(PayError::invalid_amount(format!(
+                    "token mint ({token_mint}) does not match wallet {} mint ({wallet_mint})",
+                    wallet_id
+                )));
             }
             wallet_id.to_string()
         };
@@ -713,7 +727,7 @@ impl PayProvider for CashuProvider {
         let received = w
             .receive(token, ReceiveOptions::default())
             .await
-            .map_err(|e| PayError::NetworkError(format!("receive: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("receive: {e}")))?;
 
         let sats = received.to_u64();
 
@@ -735,6 +749,7 @@ impl PayProvider for CashuProvider {
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: None,
             reference_keys: None,
+            reservation_ids: Vec::new(),
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -764,7 +779,7 @@ impl PayProvider for CashuProvider {
         let quote = w
             .melt_quote(PaymentMethod::BOLT11, to, None, None)
             .await
-            .map_err(|e| PayError::NetworkError(format!("melt quote: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("melt quote: {e}")))?;
 
         Ok(SendQuoteInfo {
             wallet: resolved,
@@ -800,17 +815,17 @@ impl PayProvider for CashuProvider {
         let quote = w
             .melt_quote(PaymentMethod::BOLT11, to, None, None)
             .await
-            .map_err(|e| PayError::NetworkError(format!("melt quote: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("melt quote: {e}")))?;
 
         let prepared = w
             .prepare_melt(&quote.id, HashMap::new())
             .await
-            .map_err(|e| PayError::NetworkError(format!("prepare melt: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("prepare melt: {e}")))?;
 
         let finalized = prepared
             .confirm()
             .await
-            .map_err(|e| PayError::NetworkError(format!("confirm melt: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("confirm melt: {e}")))?;
 
         let fee_sats = finalized.fee_paid().to_u64();
         let amount_sats = quote.amount.to_u64();
@@ -844,6 +859,7 @@ impl PayProvider for CashuProvider {
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: fee_amount.clone(),
             reference_keys: None,
+            reservation_ids: Vec::new(),
         };
         let _ = self.store.append_transaction_record(&record);
 
@@ -865,7 +881,7 @@ impl PayProvider for CashuProvider {
         // Verify wallet exists and is cashu
         let meta = self.store.load_wallet_metadata(wallet_id)?;
         if meta.network != Network::Cashu {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "{wallet_id} is not a cashu wallet"
             )));
         }
@@ -884,7 +900,7 @@ impl PayProvider for CashuProvider {
                 preimage: rec.preimage.clone(),
                 item: Some(rec),
             }),
-            None => Err(PayError::WalletNotFound(format!(
+            None => Err(PayError::wallet_not_found(format!(
                 "transaction {transaction_id} not found"
             ))),
         }
@@ -939,6 +955,7 @@ mod tests {
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster: None,
             })
             .await
             .unwrap();
@@ -984,6 +1001,7 @@ mod tests {
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster: None,
             })
             .await
             .unwrap();
@@ -1021,6 +1039,7 @@ mod tests {
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster: None,
             })
             .await
             .unwrap();
@@ -1061,6 +1080,7 @@ mod tests {
                 btc_core_url: None,
                 btc_core_auth_secret: None,
                 btc_electrum_url: None,
+                sol_cluster: None,
             })
             .await
             .unwrap();
@@ -1076,6 +1096,7 @@ mod tests {
                 sol_rpc_endpoints: None,
                 evm_rpc_endpoints: None,
                 evm_chain_id: None,
+                sol_cluster: None,
                 seed_secret: Some("not a mnemonic".to_string()),
                 backend: None,
                 btc_esplora_url: None,
@@ -1119,6 +1140,7 @@ mod tests {
                 sol_rpc_endpoints: None,
                 evm_rpc_endpoints: None,
                 evm_chain_id: None,
+                sol_cluster: None,
                 seed_secret: Some("not a mnemonic".to_string()),
                 backend: None,
                 btc_esplora_url: None,
@@ -1138,7 +1160,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, PayError::NetworkError(_)),
+            matches!(err, PayError::NetworkError { .. }),
             "expected NetworkError, got: {err}"
         );
     }

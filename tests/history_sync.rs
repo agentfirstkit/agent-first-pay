@@ -1,18 +1,18 @@
 #![cfg(feature = "redb")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use agent_first_pay::handler::{dispatch, App};
+use agent_first_pay::handler::{App, dispatch};
 use agent_first_pay::provider::{HistorySyncStats, PayError, PayProvider};
 use agent_first_pay::store::wallet::{self, WalletMetadata};
-use agent_first_pay::store::{create_storage_backend, PayStore};
+use agent_first_pay::store::{PayStore, create_storage_backend};
 use agent_first_pay::types::{
     Amount, BalanceInfo, CashuReceiveResult, CashuSendResult, Direction, HistoryRecord,
-    HistoryStatusInfo, Input, Network, Output, ReceiveInfo, RuntimeConfig, SendResult, TxStatus,
-    WalletBalanceItem, WalletCreateRequest, WalletInfo, WalletSummary,
+    HistoryStatusInfo, Input, Network, Output, ReceiveInfo, Request, RuntimeConfig, SendResult,
+    TxStatus, WalletBalanceItem, WalletCreateRequest, WalletInfo, WalletSummary,
 };
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 struct LocalOnlyHistoryProvider;
@@ -24,11 +24,11 @@ impl PayProvider for LocalOnlyHistoryProvider {
     }
 
     async fn create_wallet(&self, _request: &WalletCreateRequest) -> Result<WalletInfo, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn close_wallet(&self, _wallet: &str) -> Result<(), PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError> {
@@ -56,7 +56,7 @@ impl PayProvider for LocalOnlyHistoryProvider {
     }
 
     async fn receive_claim(&self, _wallet: &str, _quote_id: &str) -> Result<u64, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn cashu_send(
@@ -66,7 +66,7 @@ impl PayProvider for LocalOnlyHistoryProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn cashu_receive(
@@ -74,7 +74,7 @@ impl PayProvider for LocalOnlyHistoryProvider {
         _wallet: &str,
         _token: &str,
     ) -> Result<CashuReceiveResult, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn send(
@@ -84,7 +84,7 @@ impl PayProvider for LocalOnlyHistoryProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<SendResult, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn history_list(
@@ -97,7 +97,7 @@ impl PayProvider for LocalOnlyHistoryProvider {
     }
 
     async fn history_status(&self, _transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 }
 
@@ -113,11 +113,11 @@ impl PayProvider for SyncStatsProvider {
     }
 
     async fn create_wallet(&self, _request: &WalletCreateRequest) -> Result<WalletInfo, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn close_wallet(&self, _wallet: &str) -> Result<(), PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError> {
@@ -145,7 +145,7 @@ impl PayProvider for SyncStatsProvider {
     }
 
     async fn receive_claim(&self, _wallet: &str, _quote_id: &str) -> Result<u64, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn cashu_send(
@@ -155,7 +155,7 @@ impl PayProvider for SyncStatsProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn cashu_receive(
@@ -163,7 +163,7 @@ impl PayProvider for SyncStatsProvider {
         _wallet: &str,
         _token: &str,
     ) -> Result<CashuReceiveResult, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn send(
@@ -173,7 +173,7 @@ impl PayProvider for SyncStatsProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<SendResult, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn history_list(
@@ -186,7 +186,7 @@ impl PayProvider for SyncStatsProvider {
     }
 
     async fn history_status(&self, _transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        Err(PayError::NotImplemented("unused in test".to_string()))
+        Err(PayError::not_implemented("unused in test".to_string()))
     }
 
     async fn history_sync(&self, wallet: &str, limit: usize) -> Result<HistorySyncStats, PayError> {
@@ -219,6 +219,7 @@ fn setup_wallet(
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: Some(vec!["https://rpc.example".to_string()]),
             evm_chain_id: Some(8453),
+            sol_cluster: None,
             seed_secret: Some(seed_phrase()),
             backend: None,
             btc_esplora_url: None,
@@ -265,6 +266,7 @@ async fn history_list_reads_only_local_store() {
             confirmed_at_epoch_s: Some(wallet::now_epoch_seconds()),
             fee: None,
             reference_keys: None,
+            reservation_ids: Vec::new(),
         })
         .expect("append transaction");
 
@@ -275,7 +277,7 @@ async fn history_list_reads_only_local_store() {
 
     dispatch(
         &app,
-        Input::HistoryList {
+        Request::from_input(Input::HistoryList {
             id: "req_hist_local".to_string(),
             wallet: Some(wallet_id.to_string()),
             network: Some(Network::Evm),
@@ -284,7 +286,7 @@ async fn history_list_reads_only_local_store() {
             offset: Some(0),
             since_epoch_s: None,
             until_epoch_s: None,
-        },
+        }),
     )
     .await;
 
@@ -328,12 +330,12 @@ async fn history_update_calls_provider_sync_and_returns_stats() {
 
     dispatch(
         &app,
-        Input::HistoryUpdate {
+        Request::from_input(Input::HistoryUpdate {
             id: "req_hist_sync".to_string(),
             wallet: Some(wallet_id.to_string()),
             network: Some(Network::Evm),
             limit: Some(50),
-        },
+        }),
     )
     .await;
 

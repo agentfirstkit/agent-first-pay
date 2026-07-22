@@ -1,11 +1,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use agent_first_pay::types::{ConfigPatch, Input, Output, RuntimeConfig};
+use agent_first_pay::types::{Input, Output, Request, RuntimeConfig};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+/// Fixed salt used by the test server's stub handshake. Production handshake
+/// generates a random 32-byte salt per session; tests use a deterministic value
+/// so both sides can derive the same Cipher without coordinating per-test.
+const TEST_SALT: [u8; 32] = [0xAA; 32];
 
 // ═══════════════════════════════════════════
 // Shared test server
@@ -24,16 +29,37 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
     let secret_clone = secret.clone();
     let handle = tokio::spawn(async move {
         use agent_first_pay::mode::rpc::proto::af_pay_server::{AfPay, AfPayServer};
-        use agent_first_pay::mode::rpc::proto::{EncryptedRequest, EncryptedResponse};
+        use agent_first_pay::mode::rpc::proto::{
+            EncryptedRequest, EncryptedResponse, HandshakeRequest, HandshakeResponse,
+        };
         use tonic::{Request, Response, Status};
 
+        // Stub server: implements the same Handshake → Call flow as production
+        // but with a deterministic salt + session_id so manual tests can derive
+        // the same Cipher without exchanging state. Each handshake() bumps a
+        // counter so tests that need distinct session ids can read it.
         struct TestService {
             cipher: Cipher,
+            session_id_counter: Mutex<u64>,
             config: RuntimeConfig,
         }
 
         #[tonic::async_trait]
         impl AfPay for TestService {
+            async fn handshake(
+                &self,
+                _request: Request<HandshakeRequest>,
+            ) -> Result<Response<HandshakeResponse>, Status> {
+                let mut counter = self.session_id_counter.lock().unwrap();
+                *counter = counter.wrapping_add(1);
+                let session_id = *counter;
+                Ok(Response::new(HandshakeResponse {
+                    salt: TEST_SALT.to_vec(),
+                    session_id,
+                    session_idle_timeout_s: 3600,
+                }))
+            }
+
             async fn call(
                 &self,
                 request: Request<EncryptedRequest>,
@@ -44,10 +70,11 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
                     .decrypt(&req.nonce, &req.ciphertext)
                     .map_err(|_| Status::unauthenticated("decrypt failed"))?;
 
-                let input: Input = serde_json::from_slice(&plaintext)
-                    .map_err(|e| Status::invalid_argument(format!("{e}")))?;
+                let request_parsed: agent_first_pay::types::Request =
+                    serde_json::from_slice(&plaintext)
+                        .map_err(|e| Status::invalid_argument(format!("{e}")))?;
 
-                if input.is_local_only() {
+                if request_parsed.input.is_local_only() {
                     return Err(Status::permission_denied("local-only operation"));
                 }
 
@@ -60,12 +87,26 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
                     store,
                 ));
                 app.requests_total.fetch_add(1, Ordering::Relaxed);
-                agent_first_pay::handler::dispatch(&app, input).await;
+                agent_first_pay::handler::dispatch(&app, request_parsed).await;
                 drop(app);
 
+                // Mirror the production `call()` handler (mode::rpc::AfPayService): the
+                // wire format is always a strict AFDATA protocol envelope, never a raw
+                // `Output`-tagged value — the client's `decode_protocol_events` requires it.
                 let mut outputs = Vec::new();
                 while let Some(out) = rx.recv().await {
-                    let v = serde_json::to_value(&out).unwrap_or(serde_json::Value::Null);
+                    let v =
+                        agent_first_pay::output_fmt::protocol_event(&out).unwrap_or_else(|error| {
+                            serde_json::json!({
+                                "kind": "error",
+                                "error": {
+                                    "code": "serialization_failed",
+                                    "message": error,
+                                    "retryable": false,
+                                },
+                                "trace": {},
+                            })
+                        });
                     outputs.push(v);
                 }
 
@@ -74,7 +115,11 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
                 let (nonce, ciphertext) =
                     self.cipher.encrypt(&resp_json).map_err(Status::internal)?;
 
-                Ok(Response::new(EncryptedResponse { nonce, ciphertext }))
+                Ok(Response::new(EncryptedResponse {
+                    session_id: req.session_id,
+                    nonce,
+                    ciphertext,
+                }))
             }
         }
 
@@ -85,7 +130,8 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
         };
 
         let svc = TestService {
-            cipher: Cipher::from_secret(&secret_clone),
+            cipher: Cipher::from_secret_with_salt(&secret_clone, &TEST_SALT),
+            session_id_counter: Mutex::new(0),
             config,
         };
         tonic::transport::Server::builder()
@@ -103,11 +149,13 @@ fn start_test_server() -> (SocketAddr, String, JoinHandle<()>) {
 // ═══════════════════════════════════════════
 
 mod crypto_roundtrip {
+    use super::TEST_SALT;
+
     #[test]
     fn roundtrip() {
         use agent_first_pay::mode::rpc::crypto::Cipher;
 
-        let cipher = Cipher::from_secret("integration-test-secret");
+        let cipher = Cipher::from_secret_with_salt("integration-test-secret", &TEST_SALT);
         let plaintext = b"{\"code\":\"version\"}";
         let (nonce, ct) = cipher.encrypt(plaintext).unwrap();
         let decrypted = cipher.decrypt(&nonce, &ct).unwrap();
@@ -115,24 +163,38 @@ mod crypto_roundtrip {
     }
 }
 
-/// Raw gRPC version request/response (manual encrypt/decrypt via Cipher, no remote:: helpers).
+/// Raw gRPC version request/response (manual handshake + encrypt/decrypt via
+/// Cipher, no remote:: helpers). Exercises the handshake → call flow at the
+/// wire level so any incompatible proto change shows up here.
 #[tokio::test]
 async fn rpc_version_raw() {
     use agent_first_pay::mode::rpc::crypto::Cipher;
     use agent_first_pay::mode::rpc::proto::af_pay_client::AfPayClient;
-    use agent_first_pay::mode::rpc::proto::EncryptedRequest;
+    use agent_first_pay::mode::rpc::proto::{EncryptedRequest, HandshakeRequest};
 
     let (addr, secret, server_handle) = start_test_server();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let cipher = Cipher::from_secret(&secret);
-    let version_json = br#"{"code":"version"}"#;
-    let (nonce, ct) = cipher.encrypt(version_json).unwrap();
-
     let url = format!("http://{}", addr);
     let mut client = AfPayClient::connect(url).await.unwrap();
+
+    // 1. Handshake: server returns salt + session_id.
+    let hs = client
+        .handshake(HandshakeRequest {
+            client_nonce: vec![0u8; 16],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let cipher = Cipher::from_secret_with_salt(&secret, &hs.salt);
+
+    // 2. Call: send Request{ dry_run:false, input: Version } encrypted under
+    //    the session cipher and reference the handshake's session_id.
+    let version_json = br#"{"code":"version"}"#;
+    let (nonce, ct) = cipher.encrypt(version_json).unwrap();
     let resp = client
         .call(EncryptedRequest {
+            session_id: hs.session_id,
             nonce,
             ciphertext: ct,
         })
@@ -140,16 +202,26 @@ async fn rpc_version_raw() {
         .unwrap()
         .into_inner();
 
+    assert_eq!(
+        resp.session_id, hs.session_id,
+        "server must echo the session_id"
+    );
     let resp_plain = cipher.decrypt(&resp.nonce, &resp.ciphertext).unwrap();
     let outputs: Vec<serde_json::Value> = serde_json::from_slice(&resp_plain).unwrap();
 
     assert!(!outputs.is_empty(), "expected at least one output");
+    // The wire format is always a strict AFDATA protocol envelope (see
+    // `crate::output_fmt::protocol_event`), not a raw `Output`-tagged value —
+    // this is the wire-level contract `remote::rpc_call`'s `decode_protocol_events`
+    // unwraps back to the flat `code`/`version` shape.
     assert_eq!(
-        outputs[0].get("code").and_then(|v| v.as_str()),
-        Some("version"),
+        outputs[0].get("kind").and_then(|v| v.as_str()),
+        Some("result")
     );
+    let result = outputs[0].get("result").expect("result payload");
+    assert_eq!(result.get("code").and_then(|v| v.as_str()), Some("version"));
     assert!(
-        outputs[0].get("version").and_then(|v| v.as_str()).is_some(),
+        result.get("version").and_then(|v| v.as_str()).is_some(),
         "version response should include version field"
     );
 
@@ -225,8 +297,11 @@ fn emit_remote_outputs_detects_error() {
     let outputs = vec![
         serde_json::json!({"code": "version", "version": "0.1.0", "trace": {"uptime_s": 1, "requests_total": 1, "in_flight": 0}}),
     ];
-    let had_error =
-        remote::emit_remote_outputs(&outputs, agent_first_data::OutputFormat::Json, &[]);
+    let had_error = remote::emit_remote_outputs(
+        &outputs,
+        agent_first_data::OutputFormat::Json,
+        &agent_first_data::LogFilters::new(Vec::<String>::new()),
+    );
     assert!(!had_error, "version should not be an error");
 
     let outputs_with_error = vec![
@@ -235,7 +310,7 @@ fn emit_remote_outputs_detects_error() {
     let had_error = remote::emit_remote_outputs(
         &outputs_with_error,
         agent_first_data::OutputFormat::Json,
-        &[],
+        &agent_first_data::LogFilters::new(Vec::<String>::new()),
     );
     assert!(had_error, "error output should be detected");
 }
@@ -251,15 +326,18 @@ fn emit_remote_outputs_filters_logs() {
     ];
 
     // With empty log filters, log events are skipped (only pong rendered)
-    let had_error =
-        remote::emit_remote_outputs(&outputs, agent_first_data::OutputFormat::Json, &[]);
+    let had_error = remote::emit_remote_outputs(
+        &outputs,
+        agent_first_data::OutputFormat::Json,
+        &agent_first_data::LogFilters::new(Vec::<String>::new()),
+    );
     assert!(!had_error);
 
     // With matching filter, log events pass through
     let had_error = remote::emit_remote_outputs(
         &outputs,
         agent_first_data::OutputFormat::Json,
-        &["startup".to_string()],
+        &agent_first_data::LogFilters::new(["startup"]),
     );
     assert!(!had_error);
 }
@@ -327,12 +405,10 @@ async fn config_update_rejects_unsupported_fields() {
 
     agent_first_pay::handler::dispatch(
         &app,
-        Input::Config(ConfigPatch {
-            data_dir: Some("/tmp/alt".to_string()),
-            log: None,
-            exchange_rate: None,
-            afpay_rpc: None,
-            providers: None,
+        Request::from_input(Input::ConfigSet {
+            id: "t".to_string(),
+            key: "data_dir".to_string(),
+            values: vec!["/tmp/alt".to_string()],
         }),
     )
     .await;
@@ -343,8 +419,8 @@ async fn config_update_rejects_unsupported_fields() {
         Output::Error {
             error_code, error, ..
         } => {
-            assert_eq!(error_code, "not_implemented");
-            assert!(error.contains("only supports 'log'"));
+            assert_eq!(error_code, "invalid_request");
+            assert!(error.contains("data_dir"), "got: {error}");
         }
         other => panic!("expected error output, got: {other:?}"),
     }
@@ -365,12 +441,10 @@ async fn config_update_allows_log() {
 
     agent_first_pay::handler::dispatch(
         &app,
-        Input::Config(ConfigPatch {
-            data_dir: None,
-            log: Some(vec!["wallet".to_string(), "pay".to_string()]),
-            exchange_rate: None,
-            afpay_rpc: None,
-            providers: None,
+        Request::from_input(Input::ConfigSet {
+            id: "t".to_string(),
+            key: "log".to_string(),
+            values: vec!["wallet".to_string(), "pay".to_string()],
         }),
     )
     .await;
@@ -400,7 +474,7 @@ async fn send_failure_does_not_consume_limit() {
 
     agent_first_pay::handler::dispatch(
         &app,
-        Input::LimitSet {
+        Request::from_input(Input::LimitSet {
             id: "limit_set".to_string(),
             limits: vec![agent_first_pay::types::SpendLimit {
                 rule_id: None,
@@ -411,14 +485,14 @@ async fn send_failure_does_not_consume_limit() {
                 max_spend: 1000,
                 token: None,
             }],
-        },
+        }),
     )
     .await;
     let _ = rx.recv().await.expect("limit_set output");
 
     agent_first_pay::handler::dispatch(
         &app,
-        Input::CashuSend {
+        Request::from_input(Input::CashuSend {
             id: "send_fail".to_string(),
             wallet: None,
             amount: agent_first_pay::types::Amount {
@@ -428,7 +502,8 @@ async fn send_failure_does_not_consume_limit() {
             onchain_memo: None,
             local_memo: None,
             mints: None,
-        },
+            idempotency_key: None,
+        }),
     )
     .await;
     let send_out = rx.recv().await.expect("send output");
@@ -439,9 +514,9 @@ async fn send_failure_does_not_consume_limit() {
 
     agent_first_pay::handler::dispatch(
         &app,
-        Input::LimitList {
+        Request::from_input(Input::LimitList {
             id: "limit_get".to_string(),
-        },
+        }),
     )
     .await;
     drop(app);
@@ -491,10 +566,10 @@ async fn app_uses_remote_provider_from_config() {
     // Dispatch a wallet_list for ln — should go through RemoteProvider → test server
     agent_first_pay::handler::dispatch(
         &app,
-        Input::WalletList {
+        Request::from_input(Input::WalletList {
             id: "remote_test".to_string(),
             network: Some(agent_first_pay::types::Network::Ln),
-        },
+        }),
     )
     .await;
     drop(app);

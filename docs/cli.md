@@ -1,1688 +1,2299 @@
-<!-- Generated. Do not edit by hand. -->
+<!-- Generated. Do not edit by hand. Regenerate: afpay --help --recursive --output markdown -->
 
 # afpay CLI Reference
 
-> Regenerate with `afpay --help-markdown`.
-> See [../README.md](../README.md) for setup and examples, and [architecture.md](architecture.md) for deployment details.
-
-# Command-Line Help for `afpay`
-
-This document contains the help content for the `afpay` command-line program.
-
-**Command Overview:**
-
-* [`afpay`↴](#afpay)
-* [`afpay global`↴](#afpay-global)
-* [`afpay global limit`↴](#afpay-global-limit)
-* [`afpay global limit add`↴](#afpay-global-limit-add)
-* [`afpay global config`↴](#afpay-global-config)
-* [`afpay global config show`↴](#afpay-global-config-show)
-* [`afpay global config set`↴](#afpay-global-config-set)
-* [`afpay global backup`↴](#afpay-global-backup)
-* [`afpay global restore`↴](#afpay-global-restore)
-* [`afpay cashu`↴](#afpay-cashu)
-* [`afpay cashu send`↴](#afpay-cashu-send)
-* [`afpay cashu receive`↴](#afpay-cashu-receive)
-* [`afpay cashu send-to-ln`↴](#afpay-cashu-send-to-ln)
-* [`afpay cashu receive-from-ln`↴](#afpay-cashu-receive-from-ln)
-* [`afpay cashu receive-from-ln-claim`↴](#afpay-cashu-receive-from-ln-claim)
-* [`afpay cashu balance`↴](#afpay-cashu-balance)
-* [`afpay cashu wallet`↴](#afpay-cashu-wallet)
-* [`afpay cashu wallet create`↴](#afpay-cashu-wallet-create)
-* [`afpay cashu wallet close`↴](#afpay-cashu-wallet-close)
-* [`afpay cashu wallet list`↴](#afpay-cashu-wallet-list)
-* [`afpay cashu wallet dangerously-show-seed`↴](#afpay-cashu-wallet-dangerously-show-seed)
-* [`afpay cashu wallet restore`↴](#afpay-cashu-wallet-restore)
-* [`afpay cashu limit`↴](#afpay-cashu-limit)
-* [`afpay cashu limit add`↴](#afpay-cashu-limit-add)
-* [`afpay cashu config`↴](#afpay-cashu-config)
-* [`afpay cashu config show`↴](#afpay-cashu-config-show)
-* [`afpay cashu config set`↴](#afpay-cashu-config-set)
-* [`afpay cashu backup`↴](#afpay-cashu-backup)
-* [`afpay cashu restore`↴](#afpay-cashu-restore)
-* [`afpay ln`↴](#afpay-ln)
-* [`afpay ln wallet`↴](#afpay-ln-wallet)
-* [`afpay ln wallet create`↴](#afpay-ln-wallet-create)
-* [`afpay ln wallet close`↴](#afpay-ln-wallet-close)
-* [`afpay ln wallet list`↴](#afpay-ln-wallet-list)
-* [`afpay ln wallet dangerously-show-seed`↴](#afpay-ln-wallet-dangerously-show-seed)
-* [`afpay ln send`↴](#afpay-ln-send)
-* [`afpay ln receive`↴](#afpay-ln-receive)
-* [`afpay ln balance`↴](#afpay-ln-balance)
-* [`afpay ln limit`↴](#afpay-ln-limit)
-* [`afpay ln limit add`↴](#afpay-ln-limit-add)
-* [`afpay ln config`↴](#afpay-ln-config)
-* [`afpay ln config show`↴](#afpay-ln-config-show)
-* [`afpay ln config set`↴](#afpay-ln-config-set)
-* [`afpay ln backup`↴](#afpay-ln-backup)
-* [`afpay ln restore`↴](#afpay-ln-restore)
-* [`afpay sol`↴](#afpay-sol)
-* [`afpay sol wallet`↴](#afpay-sol-wallet)
-* [`afpay sol wallet create`↴](#afpay-sol-wallet-create)
-* [`afpay sol wallet close`↴](#afpay-sol-wallet-close)
-* [`afpay sol wallet list`↴](#afpay-sol-wallet-list)
-* [`afpay sol wallet dangerously-show-seed`↴](#afpay-sol-wallet-dangerously-show-seed)
-* [`afpay sol send`↴](#afpay-sol-send)
-* [`afpay sol receive`↴](#afpay-sol-receive)
-* [`afpay sol balance`↴](#afpay-sol-balance)
-* [`afpay sol limit`↴](#afpay-sol-limit)
-* [`afpay sol limit add`↴](#afpay-sol-limit-add)
-* [`afpay sol config`↴](#afpay-sol-config)
-* [`afpay sol config show`↴](#afpay-sol-config-show)
-* [`afpay sol config set`↴](#afpay-sol-config-set)
-* [`afpay sol config token-add`↴](#afpay-sol-config-token-add)
-* [`afpay sol config token-remove`↴](#afpay-sol-config-token-remove)
-* [`afpay sol backup`↴](#afpay-sol-backup)
-* [`afpay sol restore`↴](#afpay-sol-restore)
-* [`afpay evm`↴](#afpay-evm)
-* [`afpay evm wallet`↴](#afpay-evm-wallet)
-* [`afpay evm wallet create`↴](#afpay-evm-wallet-create)
-* [`afpay evm wallet close`↴](#afpay-evm-wallet-close)
-* [`afpay evm wallet list`↴](#afpay-evm-wallet-list)
-* [`afpay evm wallet dangerously-show-seed`↴](#afpay-evm-wallet-dangerously-show-seed)
-* [`afpay evm send`↴](#afpay-evm-send)
-* [`afpay evm receive`↴](#afpay-evm-receive)
-* [`afpay evm balance`↴](#afpay-evm-balance)
-* [`afpay evm limit`↴](#afpay-evm-limit)
-* [`afpay evm limit add`↴](#afpay-evm-limit-add)
-* [`afpay evm config`↴](#afpay-evm-config)
-* [`afpay evm config show`↴](#afpay-evm-config-show)
-* [`afpay evm config set`↴](#afpay-evm-config-set)
-* [`afpay evm config token-add`↴](#afpay-evm-config-token-add)
-* [`afpay evm config token-remove`↴](#afpay-evm-config-token-remove)
-* [`afpay evm backup`↴](#afpay-evm-backup)
-* [`afpay evm restore`↴](#afpay-evm-restore)
-* [`afpay btc`↴](#afpay-btc)
-* [`afpay btc wallet`↴](#afpay-btc-wallet)
-* [`afpay btc wallet create`↴](#afpay-btc-wallet-create)
-* [`afpay btc wallet close`↴](#afpay-btc-wallet-close)
-* [`afpay btc wallet list`↴](#afpay-btc-wallet-list)
-* [`afpay btc wallet dangerously-show-seed`↴](#afpay-btc-wallet-dangerously-show-seed)
-* [`afpay btc send`↴](#afpay-btc-send)
-* [`afpay btc receive`↴](#afpay-btc-receive)
-* [`afpay btc balance`↴](#afpay-btc-balance)
-* [`afpay btc limit`↴](#afpay-btc-limit)
-* [`afpay btc limit add`↴](#afpay-btc-limit-add)
-* [`afpay btc config`↴](#afpay-btc-config)
-* [`afpay btc config show`↴](#afpay-btc-config-show)
-* [`afpay btc config set`↴](#afpay-btc-config-set)
-* [`afpay btc backup`↴](#afpay-btc-backup)
-* [`afpay btc restore`↴](#afpay-btc-restore)
-* [`afpay wallet`↴](#afpay-wallet)
-* [`afpay wallet list`↴](#afpay-wallet-list)
-* [`afpay balance`↴](#afpay-balance)
-* [`afpay history`↴](#afpay-history)
-* [`afpay history list`↴](#afpay-history-list)
-* [`afpay history status`↴](#afpay-history-status)
-* [`afpay history update`↴](#afpay-history-update)
-* [`afpay limit`↴](#afpay-limit)
-* [`afpay limit remove`↴](#afpay-limit-remove)
-* [`afpay limit list`↴](#afpay-limit-list)
+# Agent-First Pay - A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control.
 
-## `afpay`
+```text
+Usage: afpay [OPTIONS] [COMMAND]
 
-Agent-first cryptocurrency micropayment tool
+Commands:
+  global     Global (cross-network) operations
+  cashu      Cashu operations
+  ln         Lightning Network operations (NWC, phoenixd, LNbits)
+  sol        Solana operations
+  evm        EVM chain operations (Base, Arbitrum)
+  btc        Bitcoin on-chain operations
+  wallet     List all wallets (cross-network)
+  balance    All wallets balance (cross-network)
+  history    History queries
+  limit      Spend limit list and remove (cross-network)
+  skill      Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
+  container  Build and run the afpay daemon container (Docker, Podman, or Apple) from the embedded recipe
+  help       Print this message or the help of the given subcommand(s)
 
-**Usage:** `afpay [OPTIONS] [COMMAND]`
+Options:
+      --mode <MODE>
+          Run mode
 
-###### **Subcommands:**
+          [default: cli]
+          [possible values: cli, pipe, interactive, tui, rpc, rest]
 
-* `global` — Global (cross-network) operations
-* `cashu` — Cashu operations
-* `ln` — Lightning Network operations (NWC, phoenixd, LNbits)
-* `sol` — Solana operations
-* `evm` — EVM chain operations (Base, Arbitrum)
-* `btc` — Bitcoin on-chain operations
-* `wallet` — List all wallets (cross-network)
-* `balance` — All wallets balance (cross-network)
-* `history` — History queries
-* `limit` — Spend limit list and remove (cross-network)
+      --rpc-endpoint <RPC_ENDPOINT>
+          Connect to remote RPC daemon (cli mode)
 
-###### **Options:**
+      --rpc-listen <RPC_LISTEN>
+          Listen address for RPC daemon (rpc mode)
 
-* `--mode <MODE>` — Run mode
+          [default: 127.0.0.1:9400]
 
-  Default value: `cli`
+      --rpc-secret <RPC_SECRET>
+          RPC encryption secret
 
-  Possible values: `cli`, `pipe`, `interactive`, `tui`, `rpc`, `rest`
+      --rest-listen <REST_LISTEN>
+          Listen address for REST HTTP server (rest mode)
 
-* `--rpc-endpoint <RPC_ENDPOINT>` — Connect to remote RPC daemon (cli mode)
-* `--rpc-listen <RPC_LISTEN>` — Listen address for RPC daemon (rpc mode)
+          [default: 127.0.0.1:9401]
 
-  Default value: `127.0.0.1:9400`
-* `--rpc-secret <RPC_SECRET>` — RPC encryption secret
-* `--rest-listen <REST_LISTEN>` — Listen address for REST HTTP server (rest mode)
+      --rest-api-key <REST_API_KEY>
+          API key for REST bearer authentication (rest mode)
 
-  Default value: `127.0.0.1:9401`
-* `--rest-api-key <REST_API_KEY>` — API key for REST bearer authentication (rest mode)
-* `--public-listen` — Allow binding REST/RPC to non-loopback addresses; use only behind TLS/firewall
-* `--data-dir <DATA_DIR>` — Wallet and data directory
-* `--output <OUTPUT>` — Output format
+      --public-listen
+          Allow binding REST/RPC to non-loopback addresses; use only behind TLS/firewall
 
-  Default value: `json`
-* `--log <LOG>` — Log filters (comma-separated)
-* `--dry-run` — Preview the command without executing it
+      --data-dir <DATA_DIR>
+          Wallet and data directory
 
+      --output <OUTPUT>
+          Output format
 
+          [default: json]
 
-## `afpay global`
+      --stdout-file <PATH>
+          Redirect stdout bytes to this file
 
-Global (cross-network) operations
+      --stderr-file <PATH>
+          Redirect stderr bytes to this file
 
-**Usage:** `afpay global <COMMAND>`
+      --log <LOG>
+          Log filters (comma-separated)
 
-###### **Subcommands:**
+      --dry-run
+          Preview the command without executing it
 
-* `limit` — Global spend limit (USD cents)
-* `config` — Global runtime configuration
-* `backup` — Back up all data to a .tar.zst archive
-* `restore` — Restore all data from a .tar.zst archive
+  -h, --help
+          Print help. Add --recursive to expand every nested subcommand; add --output json|yaml|markdown to render this help in another format.
 
+  -V, --version
+          Print version
+```
 
+## Agent-First Pay global - Global (cross-network) operations
 
-## `afpay global limit`
+```text
+Usage: global <COMMAND>
 
-Global spend limit (USD cents)
+Commands:
+  limit    Global spend limit (USD cents)
+  config   Global runtime configuration
+  backup   Back up all data to a .tar.zst archive
+  restore  Restore all data from a .tar.zst archive
+  help     Print this message or the help of the given subcommand(s)
 
-**Usage:** `afpay global limit <COMMAND>`
+Options:
+  -h, --help
+          Print help
+```
 
-###### **Subcommands:**
+### Agent-First Pay global limit - Global spend limit (USD cents)
 
-* `add` — Add a global spend limit (USD cents)
+```text
+Usage: limit <COMMAND>
 
+Commands:
+  add   Add a global spend limit (USD cents)
+  help  Print this message or the help of the given subcommand(s)
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay global limit add`
+#### Agent-First Pay global limit add - Add a global spend limit (USD cents)
 
-Add a global spend limit (USD cents)
+```text
+Usage: add --window <WINDOW> --max-spend <MAX_SPEND>
 
-**Usage:** `afpay global limit add --window <WINDOW> --max-spend <MAX_SPEND>`
+Options:
+      --window <WINDOW>
+          Time window: e.g. 30m, 1h, 24h, 7d
 
-###### **Options:**
+      --max-spend <MAX_SPEND>
+          Maximum spend in USD cents
 
-* `--window <WINDOW>` — Time window: e.g. 30m, 1h, 24h, 7d
-* `--max-spend <MAX_SPEND>` — Maximum spend in USD cents
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay global config - Global runtime configuration
 
+```text
+Usage: config <COMMAND>
 
-## `afpay global config`
+Commands:
+  get   Get a config value by dot-path key (omit key to show all)
+  set   Set a config value by dot-path key
+  help  Print this message or the help of the given subcommand(s)
 
-Global runtime configuration
+Options:
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay global config <COMMAND>`
+#### Agent-First Pay global config get - Get a config value by dot-path key (omit key to show all)
 
-###### **Subcommands:**
+```text
+Usage: get [KEY]
 
-* `show` — Show current runtime configuration
-* `set` — Update runtime configuration
+Arguments:
+  [KEY]
+          Dot-path key (e.g. log, exchange_rate.ttl_s)
 
+Options:
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay global config set - Set a config value by dot-path key
 
-## `afpay global config show`
+```text
+Usage: set <KEY> [VALUES]...
 
-Show current runtime configuration
+Arguments:
+  <KEY>
+          Dot-path key (e.g. log, exchange_rate.ttl_s)
 
-**Usage:** `afpay global config show`
+  [VALUES]...
+          Value(s) to set
 
+Options:
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay global backup - Back up all data to a .tar.zst archive
 
-## `afpay global config set`
+```text
+Usage: backup [OPTIONS]
 
-Update runtime configuration
+Options:
+      --output <OUTPUT>
+          Output archive path (default: ./afpay-global-{timestamp}.tar.zst)
 
-**Usage:** `afpay global config set [OPTIONS]`
+      --extra-dir <EXTRA_DIR>
+          Include an extra directory: --extra-dir label=/path (repeatable)
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--log <LOG>` — Log filters (comma-separated: startup,cashu,ln,sol,wallet,all,off)
+### Agent-First Pay global restore - Restore all data from a .tar.zst archive
 
+```text
+Usage: restore [OPTIONS] <ARCHIVE>
 
+Arguments:
+  <ARCHIVE>
+          Path to the backup archive
 
-## `afpay global backup`
+Options:
+      --dangerously-overwrite
+          Clear all existing data before restoring (default: merge)
 
-Back up all data to a .tar.zst archive
+      --pg-url-secret <PG_URL_SECRET>
+          Override PostgreSQL connection URL for the pg restore step
 
-**Usage:** `afpay global backup [OPTIONS]`
+      --extra-dir <EXTRA_DIR>
+          Restore an extra directory: --extra-dir label=/path (repeatable)
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--output <OUTPUT>` — Output archive path (default: ./afpay-global-{timestamp}.tar.zst)
-* `--extra-dir <EXTRA_DIR>` — Include an extra directory: --extra-dir label=/path (repeatable)
+## Agent-First Pay cashu - Cashu operations
 
+```text
+Usage: cashu <COMMAND>
 
+Commands:
+  send                   Send P2P cashu token (outputs token string; for Lightning, use send-to-ln)
+  receive                Receive cashu token
+  send-to-ln             Send cashu to a Lightning invoice
+  receive-from-ln        Create Lightning invoice to receive cashu from LN
+  receive-from-ln-claim  Claim minted tokens from a receive-from-ln quote
+  balance                Check cashu balance
+  wallet                 Wallet management
+  limit                  Spend limit for cashu network or a specific cashu wallet
+  config                 Per-wallet configuration
+  backup                 Back up cashu wallet data to a .tar.zst archive
+  restore                Restore cashu wallet data from a .tar.zst archive
+  help                   Print this message or the help of the given subcommand(s)
 
-## `afpay global restore`
+Options:
+  -h, --help
+          Print help
+```
 
-Restore all data from a .tar.zst archive
+### Agent-First Pay cashu send - Send P2P cashu token (outputs token string; for Lightning, use send-to-ln)
 
-**Usage:** `afpay global restore [OPTIONS] <ARCHIVE>`
+```text
+Usage: send [OPTIONS] --amount-sats <AMOUNT_SATS>
 
-###### **Arguments:**
+Options:
+      --amount-sats <AMOUNT_SATS>
+          Amount in sats (base units)
 
-* `<ARCHIVE>` — Path to the backup archive
+      --cashu-mint <MINT_URL>
+          Restrict to wallets on these mint URLs (tried in order)
 
-###### **Options:**
+      --wallet <WALLET>
+          Source wallet ID (auto-selected if omitted)
 
-* `--dangerously-overwrite` — Clear all existing data before restoring (default: merge)
-* `--pg-url-secret <PG_URL_SECRET>` — Override PostgreSQL connection URL for the pg restore step
-* `--extra-dir <EXTRA_DIR>` — Restore an extra directory: --extra-dir label=/path (repeatable)
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo (sent with the transaction)
 
+      --local-memo <LOCAL_MEMO>
+          Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
 
+      --idempotency-key <IDEMPOTENCY_KEY>
+          Opaque idempotency key (≤128 chars). A second send with the same key and identical body replays the first response instead of re-broadcasting; a different body returns idempotency_conflict. Persisted for 24h
 
-## `afpay cashu`
+  -h, --help
+          Print help
+```
 
-Cashu operations
+### Agent-First Pay cashu receive - Receive cashu token
 
-**Usage:** `afpay cashu <COMMAND>`
+```text
+Usage: receive [OPTIONS] <TOKEN>
 
-###### **Subcommands:**
+Arguments:
+  <TOKEN>
+          Cashu token string
 
-* `send` — Send P2P cashu token (outputs token string; for Lightning, use send-to-ln)
-* `receive` — Receive cashu token
-* `send-to-ln` — Send cashu to a Lightning invoice
-* `receive-from-ln` — Create Lightning invoice to receive cashu from LN
-* `receive-from-ln-claim` — Claim minted tokens from a receive-from-ln quote
-* `balance` — Check cashu balance
-* `wallet` — Wallet management
-* `limit` — Spend limit for cashu network or a specific cashu wallet
-* `config` — Per-wallet configuration
-* `backup` — Back up cashu wallet data to a .tar.zst archive
-* `restore` — Restore cashu wallet data from a .tar.zst archive
+Options:
+      --wallet <WALLET>
+          Wallet ID (auto-matched from token if omitted)
 
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay cashu send-to-ln - Send cashu to a Lightning invoice
 
-## `afpay cashu send`
+```text
+Usage: send-to-ln [OPTIONS] --to <TO>
 
-Send P2P cashu token (outputs token string; for Lightning, use send-to-ln)
+Options:
+      --to <TO>
+          Lightning invoice (bolt11)
 
-**Usage:** `afpay cashu send [OPTIONS] --amount-sats <AMOUNT_SATS>`
+      --wallet <WALLET>
+          Source wallet ID (auto-selected if omitted)
 
-###### **Options:**
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo (sent with the transaction)
 
-* `--amount-sats <AMOUNT_SATS>` — Amount in sats (base units)
-* `--cashu-mint <MINT_URL>` — Restrict to wallets on these mint URLs (tried in order)
-* `--wallet <WALLET>` — Source wallet ID (auto-selected if omitted)
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo (sent with the transaction)
-* `--local-memo <LOCAL_MEMO>` — Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
+      --local-memo <LOCAL_MEMO>
+          Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
 
+      --idempotency-key <IDEMPOTENCY_KEY>
+          Opaque idempotency key (≤128 chars). A second send with the same key and identical body replays the first response instead of re-broadcasting; a different body returns idempotency_conflict. Persisted for 24h
 
+  -h, --help
+          Print help
+```
 
-## `afpay cashu receive`
+### Agent-First Pay cashu receive-from-ln - Create Lightning invoice to receive cashu from LN
 
-Receive cashu token
+```text
+Usage: receive-from-ln [OPTIONS]
 
-**Usage:** `afpay cashu receive [OPTIONS] <TOKEN>`
+Options:
+      --amount-sats <AMOUNT_SATS>
+          Amount in sats (base units)
 
-###### **Arguments:**
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo (sent with the transaction)
 
-* `<TOKEN>` — Cashu token string
+      --wallet <WALLET>
+          Wallet ID (auto-selected if omitted)
 
-###### **Options:**
+      --wait
+          Wait for payment / matching receive transaction
 
-* `--wallet <WALLET>` — Wallet ID (auto-matched from token if omitted)
+      --wait-timeout-s <WAIT_TIMEOUT_S>
+          Timeout in seconds for --wait
 
+      --wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>
+          Poll interval in milliseconds for --wait
 
+      --qr-svg-file
+          Write receive QR payload to an SVG file
 
-## `afpay cashu send-to-ln`
+  -h, --help
+          Print help
+```
 
-Send cashu to a Lightning invoice
+### Agent-First Pay cashu receive-from-ln-claim - Claim minted tokens from a receive-from-ln quote
 
-**Usage:** `afpay cashu send-to-ln [OPTIONS] --to <TO>`
+```text
+Usage: receive-from-ln-claim --wallet <WALLET> --ln-quote-id <LN_QUOTE_ID>
 
-###### **Options:**
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-* `--to <TO>` — Lightning invoice (bolt11)
-* `--wallet <WALLET>` — Source wallet ID (auto-selected if omitted)
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo (sent with the transaction)
-* `--local-memo <LOCAL_MEMO>` — Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
+      --ln-quote-id <LN_QUOTE_ID>
+          Quote ID / payment hash from deposit
 
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay cashu balance - Check cashu balance
 
-## `afpay cashu receive-from-ln`
+```text
+Usage: balance [OPTIONS]
 
-Create Lightning invoice to receive cashu from LN
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit to show all cashu wallets)
 
-**Usage:** `afpay cashu receive-from-ln [OPTIONS]`
+      --check
+          Verify proofs against mint (slower but accurate)
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--amount-sats <AMOUNT_SATS>` — Amount in sats (base units)
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo (sent with the transaction)
-* `--wallet <WALLET>` — Wallet ID (auto-selected if omitted)
-* `--wait` — Wait for payment / matching receive transaction
-* `--wait-timeout-s <WAIT_TIMEOUT_S>` — Timeout in seconds for --wait
-* `--wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>` — Poll interval in milliseconds for --wait
-* `--qr-svg-file` — Write receive QR payload to an SVG file
+### Agent-First Pay cashu wallet - Wallet management
 
-  Default value: `false`
+```text
+Usage: wallet <COMMAND>
 
+Commands:
+  create                 Create a new cashu wallet
+  close                  Close a zero-balance cashu wallet
+  list                   List cashu wallets
+  dangerously-show-seed  Dangerously show wallet seed mnemonic (12 BIP39 words)
+  restore                Restore lost proofs from mint (fixes counter/proof sync issues)
+  help                   Print this message or the help of the given subcommand(s)
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay cashu receive-from-ln-claim`
+#### Agent-First Pay cashu wallet create - Create a new cashu wallet
 
-Claim minted tokens from a receive-from-ln quote
+```text
+Usage: create [OPTIONS] --cashu-mint <MINT_URL>
 
-**Usage:** `afpay cashu receive-from-ln-claim --wallet <WALLET> --ln-quote-id <LN_QUOTE_ID>`
+Options:
+      --cashu-mint <MINT_URL>
+          Cashu mint URL
 
-###### **Options:**
+      --label <LABEL>
+          Optional label
 
-* `--wallet <WALLET>` — Wallet ID
-* `--ln-quote-id <LN_QUOTE_ID>` — Quote ID / payment hash from deposit
+      --mnemonic-secret <MNEMONIC_SECRET>
+          Existing BIP39 mnemonic secret to restore this wallet
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay cashu wallet close - Close a zero-balance cashu wallet
 
-## `afpay cashu balance`
+```text
+Usage: close [OPTIONS] --wallet <WALLET>
 
-Check cashu balance
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-**Usage:** `afpay cashu balance [OPTIONS]`
+      --dangerously-skip-balance-check-and-may-lose-money
+          Dangerously skip balance checks when closing wallet
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--wallet <WALLET>` — Wallet ID (omit to show all cashu wallets)
-* `--check` — Verify proofs against mint (slower but accurate)
+#### Agent-First Pay cashu wallet list - List cashu wallets
 
+```text
+Usage: list
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay cashu wallet`
+#### Agent-First Pay cashu wallet dangerously-show-seed - Dangerously show wallet seed mnemonic (12 BIP39 words)
 
-Wallet management
+```text
+Usage: dangerously-show-seed --wallet <WALLET>
 
-**Usage:** `afpay cashu wallet <COMMAND>`
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-###### **Subcommands:**
+  -h, --help
+          Print help
+```
 
-* `create` — Create a new cashu wallet
-* `close` — Close a zero-balance cashu wallet
-* `list` — List cashu wallets
-* `dangerously-show-seed` — Dangerously show wallet seed mnemonic (12 BIP39 words)
-* `restore` — Restore lost proofs from mint (fixes counter/proof sync issues)
+#### Agent-First Pay cashu wallet restore - Restore lost proofs from mint (fixes counter/proof sync issues)
 
+```text
+Usage: restore --wallet <WALLET>
 
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-## `afpay cashu wallet create`
+  -h, --help
+          Print help
+```
 
-Create a new cashu wallet
+### Agent-First Pay cashu limit - Spend limit for cashu network or a specific cashu wallet
 
-**Usage:** `afpay cashu wallet create [OPTIONS] --cashu-mint <MINT_URL>`
+```text
+Usage: limit [OPTIONS] <COMMAND>
 
-###### **Options:**
+Commands:
+  add   Add a network or wallet spend limit
+  help  Print this message or the help of the given subcommand(s)
 
-* `--cashu-mint <MINT_URL>` — Cashu mint URL
-* `--label <LABEL>` — Optional label
-* `--mnemonic-secret <MNEMONIC_SECRET>` — Existing BIP39 mnemonic secret to restore this wallet
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit for network-level limit)
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay cashu limit add - Add a network or wallet spend limit
 
-## `afpay cashu wallet close`
+```text
+Usage: add --window <WINDOW> --max-spend <MAX_SPEND>
 
-Close a zero-balance cashu wallet
+Options:
+      --window <WINDOW>
+          Time window: e.g. 30m, 1h, 24h, 7d
 
-**Usage:** `afpay cashu wallet close [OPTIONS] --wallet <WALLET>`
+      --max-spend <MAX_SPEND>
+          Maximum spend in base units
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--wallet <WALLET>` — Wallet ID
-* `--dangerously-skip-balance-check-and-may-lose-money` — Dangerously skip balance checks when closing wallet
+### Agent-First Pay cashu config - Per-wallet configuration
 
+```text
+Usage: config --wallet <WALLET> <COMMAND>
 
+Commands:
+  show  Show current wallet configuration
+  set   Update wallet settings
+  help  Print this message or the help of the given subcommand(s)
 
-## `afpay cashu wallet list`
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-List cashu wallets
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay cashu wallet list`
+#### Agent-First Pay cashu config show - Show current wallet configuration
 
+```text
+Usage: show
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay cashu wallet dangerously-show-seed`
+#### Agent-First Pay cashu config set - Update wallet settings
 
-Dangerously show wallet seed mnemonic (12 BIP39 words)
+```text
+Usage: set [OPTIONS]
 
-**Usage:** `afpay cashu wallet dangerously-show-seed --wallet <WALLET>`
+Options:
+      --label <LABEL>
+          New label
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--wallet <WALLET>` — Wallet ID
+### Agent-First Pay cashu backup - Back up cashu wallet data to a .tar.zst archive
 
+```text
+Usage: backup [OPTIONS]
 
+Options:
+      --output <OUTPUT>
+          Output archive path (default: ./afpay-cashu-{timestamp}.tar.zst)
 
-## `afpay cashu wallet restore`
+      --wallet <WALLET>
+          Wallet ID (omit to back up all cashu wallets)
 
-Restore lost proofs from mint (fixes counter/proof sync issues)
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay cashu wallet restore --wallet <WALLET>`
+### Agent-First Pay cashu restore - Restore cashu wallet data from a .tar.zst archive
 
-###### **Options:**
+```text
+Usage: restore [OPTIONS] <ARCHIVE>
 
-* `--wallet <WALLET>` — Wallet ID
+Arguments:
+  <ARCHIVE>
+          Path to the backup archive
 
+Options:
+      --dangerously-overwrite
+          Clear existing data before restoring (default: merge)
 
+      --pg-url-secret <PG_URL_SECRET>
+          Override PostgreSQL connection URL for the pg restore step
 
-## `afpay cashu limit`
+  -h, --help
+          Print help
+```
 
-Spend limit for cashu network or a specific cashu wallet
+## Agent-First Pay ln - Lightning Network operations (NWC, phoenixd, LNbits)
 
-**Usage:** `afpay cashu limit [OPTIONS] <COMMAND>`
+```text
+Usage: ln <COMMAND>
 
-###### **Subcommands:**
+Commands:
+  wallet   Wallet management
+  send     Pay a Lightning invoice or BOLT12 offer
+  receive  Create a Lightning invoice (BOLT11) or get a reusable BOLT12 offer
+  balance  Check balance
+  limit    Spend limit for ln network or a specific ln wallet
+  config   Per-wallet configuration
+  backup   Back up Lightning wallet data to a .tar.zst archive
+  restore  Restore Lightning wallet data from a .tar.zst archive
+  help     Print this message or the help of the given subcommand(s)
 
-* `add` — Add a network or wallet spend limit
+Options:
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay ln wallet - Wallet management
 
-* `--wallet <WALLET>` — Wallet ID (omit for network-level limit)
+```text
+Usage: wallet <COMMAND>
 
+Commands:
+  create                 Create a new Lightning wallet
+  close                  Close a Lightning wallet
+  list                   List Lightning wallets
+  dangerously-show-seed  Dangerously show wallet seed (for LN this is backend credential, not mnemonic words)
+  help                   Print this message or the help of the given subcommand(s)
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay cashu limit add`
+#### Agent-First Pay ln wallet create - Create a new Lightning wallet
 
-Add a network or wallet spend limit
+```text
+Usage: create [OPTIONS] --backend <BACKEND>
 
-**Usage:** `afpay cashu limit add --window <WINDOW> --max-spend <MAX_SPEND>`
+Options:
+      --backend <BACKEND>
+          Backend: nwc, phoenixd, lnbits
 
-###### **Options:**
+          [possible values: nwc, phoenixd, lnbits]
 
-* `--window <WINDOW>` — Time window: e.g. 30m, 1h, 24h, 7d
-* `--max-spend <MAX_SPEND>` — Maximum spend in base units
+      --nwc-uri-secret <NWC_URI_SECRET>
+          NWC connection URI secret (for nwc backend)
 
+      --endpoint <ENDPOINT>
+          Endpoint URL (for phoenixd, lnbits)
 
+      --password-secret <PASSWORD_SECRET>
+          Password secret (for phoenixd)
 
-## `afpay cashu config`
+      --admin-key-secret <ADMIN_KEY_SECRET>
+          Admin API key secret (for lnbits)
 
-Per-wallet configuration
+      --label <LABEL>
+          Optional label
 
-**Usage:** `afpay cashu config --wallet <WALLET> <COMMAND>`
+  -h, --help
+          Print help
+```
 
-###### **Subcommands:**
+#### Agent-First Pay ln wallet close - Close a Lightning wallet
 
-* `show` — Show current wallet configuration
-* `set` — Update wallet settings
+```text
+Usage: close [OPTIONS] --wallet <WALLET>
 
-###### **Options:**
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-* `--wallet <WALLET>` — Wallet ID
+      --dangerously-skip-balance-check-and-may-lose-money
+          Dangerously skip balance checks when closing wallet
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay ln wallet list - List Lightning wallets
 
-## `afpay cashu config show`
+```text
+Usage: list
 
-Show current wallet configuration
+Options:
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay cashu config show`
+#### Agent-First Pay ln wallet dangerously-show-seed - Dangerously show wallet seed (for LN this is backend credential, not mnemonic words)
 
+```text
+Usage: dangerously-show-seed --wallet <WALLET>
 
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-## `afpay cashu config set`
+  -h, --help
+          Print help
+```
 
-Update wallet settings
+### Agent-First Pay ln send - Pay a Lightning invoice or BOLT12 offer
 
-**Usage:** `afpay cashu config set [OPTIONS]`
+```text
+Usage: send [OPTIONS] --to <TO>
 
-###### **Options:**
+Options:
+      --to <TO>
+          BOLT11 invoice or BOLT12 offer (lno1…) to pay
 
-* `--label <LABEL>` — New label
+      --amount-sats <AMOUNT_SATS>
+          Amount in sats (required for BOLT12 offers, rejected for BOLT11)
 
+      --wallet <WALLET>
+          Source wallet ID (auto-selected if omitted)
 
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo (sent with the transaction)
 
-## `afpay cashu backup`
+      --local-memo <LOCAL_MEMO>
+          Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
 
-Back up cashu wallet data to a .tar.zst archive
+      --idempotency-key <IDEMPOTENCY_KEY>
+          Opaque idempotency key (≤128 chars). A second send with the same key and identical body replays the first response instead of re-broadcasting; a different body returns idempotency_conflict. Persisted for 24h
 
-**Usage:** `afpay cashu backup [OPTIONS]`
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay ln receive - Create a Lightning invoice (BOLT11) or get a reusable BOLT12 offer
 
-* `--output <OUTPUT>` — Output archive path (default: ./afpay-cashu-{timestamp}.tar.zst)
-* `--wallet <WALLET>` — Wallet ID (omit to back up all cashu wallets)
+```text
+Usage: receive [OPTIONS]
 
+Options:
+      --amount-sats <AMOUNT_SATS>
+          Amount in sats (omit for BOLT12 offer)
 
+      --wallet <WALLET>
+          Wallet ID (auto-selected if omitted)
 
-## `afpay cashu restore`
+      --wait
+          Wait for payment / matching receive transaction
 
-Restore cashu wallet data from a .tar.zst archive
+      --wait-timeout-s <WAIT_TIMEOUT_S>
+          Timeout in seconds for --wait
 
-**Usage:** `afpay cashu restore [OPTIONS] <ARCHIVE>`
+      --wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>
+          Poll interval in milliseconds for --wait
 
-###### **Arguments:**
+      --qr-svg-file
+          Write receive QR payload to an SVG file
 
-* `<ARCHIVE>` — Path to the backup archive
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay ln balance - Check balance
 
-* `--dangerously-overwrite` — Clear existing data before restoring (default: merge)
-* `--pg-url-secret <PG_URL_SECRET>` — Override PostgreSQL connection URL for the pg restore step
+```text
+Usage: balance [OPTIONS]
 
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit to show all ln wallets)
 
+  -h, --help
+          Print help
+```
 
-## `afpay ln`
+### Agent-First Pay ln limit - Spend limit for ln network or a specific ln wallet
 
-Lightning Network operations (NWC, phoenixd, LNbits)
+```text
+Usage: limit [OPTIONS] <COMMAND>
 
-**Usage:** `afpay ln <COMMAND>`
+Commands:
+  add   Add a network or wallet spend limit
+  help  Print this message or the help of the given subcommand(s)
 
-###### **Subcommands:**
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit for network-level limit)
 
-* `wallet` — Wallet management
-* `send` — Pay a Lightning invoice or BOLT12 offer
-* `receive` — Create a Lightning invoice (BOLT11) or get a reusable BOLT12 offer
-* `balance` — Check balance
-* `limit` — Spend limit for ln network or a specific ln wallet
-* `config` — Per-wallet configuration
-* `backup` — Back up Lightning wallet data to a .tar.zst archive
-* `restore` — Restore Lightning wallet data from a .tar.zst archive
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay ln limit add - Add a network or wallet spend limit
 
+```text
+Usage: add --window <WINDOW> --max-spend <MAX_SPEND>
 
-## `afpay ln wallet`
+Options:
+      --window <WINDOW>
+          Time window: e.g. 30m, 1h, 24h, 7d
 
-Wallet management
+      --max-spend <MAX_SPEND>
+          Maximum spend in base units
 
-**Usage:** `afpay ln wallet <COMMAND>`
+  -h, --help
+          Print help
+```
 
-###### **Subcommands:**
+### Agent-First Pay ln config - Per-wallet configuration
 
-* `create` — Create a new Lightning wallet
-* `close` — Close a Lightning wallet
-* `list` — List Lightning wallets
-* `dangerously-show-seed` — Dangerously show wallet seed (for LN this is backend credential, not mnemonic words)
+```text
+Usage: config --wallet <WALLET> <COMMAND>
 
+Commands:
+  show  Show current wallet configuration
+  set   Update wallet settings
+  help  Print this message or the help of the given subcommand(s)
 
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-## `afpay ln wallet create`
+  -h, --help
+          Print help
+```
 
-Create a new Lightning wallet
+#### Agent-First Pay ln config show - Show current wallet configuration
 
-**Usage:** `afpay ln wallet create [OPTIONS] --backend <BACKEND>`
+```text
+Usage: show
 
-###### **Options:**
+Options:
+  -h, --help
+          Print help
+```
 
-* `--backend <BACKEND>` — Backend: nwc, phoenixd, lnbits
+#### Agent-First Pay ln config set - Update wallet settings
 
-  Possible values: `nwc`, `phoenixd`, `lnbits`
+```text
+Usage: set [OPTIONS]
 
-* `--nwc-uri-secret <NWC_URI_SECRET>` — NWC connection URI secret (for nwc backend)
-* `--endpoint <ENDPOINT>` — Endpoint URL (for phoenixd, lnbits)
-* `--password-secret <PASSWORD_SECRET>` — Password secret (for phoenixd)
-* `--admin-key-secret <ADMIN_KEY_SECRET>` — Admin API key secret (for lnbits)
-* `--label <LABEL>` — Optional label
+Options:
+      --label <LABEL>
+          New label
 
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay ln backup - Back up Lightning wallet data to a .tar.zst archive
 
-## `afpay ln wallet close`
+```text
+Usage: backup [OPTIONS]
 
-Close a Lightning wallet
+Options:
+      --output <OUTPUT>
+          Output archive path (default: ./afpay-ln-{timestamp}.tar.zst)
 
-**Usage:** `afpay ln wallet close [OPTIONS] --wallet <WALLET>`
+      --wallet <WALLET>
+          Wallet ID (omit to back up all ln wallets)
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--wallet <WALLET>` — Wallet ID
-* `--dangerously-skip-balance-check-and-may-lose-money` — Dangerously skip balance checks when closing wallet
+### Agent-First Pay ln restore - Restore Lightning wallet data from a .tar.zst archive
 
+```text
+Usage: restore [OPTIONS] <ARCHIVE>
 
+Arguments:
+  <ARCHIVE>
+          Path to the backup archive
 
-## `afpay ln wallet list`
+Options:
+      --dangerously-overwrite
+          Clear existing data before restoring (default: merge)
 
-List Lightning wallets
+      --pg-url-secret <PG_URL_SECRET>
+          Override PostgreSQL connection URL for the pg restore step
 
-**Usage:** `afpay ln wallet list`
+  -h, --help
+          Print help
+```
 
+## Agent-First Pay sol - Solana operations
 
+```text
+Usage: sol <COMMAND>
 
-## `afpay ln wallet dangerously-show-seed`
+Commands:
+  wallet   Wallet management
+  send     Send SOL or SPL token transfer
+  receive  Show wallet receive address
+  balance  Check balance
+  limit    Spend limit for sol network or a specific sol wallet
+  config   Per-wallet configuration
+  backup   Back up Solana wallet data to a .tar.zst archive
+  restore  Restore Solana wallet data from a .tar.zst archive
+  help     Print this message or the help of the given subcommand(s)
 
-Dangerously show wallet seed (for LN this is backend credential, not mnemonic words)
+Options:
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay ln wallet dangerously-show-seed --wallet <WALLET>`
+### Agent-First Pay sol wallet - Wallet management
 
-###### **Options:**
+```text
+Usage: wallet <COMMAND>
 
-* `--wallet <WALLET>` — Wallet ID
+Commands:
+  create                 Create a new Solana wallet
+  close                  Close a Solana wallet
+  list                   List Solana wallets
+  dangerously-show-seed  Dangerously show wallet seed mnemonic (12 BIP39 words)
+  help                   Print this message or the help of the given subcommand(s)
 
+Options:
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay sol wallet create - Create a new Solana wallet
 
-## `afpay ln send`
+```text
+Usage: create [OPTIONS] --sol-rpc-endpoint <SOL_RPC_ENDPOINT>
 
-Pay a Lightning invoice or BOLT12 offer
+Options:
+      --sol-rpc-endpoint <SOL_RPC_ENDPOINT>
+          Solana JSON-RPC endpoint (repeat to configure failover order)
 
-**Usage:** `afpay ln send [OPTIONS] --to <TO>`
+      --label <LABEL>
+          Optional label
 
-###### **Options:**
+      --sol-cluster <SOL_CLUSTER>
+          Solana cluster tag. Stored on the wallet; sends to a different cluster are rejected. Accepted: mainnet-beta, devnet, testnet
 
-* `--to <TO>` — BOLT11 invoice or BOLT12 offer (lno1…) to pay
-* `--amount-sats <AMOUNT_SATS>` — Amount in sats (required for BOLT12 offers, rejected for BOLT11)
-* `--wallet <WALLET>` — Source wallet ID (auto-selected if omitted)
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo (sent with the transaction)
-* `--local-memo <LOCAL_MEMO>` — Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay sol wallet close - Close a Solana wallet
 
+```text
+Usage: close [OPTIONS] --wallet <WALLET>
 
-## `afpay ln receive`
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-Create a Lightning invoice (BOLT11) or get a reusable BOLT12 offer
+      --dangerously-skip-balance-check-and-may-lose-money
+          Dangerously skip balance checks when closing wallet
 
-**Usage:** `afpay ln receive [OPTIONS]`
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+#### Agent-First Pay sol wallet list - List Solana wallets
 
-* `--amount-sats <AMOUNT_SATS>` — Amount in sats (omit for BOLT12 offer)
-* `--wallet <WALLET>` — Wallet ID (auto-selected if omitted)
-* `--wait` — Wait for payment / matching receive transaction
-* `--wait-timeout-s <WAIT_TIMEOUT_S>` — Timeout in seconds for --wait
-* `--wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>` — Poll interval in milliseconds for --wait
-* `--qr-svg-file` — Write receive QR payload to an SVG file
+```text
+Usage: list
 
-  Default value: `false`
+Options:
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay sol wallet dangerously-show-seed - Dangerously show wallet seed mnemonic (12 BIP39 words)
 
+```text
+Usage: dangerously-show-seed --wallet <WALLET>
 
-## `afpay ln balance`
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-Check balance
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay ln balance [OPTIONS]`
+### Agent-First Pay sol send - Send SOL or SPL token transfer
 
-###### **Options:**
+```text
+Usage: send [OPTIONS] --to <TO> --amount <AMOUNT> --token <TOKEN>
 
-* `--wallet <WALLET>` — Wallet ID (omit to show all ln wallets)
+Options:
+      --to <TO>
+          Recipient Solana address (base58)
 
+      --amount <AMOUNT>
+          Amount in token base units (lamports for SOL, smallest unit for SPL tokens)
 
+      --token <TOKEN>
+          Token: "native" for SOL, "usdc", "usdt", or SPL mint address
 
-## `afpay ln limit`
+      --reference <REFERENCE>
+          Reference key for order binding (base58-encoded 32 bytes, per strain-payment-method-solana)
 
-Spend limit for ln network or a specific ln wallet
+      --wallet <WALLET>
+          Source wallet ID (auto-selected if omitted)
 
-**Usage:** `afpay ln limit [OPTIONS] <COMMAND>`
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo (sent with the transaction)
 
-###### **Subcommands:**
+      --local-memo <LOCAL_MEMO>
+          Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
 
-* `add` — Add a network or wallet spend limit
+      --idempotency-key <IDEMPOTENCY_KEY>
+          Opaque idempotency key (≤128 chars). A second send with the same key and identical body replays the first response instead of re-broadcasting; a different body returns idempotency_conflict. Persisted for 24h
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--wallet <WALLET>` — Wallet ID (omit for network-level limit)
+### Agent-First Pay sol receive - Show wallet receive address
 
+```text
+Usage: receive [OPTIONS]
 
+Options:
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo to watch for (used with --wait)
 
-## `afpay ln limit add`
+      --min-confirmations <MIN_CONFIRMATIONS>
+          Minimum confirmation depth before considering payment settled (requires --wait)
 
-Add a network or wallet spend limit
+      --reference <REFERENCE>
+          Reference key to watch for (base58, used with --wait, per strain-payment-method-solana)
 
-**Usage:** `afpay ln limit add --window <WINDOW> --max-spend <MAX_SPEND>`
+      --wallet <WALLET>
+          Wallet ID (auto-selected if omitted)
 
-###### **Options:**
+      --wait
+          Wait for payment / matching receive transaction
 
-* `--window <WINDOW>` — Time window: e.g. 30m, 1h, 24h, 7d
-* `--max-spend <MAX_SPEND>` — Maximum spend in base units
+      --wait-timeout-s <WAIT_TIMEOUT_S>
+          Timeout in seconds for --wait
 
+      --wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>
+          Poll interval in milliseconds for --wait
 
+      --qr-svg-file
+          Write receive QR payload to an SVG file
 
-## `afpay ln config`
+  -h, --help
+          Print help
+```
 
-Per-wallet configuration
+### Agent-First Pay sol balance - Check balance
 
-**Usage:** `afpay ln config --wallet <WALLET> <COMMAND>`
+```text
+Usage: balance [OPTIONS]
 
-###### **Subcommands:**
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit to show all sol wallets)
 
-* `show` — Show current wallet configuration
-* `set` — Update wallet settings
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay sol limit - Spend limit for sol network or a specific sol wallet
 
-* `--wallet <WALLET>` — Wallet ID
+```text
+Usage: limit [OPTIONS] <COMMAND>
 
+Commands:
+  add   Add a network or wallet spend limit
+  help  Print this message or the help of the given subcommand(s)
 
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit for network-level limit)
 
-## `afpay ln config show`
+  -h, --help
+          Print help
+```
 
-Show current wallet configuration
+#### Agent-First Pay sol limit add - Add a network or wallet spend limit
 
-**Usage:** `afpay ln config show`
+```text
+Usage: add [OPTIONS] --window <WINDOW> --max-spend <MAX_SPEND>
 
+Options:
+      --token <TOKEN>
+          Token: native, usdc, usdt
 
+      --window <WINDOW>
+          Time window: e.g. 30m, 1h, 24h, 7d
 
-## `afpay ln config set`
+      --max-spend <MAX_SPEND>
+          Maximum spend in base units
 
-Update wallet settings
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay ln config set [OPTIONS]`
+### Agent-First Pay sol config - Per-wallet configuration
 
-###### **Options:**
+```text
+Usage: config --wallet <WALLET> <COMMAND>
 
-* `--label <LABEL>` — New label
+Commands:
+  show          Show current wallet configuration
+  set           Update wallet settings
+  token-add     Register a custom token for balance tracking
+  token-remove  Unregister a custom token
+  help          Print this message or the help of the given subcommand(s)
 
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
+  -h, --help
+          Print help
+```
 
-## `afpay ln backup`
+#### Agent-First Pay sol config show - Show current wallet configuration
 
-Back up Lightning wallet data to a .tar.zst archive
+```text
+Usage: show
 
-**Usage:** `afpay ln backup [OPTIONS]`
+Options:
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+#### Agent-First Pay sol config set - Update wallet settings
 
-* `--output <OUTPUT>` — Output archive path (default: ./afpay-ln-{timestamp}.tar.zst)
-* `--wallet <WALLET>` — Wallet ID (omit to back up all ln wallets)
+```text
+Usage: set [OPTIONS]
 
+Options:
+      --label <LABEL>
+          New label
 
+      --rpc-endpoint <RPC_ENDPOINT>
+          Replace RPC endpoint(s)
 
-## `afpay ln restore`
+  -h, --help
+          Print help
+```
 
-Restore Lightning wallet data from a .tar.zst archive
+#### Agent-First Pay sol config token-add - Register a custom token for balance tracking
 
-**Usage:** `afpay ln restore [OPTIONS] <ARCHIVE>`
+```text
+Usage: token-add [OPTIONS] --symbol <SYMBOL> --address <ADDRESS>
 
-###### **Arguments:**
+Options:
+      --symbol <SYMBOL>
+          Token symbol (e.g. dai)
 
-* `<ARCHIVE>` — Path to the backup archive
+      --address <ADDRESS>
+          Token contract address
 
-###### **Options:**
+      --decimals <DECIMALS>
+          Token decimals
 
-* `--dangerously-overwrite` — Clear existing data before restoring (default: merge)
-* `--pg-url-secret <PG_URL_SECRET>` — Override PostgreSQL connection URL for the pg restore step
+          [default: 6]
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay sol config token-remove - Unregister a custom token
 
-## `afpay sol`
+```text
+Usage: token-remove --symbol <SYMBOL>
 
-Solana operations
+Options:
+      --symbol <SYMBOL>
+          Token symbol to remove
 
-**Usage:** `afpay sol <COMMAND>`
+  -h, --help
+          Print help
+```
 
-###### **Subcommands:**
+### Agent-First Pay sol backup - Back up Solana wallet data to a .tar.zst archive
 
-* `wallet` — Wallet management
-* `send` — Send SOL or SPL token transfer
-* `receive` — Show wallet receive address
-* `balance` — Check balance
-* `limit` — Spend limit for sol network or a specific sol wallet
-* `config` — Per-wallet configuration
-* `backup` — Back up Solana wallet data to a .tar.zst archive
-* `restore` — Restore Solana wallet data from a .tar.zst archive
+```text
+Usage: backup [OPTIONS]
 
+Options:
+      --output <OUTPUT>
+          Output archive path (default: ./afpay-sol-{timestamp}.tar.zst)
 
+      --wallet <WALLET>
+          Wallet ID (omit to back up all sol wallets)
 
-## `afpay sol wallet`
+  -h, --help
+          Print help
+```
 
-Wallet management
+### Agent-First Pay sol restore - Restore Solana wallet data from a .tar.zst archive
 
-**Usage:** `afpay sol wallet <COMMAND>`
+```text
+Usage: restore [OPTIONS] <ARCHIVE>
 
-###### **Subcommands:**
+Arguments:
+  <ARCHIVE>
+          Path to the backup archive
 
-* `create` — Create a new Solana wallet
-* `close` — Close a Solana wallet
-* `list` — List Solana wallets
-* `dangerously-show-seed` — Dangerously show wallet seed mnemonic (12 BIP39 words)
+Options:
+      --dangerously-overwrite
+          Clear existing data before restoring (default: merge)
 
+      --pg-url-secret <PG_URL_SECRET>
+          Override PostgreSQL connection URL for the pg restore step
 
+  -h, --help
+          Print help
+```
 
-## `afpay sol wallet create`
+## Agent-First Pay evm - EVM chain operations (Base, Arbitrum)
 
-Create a new Solana wallet
+```text
+Usage: evm <COMMAND>
 
-**Usage:** `afpay sol wallet create [OPTIONS] --sol-rpc-endpoint <SOL_RPC_ENDPOINT>`
+Commands:
+  wallet   Wallet management
+  send     Send native token or ERC-20 token transfer
+  receive  Show wallet receive address
+  balance  Check balance
+  limit    Spend limit for evm network or a specific evm wallet
+  config   Per-wallet configuration
+  backup   Back up EVM wallet data to a .tar.zst archive
+  restore  Restore EVM wallet data from a .tar.zst archive
+  help     Print this message or the help of the given subcommand(s)
 
-###### **Options:**
+Options:
+  -h, --help
+          Print help
+```
 
-* `--sol-rpc-endpoint <SOL_RPC_ENDPOINT>` — Solana JSON-RPC endpoint (repeat to configure failover order)
-* `--label <LABEL>` — Optional label
+### Agent-First Pay evm wallet - Wallet management
 
+```text
+Usage: wallet <COMMAND>
 
+Commands:
+  create                 Create a new EVM chain wallet
+  close                  Close an EVM chain wallet
+  list                   List EVM chain wallets
+  dangerously-show-seed  Dangerously show wallet seed mnemonic (12 BIP39 words)
+  help                   Print this message or the help of the given subcommand(s)
 
-## `afpay sol wallet close`
+Options:
+  -h, --help
+          Print help
+```
 
-Close a Solana wallet
+#### Agent-First Pay evm wallet create - Create a new EVM chain wallet
 
-**Usage:** `afpay sol wallet close [OPTIONS] --wallet <WALLET>`
+```text
+Usage: create [OPTIONS] --evm-rpc-endpoint <EVM_RPC_ENDPOINT>
 
-###### **Options:**
+Options:
+      --evm-rpc-endpoint <EVM_RPC_ENDPOINT>
+          EVM JSON-RPC endpoint (repeat to configure failover order)
 
-* `--wallet <WALLET>` — Wallet ID
-* `--dangerously-skip-balance-check-and-may-lose-money` — Dangerously skip balance checks when closing wallet
+      --chain-id <CHAIN_ID>
+          Chain ID (default: 8453 = Base)
 
+          [default: 8453]
 
+      --label <LABEL>
+          Optional label
 
-## `afpay sol wallet list`
+  -h, --help
+          Print help
+```
 
-List Solana wallets
+#### Agent-First Pay evm wallet close - Close an EVM chain wallet
 
-**Usage:** `afpay sol wallet list`
+```text
+Usage: close [OPTIONS] --wallet <WALLET>
 
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
+      --dangerously-skip-balance-check-and-may-lose-money
+          Dangerously skip balance checks when closing wallet
 
-## `afpay sol wallet dangerously-show-seed`
+  -h, --help
+          Print help
+```
 
-Dangerously show wallet seed mnemonic (12 BIP39 words)
+#### Agent-First Pay evm wallet list - List EVM chain wallets
 
-**Usage:** `afpay sol wallet dangerously-show-seed --wallet <WALLET>`
+```text
+Usage: list
 
-###### **Options:**
+Options:
+  -h, --help
+          Print help
+```
 
-* `--wallet <WALLET>` — Wallet ID
+#### Agent-First Pay evm wallet dangerously-show-seed - Dangerously show wallet seed mnemonic (12 BIP39 words)
 
+```text
+Usage: dangerously-show-seed --wallet <WALLET>
 
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-## `afpay sol send`
+  -h, --help
+          Print help
+```
 
-Send SOL or SPL token transfer
+### Agent-First Pay evm send - Send native token or ERC-20 token transfer
 
-**Usage:** `afpay sol send [OPTIONS] --to <TO> --amount <AMOUNT> --token <TOKEN>`
+```text
+Usage: send [OPTIONS] --to <TO> --amount <AMOUNT> --token <TOKEN>
 
-###### **Options:**
+Options:
+      --to <TO>
+          Recipient address (0x...)
 
-* `--to <TO>` — Recipient Solana address (base58)
-* `--amount <AMOUNT>` — Amount in token base units (lamports for SOL, smallest unit for SPL tokens)
-* `--token <TOKEN>` — Token: "native" for SOL, "usdc", "usdt", or SPL mint address
-* `--reference <REFERENCE>` — Reference key for order binding (base58-encoded 32 bytes, per strain-payment-method-solana)
-* `--wallet <WALLET>` — Source wallet ID (auto-selected if omitted)
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo (sent with the transaction)
-* `--local-memo <LOCAL_MEMO>` — Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
+      --amount <AMOUNT>
+          Amount in token base units (wei for ETH, smallest unit for ERC-20)
 
+      --token <TOKEN>
+          Token: "native" for chain native, "usdc" or contract address for ERC-20
 
+      --chain-id <CHAIN_ID>
+          Optional chain_id pin. When set, the daemon verifies the wallet's chain_id matches before broadcasting. Mismatch returns wrong_chain
 
-## `afpay sol receive`
+      --wallet <WALLET>
+          Source wallet ID (auto-selected if omitted)
 
-Show wallet receive address
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo (sent with the transaction)
 
-**Usage:** `afpay sol receive [OPTIONS]`
+      --local-memo <LOCAL_MEMO>
+          Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
 
-###### **Options:**
+      --idempotency-key <IDEMPOTENCY_KEY>
+          Opaque idempotency key (≤128 chars). A second send with the same key and identical body replays the first response instead of re-broadcasting; a different body returns idempotency_conflict. Persisted for 24h
 
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo to watch for (used with --wait)
-* `--min-confirmations <MIN_CONFIRMATIONS>` — Minimum confirmation depth before considering payment settled (requires --wait)
-* `--reference <REFERENCE>` — Reference key to watch for (base58, used with --wait, per strain-payment-method-solana)
-* `--wallet <WALLET>` — Wallet ID (auto-selected if omitted)
-* `--wait` — Wait for payment / matching receive transaction
-* `--wait-timeout-s <WAIT_TIMEOUT_S>` — Timeout in seconds for --wait
-* `--wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>` — Poll interval in milliseconds for --wait
-* `--qr-svg-file` — Write receive QR payload to an SVG file
+  -h, --help
+          Print help
+```
 
-  Default value: `false`
+### Agent-First Pay evm receive - Show wallet receive address
 
+```text
+Usage: receive [OPTIONS]
 
+Options:
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo to watch for (used with --wait)
 
-## `afpay sol balance`
+      --min-confirmations <MIN_CONFIRMATIONS>
+          Minimum confirmation depth before considering payment settled (requires --wait)
 
-Check balance
+      --wallet <WALLET>
+          Wallet ID (auto-selected if omitted)
 
-**Usage:** `afpay sol balance [OPTIONS]`
+      --wait
+          Wait for payment / matching receive transaction
 
-###### **Options:**
+      --wait-timeout-s <WAIT_TIMEOUT_S>
+          Timeout in seconds for --wait
 
-* `--wallet <WALLET>` — Wallet ID (omit to show all sol wallets)
+      --wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>
+          Poll interval in milliseconds for --wait
 
+      --qr-svg-file
+          Write receive QR payload to an SVG file
 
+  -h, --help
+          Print help
+```
 
-## `afpay sol limit`
+### Agent-First Pay evm balance - Check balance
 
-Spend limit for sol network or a specific sol wallet
+```text
+Usage: balance [OPTIONS]
 
-**Usage:** `afpay sol limit [OPTIONS] <COMMAND>`
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit to show all evm wallets)
 
-###### **Subcommands:**
+  -h, --help
+          Print help
+```
 
-* `add` — Add a network or wallet spend limit
+### Agent-First Pay evm limit - Spend limit for evm network or a specific evm wallet
 
-###### **Options:**
+```text
+Usage: limit [OPTIONS] <COMMAND>
 
-* `--wallet <WALLET>` — Wallet ID (omit for network-level limit)
+Commands:
+  add   Add a network or wallet spend limit
+  help  Print this message or the help of the given subcommand(s)
 
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit for network-level limit)
 
+  -h, --help
+          Print help
+```
 
-## `afpay sol limit add`
+#### Agent-First Pay evm limit add - Add a network or wallet spend limit
 
-Add a network or wallet spend limit
+```text
+Usage: add [OPTIONS] --window <WINDOW> --max-spend <MAX_SPEND>
 
-**Usage:** `afpay sol limit add [OPTIONS] --window <WINDOW> --max-spend <MAX_SPEND>`
+Options:
+      --token <TOKEN>
+          Token: native, usdc, usdt
 
-###### **Options:**
+      --window <WINDOW>
+          Time window: e.g. 30m, 1h, 24h, 7d
 
-* `--token <TOKEN>` — Token: native, usdc, usdt
-* `--window <WINDOW>` — Time window: e.g. 30m, 1h, 24h, 7d
-* `--max-spend <MAX_SPEND>` — Maximum spend in base units
+      --max-spend <MAX_SPEND>
+          Maximum spend in base units
 
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay evm config - Per-wallet configuration
 
-## `afpay sol config`
+```text
+Usage: config --wallet <WALLET> <COMMAND>
 
-Per-wallet configuration
+Commands:
+  show          Show current wallet configuration
+  set           Update wallet settings
+  token-add     Register a custom token for balance tracking
+  token-remove  Unregister a custom token
+  help          Print this message or the help of the given subcommand(s)
 
-**Usage:** `afpay sol config --wallet <WALLET> <COMMAND>`
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-###### **Subcommands:**
+  -h, --help
+          Print help
+```
 
-* `show` — Show current wallet configuration
-* `set` — Update wallet settings
-* `token-add` — Register a custom token for balance tracking
-* `token-remove` — Unregister a custom token
+#### Agent-First Pay evm config show - Show current wallet configuration
 
-###### **Options:**
+```text
+Usage: show
 
-* `--wallet <WALLET>` — Wallet ID
+Options:
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay evm config set - Update wallet settings
 
+```text
+Usage: set [OPTIONS]
 
-## `afpay sol config show`
+Options:
+      --label <LABEL>
+          New label
 
-Show current wallet configuration
+      --rpc-endpoint <RPC_ENDPOINT>
+          Replace RPC endpoint(s)
 
-**Usage:** `afpay sol config show`
+      --chain-id <CHAIN_ID>
+          EVM chain ID
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay evm config token-add - Register a custom token for balance tracking
 
-## `afpay sol config set`
+```text
+Usage: token-add [OPTIONS] --symbol <SYMBOL> --address <ADDRESS>
 
-Update wallet settings
+Options:
+      --symbol <SYMBOL>
+          Token symbol (e.g. dai)
 
-**Usage:** `afpay sol config set [OPTIONS]`
+      --address <ADDRESS>
+          Token contract address
 
-###### **Options:**
+      --decimals <DECIMALS>
+          Token decimals
 
-* `--label <LABEL>` — New label
-* `--rpc-endpoint <RPC_ENDPOINT>` — Replace RPC endpoint(s)
+          [default: 6]
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay evm config token-remove - Unregister a custom token
 
-## `afpay sol config token-add`
+```text
+Usage: token-remove --symbol <SYMBOL>
 
-Register a custom token for balance tracking
+Options:
+      --symbol <SYMBOL>
+          Token symbol to remove
 
-**Usage:** `afpay sol config token-add [OPTIONS] --symbol <SYMBOL> --address <ADDRESS>`
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay evm backup - Back up EVM wallet data to a .tar.zst archive
 
-* `--symbol <SYMBOL>` — Token symbol (e.g. dai)
-* `--address <ADDRESS>` — Token contract address
-* `--decimals <DECIMALS>` — Token decimals
+```text
+Usage: backup [OPTIONS]
 
-  Default value: `6`
+Options:
+      --output <OUTPUT>
+          Output archive path (default: ./afpay-evm-{timestamp}.tar.zst)
 
+      --wallet <WALLET>
+          Wallet ID (omit to back up all evm wallets)
 
+  -h, --help
+          Print help
+```
 
-## `afpay sol config token-remove`
+### Agent-First Pay evm restore - Restore EVM wallet data from a .tar.zst archive
 
-Unregister a custom token
+```text
+Usage: restore [OPTIONS] <ARCHIVE>
 
-**Usage:** `afpay sol config token-remove --symbol <SYMBOL>`
+Arguments:
+  <ARCHIVE>
+          Path to the backup archive
 
-###### **Options:**
+Options:
+      --dangerously-overwrite
+          Clear existing data before restoring (default: merge)
 
-* `--symbol <SYMBOL>` — Token symbol to remove
+      --pg-url-secret <PG_URL_SECRET>
+          Override PostgreSQL connection URL for the pg restore step
 
+  -h, --help
+          Print help
+```
 
+## Agent-First Pay btc - Bitcoin on-chain operations
 
-## `afpay sol backup`
+```text
+Usage: btc <COMMAND>
 
-Back up Solana wallet data to a .tar.zst archive
+Commands:
+  wallet   Wallet management
+  send     Send BTC on-chain
+  receive  Show wallet receive address
+  balance  Check balance
+  limit    Spend limit for btc network or a specific btc wallet
+  config   Per-wallet configuration
+  backup   Back up Bitcoin wallet data to a .tar.zst archive
+  restore  Restore Bitcoin wallet data from a .tar.zst archive
+  help     Print this message or the help of the given subcommand(s)
 
-**Usage:** `afpay sol backup [OPTIONS]`
+Options:
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay btc wallet - Wallet management
 
-* `--output <OUTPUT>` — Output archive path (default: ./afpay-sol-{timestamp}.tar.zst)
-* `--wallet <WALLET>` — Wallet ID (omit to back up all sol wallets)
+```text
+Usage: wallet <COMMAND>
 
+Commands:
+  create                 Create a new Bitcoin wallet
+  close                  Close a Bitcoin wallet
+  list                   List Bitcoin wallets
+  dangerously-show-seed  Dangerously show wallet seed mnemonic (12 BIP39 words)
+  help                   Print this message or the help of the given subcommand(s)
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay sol restore`
+#### Agent-First Pay btc wallet create - Create a new Bitcoin wallet
 
-Restore Solana wallet data from a .tar.zst archive
+```text
+Usage: create [OPTIONS]
 
-**Usage:** `afpay sol restore [OPTIONS] <ARCHIVE>`
+Options:
+      --btc-network <BTC_NETWORK>
+          Bitcoin sub-network: mainnet or signet (default: mainnet)
 
-###### **Arguments:**
+          [default: mainnet]
 
-* `<ARCHIVE>` — Path to the backup archive
+      --btc-address-type <BTC_ADDRESS_TYPE>
+          Address type: taproot or segwit (default: taproot)
 
-###### **Options:**
+          [default: taproot]
 
-* `--dangerously-overwrite` — Clear existing data before restoring (default: merge)
-* `--pg-url-secret <PG_URL_SECRET>` — Override PostgreSQL connection URL for the pg restore step
+      --btc-backend <BTC_BACKEND>
+          Chain-source backend: esplora (default), core-rpc, electrum
 
+          [possible values: esplora, core-rpc, electrum]
 
+      --btc-esplora-url <BTC_ESPLORA_URL>
+          Custom Esplora API URL
 
-## `afpay evm`
+      --btc-core-url <BTC_CORE_URL>
+          Bitcoin Core RPC URL (core-rpc backend)
 
-EVM chain operations (Base, Arbitrum)
+      --btc-core-auth-secret <BTC_CORE_AUTH_SECRET>
+          Bitcoin Core RPC auth "user:pass" (core-rpc backend)
 
-**Usage:** `afpay evm <COMMAND>`
+      --btc-electrum-url <BTC_ELECTRUM_URL>
+          Electrum server URL (electrum backend)
 
-###### **Subcommands:**
+      --mnemonic-secret <MNEMONIC_SECRET>
+          Existing BIP39 mnemonic secret to restore wallet
 
-* `wallet` — Wallet management
-* `send` — Send native token or ERC-20 token transfer
-* `receive` — Show wallet receive address
-* `balance` — Check balance
-* `limit` — Spend limit for evm network or a specific evm wallet
-* `config` — Per-wallet configuration
-* `backup` — Back up EVM wallet data to a .tar.zst archive
-* `restore` — Restore EVM wallet data from a .tar.zst archive
+      --label <LABEL>
+          Optional label
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay btc wallet close - Close a Bitcoin wallet
 
-## `afpay evm wallet`
+```text
+Usage: close [OPTIONS] --wallet <WALLET>
 
-Wallet management
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-**Usage:** `afpay evm wallet <COMMAND>`
+      --dangerously-skip-balance-check-and-may-lose-money
+          Dangerously skip balance checks when closing wallet
 
-###### **Subcommands:**
+  -h, --help
+          Print help
+```
 
-* `create` — Create a new EVM chain wallet
-* `close` — Close an EVM chain wallet
-* `list` — List EVM chain wallets
-* `dangerously-show-seed` — Dangerously show wallet seed mnemonic (12 BIP39 words)
+#### Agent-First Pay btc wallet list - List Bitcoin wallets
 
+```text
+Usage: list
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay evm wallet create`
+#### Agent-First Pay btc wallet dangerously-show-seed - Dangerously show wallet seed mnemonic (12 BIP39 words)
 
-Create a new EVM chain wallet
+```text
+Usage: dangerously-show-seed --wallet <WALLET>
 
-**Usage:** `afpay evm wallet create [OPTIONS] --evm-rpc-endpoint <EVM_RPC_ENDPOINT>`
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--evm-rpc-endpoint <EVM_RPC_ENDPOINT>` — EVM JSON-RPC endpoint (repeat to configure failover order)
-* `--chain-id <CHAIN_ID>` — Chain ID (default: 8453 = Base)
+### Agent-First Pay btc send - Send BTC on-chain
 
-  Default value: `8453`
-* `--label <LABEL>` — Optional label
+```text
+Usage: send [OPTIONS] --to <TO> --amount-sats <AMOUNT_SATS>
 
+Options:
+      --to <TO>
+          Recipient Bitcoin address (bc1.../tb1...)
 
+      --amount-sats <AMOUNT_SATS>
+          Amount in satoshis
 
-## `afpay evm wallet close`
+      --wallet <WALLET>
+          Source wallet ID (auto-selected if omitted)
 
-Close an EVM chain wallet
+      --onchain-memo <ONCHAIN_MEMO>
+          On-chain memo (sent with the transaction)
 
-**Usage:** `afpay evm wallet close [OPTIONS] --wallet <WALLET>`
+      --local-memo <LOCAL_MEMO>
+          Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
 
-###### **Options:**
+      --idempotency-key <IDEMPOTENCY_KEY>
+          Opaque idempotency key (≤128 chars). A second send with the same key and identical body replays the first response instead of re-broadcasting; a different body returns idempotency_conflict. Persisted for 24h
 
-* `--wallet <WALLET>` — Wallet ID
-* `--dangerously-skip-balance-check-and-may-lose-money` — Dangerously skip balance checks when closing wallet
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay btc receive - Show wallet receive address
 
+```text
+Usage: receive [OPTIONS]
 
-## `afpay evm wallet list`
+Options:
+      --wait-sync-limit <WAIT_SYNC_LIMIT>
+          Max history records scanned per poll when resolving tx id
 
-List EVM chain wallets
+      --wallet <WALLET>
+          Wallet ID (auto-selected if omitted)
 
-**Usage:** `afpay evm wallet list`
+      --wait
+          Wait for payment / matching receive transaction
 
+      --wait-timeout-s <WAIT_TIMEOUT_S>
+          Timeout in seconds for --wait
 
+      --wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>
+          Poll interval in milliseconds for --wait
 
-## `afpay evm wallet dangerously-show-seed`
+      --qr-svg-file
+          Write receive QR payload to an SVG file
 
-Dangerously show wallet seed mnemonic (12 BIP39 words)
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay evm wallet dangerously-show-seed --wallet <WALLET>`
+### Agent-First Pay btc balance - Check balance
 
-###### **Options:**
+```text
+Usage: balance [OPTIONS]
 
-* `--wallet <WALLET>` — Wallet ID
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit to show all btc wallets)
 
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay btc limit - Spend limit for btc network or a specific btc wallet
 
-## `afpay evm send`
+```text
+Usage: limit [OPTIONS] <COMMAND>
 
-Send native token or ERC-20 token transfer
+Commands:
+  add   Add a network or wallet spend limit
+  help  Print this message or the help of the given subcommand(s)
 
-**Usage:** `afpay evm send [OPTIONS] --to <TO> --amount <AMOUNT> --token <TOKEN>`
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit for network-level limit)
 
-###### **Options:**
+  -h, --help
+          Print help
+```
 
-* `--to <TO>` — Recipient address (0x...)
-* `--amount <AMOUNT>` — Amount in token base units (wei for ETH, smallest unit for ERC-20)
-* `--token <TOKEN>` — Token: "native" for chain native, "usdc" or contract address for ERC-20
-* `--wallet <WALLET>` — Source wallet ID (auto-selected if omitted)
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo (sent with the transaction)
-* `--local-memo <LOCAL_MEMO>` — Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
+#### Agent-First Pay btc limit add - Add a network or wallet spend limit
 
+```text
+Usage: add --window <WINDOW> --max-spend <MAX_SPEND>
 
+Options:
+      --window <WINDOW>
+          Time window: e.g. 30m, 1h, 24h, 7d
 
-## `afpay evm receive`
+      --max-spend <MAX_SPEND>
+          Maximum spend in base units
 
-Show wallet receive address
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay evm receive [OPTIONS]`
+### Agent-First Pay btc config - Per-wallet configuration
 
-###### **Options:**
+```text
+Usage: config --wallet <WALLET> <COMMAND>
 
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo to watch for (used with --wait)
-* `--min-confirmations <MIN_CONFIRMATIONS>` — Minimum confirmation depth before considering payment settled (requires --wait)
-* `--wallet <WALLET>` — Wallet ID (auto-selected if omitted)
-* `--wait` — Wait for payment / matching receive transaction
-* `--wait-timeout-s <WAIT_TIMEOUT_S>` — Timeout in seconds for --wait
-* `--wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>` — Poll interval in milliseconds for --wait
-* `--qr-svg-file` — Write receive QR payload to an SVG file
+Commands:
+  show  Show current wallet configuration
+  set   Update wallet settings
+  help  Print this message or the help of the given subcommand(s)
 
-  Default value: `false`
+Options:
+      --wallet <WALLET>
+          Wallet ID
 
+  -h, --help
+          Print help
+```
 
+#### Agent-First Pay btc config show - Show current wallet configuration
 
-## `afpay evm balance`
+```text
+Usage: show
 
-Check balance
+Options:
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay evm balance [OPTIONS]`
+#### Agent-First Pay btc config set - Update wallet settings
 
-###### **Options:**
+```text
+Usage: set [OPTIONS]
 
-* `--wallet <WALLET>` — Wallet ID (omit to show all evm wallets)
+Options:
+      --label <LABEL>
+          New label
 
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay btc backup - Back up Bitcoin wallet data to a .tar.zst archive
 
-## `afpay evm limit`
+```text
+Usage: backup [OPTIONS]
 
-Spend limit for evm network or a specific evm wallet
+Options:
+      --output <OUTPUT>
+          Output archive path (default: ./afpay-btc-{timestamp}.tar.zst)
 
-**Usage:** `afpay evm limit [OPTIONS] <COMMAND>`
+      --wallet <WALLET>
+          Wallet ID (omit to back up all btc wallets)
 
-###### **Subcommands:**
+  -h, --help
+          Print help
+```
 
-* `add` — Add a network or wallet spend limit
+### Agent-First Pay btc restore - Restore Bitcoin wallet data from a .tar.zst archive
 
-###### **Options:**
+```text
+Usage: restore [OPTIONS] <ARCHIVE>
 
-* `--wallet <WALLET>` — Wallet ID (omit for network-level limit)
+Arguments:
+  <ARCHIVE>
+          Path to the backup archive
 
+Options:
+      --dangerously-overwrite
+          Clear existing data before restoring (default: merge)
 
+      --pg-url-secret <PG_URL_SECRET>
+          Override PostgreSQL connection URL for the pg restore step
 
-## `afpay evm limit add`
+  -h, --help
+          Print help
+```
 
-Add a network or wallet spend limit
+## Agent-First Pay wallet - List all wallets (cross-network)
 
-**Usage:** `afpay evm limit add [OPTIONS] --window <WINDOW> --max-spend <MAX_SPEND>`
+```text
+Usage: wallet <COMMAND>
 
-###### **Options:**
+Commands:
+  list  List all wallets (cross-network)
+  help  Print this message or the help of the given subcommand(s)
 
-* `--token <TOKEN>` — Token: native, usdc, usdt
-* `--window <WINDOW>` — Time window: e.g. 30m, 1h, 24h, 7d
-* `--max-spend <MAX_SPEND>` — Maximum spend in base units
+Options:
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay wallet list - List all wallets (cross-network)
 
+```text
+Usage: list [OPTIONS]
 
-## `afpay evm config`
+Options:
+      --network <NETWORK>
+          Filter by network: cashu, ln, sol, evm
 
-Per-wallet configuration
+          [possible values: ln, sol, evm, cashu, btc]
 
-**Usage:** `afpay evm config --wallet <WALLET> <COMMAND>`
+  -h, --help
+          Print help
+```
 
-###### **Subcommands:**
+## Agent-First Pay balance - All wallets balance (cross-network)
 
-* `show` — Show current wallet configuration
-* `set` — Update wallet settings
-* `token-add` — Register a custom token for balance tracking
-* `token-remove` — Unregister a custom token
+```text
+Usage: balance [OPTIONS]
 
-###### **Options:**
+Options:
+      --wallet <WALLET>
+          Wallet ID (omit to show all wallets)
 
-* `--wallet <WALLET>` — Wallet ID
+      --network <NETWORK>
+          Filter by network: cashu, ln, sol, evm
 
+          [possible values: ln, sol, evm, cashu, btc]
 
+      --cashu-check
+          Verify cashu proofs against mint (slower but accurate; cashu only)
 
-## `afpay evm config show`
+  -h, --help
+          Print help
+```
 
-Show current wallet configuration
+## Agent-First Pay history - History queries
 
-**Usage:** `afpay evm config show`
+```text
+Usage: history <COMMAND>
 
+Commands:
+  list    List history records from local store
+  status  Check history status
+  update  Incrementally sync on-chain/backend history into local store
+  help    Print this message or the help of the given subcommand(s)
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay evm config set`
+### Agent-First Pay history list - List history records from local store
 
-Update wallet settings
+```text
+Usage: list [OPTIONS]
 
-**Usage:** `afpay evm config set [OPTIONS]`
+Options:
+      --wallet <WALLET>
+          Filter by wallet ID
 
-###### **Options:**
+      --network <NETWORK>
+          Filter by network: cashu, ln, sol, evm
 
-* `--label <LABEL>` — New label
-* `--rpc-endpoint <RPC_ENDPOINT>` — Replace RPC endpoint(s)
-* `--chain-id <CHAIN_ID>` — EVM chain ID
+          [possible values: ln, sol, evm, cashu, btc]
 
+      --onchain-memo <ONCHAIN_MEMO>
+          Filter by exact on-chain memo text
 
+      --limit <LIMIT>
+          Max results
 
-## `afpay evm config token-add`
+          [default: 20]
 
-Register a custom token for balance tracking
+      --offset <OFFSET>
+          Offset
 
-**Usage:** `afpay evm config token-add [OPTIONS] --symbol <SYMBOL> --address <ADDRESS>`
+          [default: 0]
 
-###### **Options:**
+      --since-epoch-s <SINCE_EPOCH_S>
+          Only include records created at or after this epoch second
 
-* `--symbol <SYMBOL>` — Token symbol (e.g. dai)
-* `--address <ADDRESS>` — Token contract address
-* `--decimals <DECIMALS>` — Token decimals
+      --until-epoch-s <UNTIL_EPOCH_S>
+          Only include records created before this epoch second
 
-  Default value: `6`
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay history status - Check history status
 
+```text
+Usage: status --transaction-id <TRANSACTION_ID>
 
-## `afpay evm config token-remove`
+Options:
+      --transaction-id <TRANSACTION_ID>
+          Transaction ID
 
-Unregister a custom token
+  -h, --help
+          Print help
+```
 
-**Usage:** `afpay evm config token-remove --symbol <SYMBOL>`
+### Agent-First Pay history update - Incrementally sync on-chain/backend history into local store
 
-###### **Options:**
+```text
+Usage: update [OPTIONS]
 
-* `--symbol <SYMBOL>` — Token symbol to remove
+Options:
+      --wallet <WALLET>
+          Sync a specific wallet (defaults to all wallets in scope)
 
+      --network <NETWORK>
+          Restrict sync to a single network
 
+          [possible values: ln, sol, evm, cashu, btc]
 
-## `afpay evm backup`
+      --limit <LIMIT>
+          Max records to scan per wallet during this incremental sync
 
-Back up EVM wallet data to a .tar.zst archive
+          [default: 200]
 
-**Usage:** `afpay evm backup [OPTIONS]`
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+## Agent-First Pay limit - Spend limit list and remove (cross-network)
 
-* `--output <OUTPUT>` — Output archive path (default: ./afpay-evm-{timestamp}.tar.zst)
-* `--wallet <WALLET>` — Wallet ID (omit to back up all evm wallets)
+```text
+Usage: limit <COMMAND>
 
+Commands:
+  remove     Remove a spend limit rule by ID
+  list       List current limit status
+  reconcile  Manually reconcile a stuck spend-ledger reservation (operator-only)
+  help       Print this message or the help of the given subcommand(s)
 
+Options:
+  -h, --help
+          Print help
+```
 
-## `afpay evm restore`
+### Agent-First Pay limit remove - Remove a spend limit rule by ID
 
-Restore EVM wallet data from a .tar.zst archive
+```text
+Usage: remove --rule-id <RULE_ID>
 
-**Usage:** `afpay evm restore [OPTIONS] <ARCHIVE>`
+Options:
+      --rule-id <RULE_ID>
+          Rule ID (e.g. r_1a2b3c4d)
 
-###### **Arguments:**
+  -h, --help
+          Print help
+```
 
-* `<ARCHIVE>` — Path to the backup archive
+### Agent-First Pay limit list - List current limit status
 
-###### **Options:**
+```text
+Usage: list
 
-* `--dangerously-overwrite` — Clear existing data before restoring (default: merge)
-* `--pg-url-secret <PG_URL_SECRET>` — Override PostgreSQL connection URL for the pg restore step
+Options:
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay limit reconcile - Manually reconcile a stuck spend-ledger reservation (operator-only)
 
+Manually reconcile a stuck spend-ledger reservation (operator-only).
 
-## `afpay btc`
+Use when AccountingInconsistent fired (money sent but ledger could not confirm) or when a BTC settlement crossed the reservation TTL. Pass `--confirm` if the payment actually succeeded (writes a spend event so the limit reflects the spend), or `--cancel` if it did not.
 
-Bitcoin on-chain operations
+```text
+Usage: reconcile [OPTIONS] --reservation-id <RESERVATION_ID> --reason <REASON>
 
-**Usage:** `afpay btc <COMMAND>`
+Options:
+      --reservation-id <RESERVATION_ID>
+          Reservation ID (numeric, from limit_list / Output::Sent.reservation_ids)
 
-###### **Subcommands:**
+      --confirm
+          Mark the reservation Confirmed (mutually exclusive with --cancel)
 
-* `wallet` — Wallet management
-* `send` — Send BTC on-chain
-* `receive` — Show wallet receive address
-* `balance` — Check balance
-* `limit` — Spend limit for btc network or a specific btc wallet
-* `config` — Per-wallet configuration
-* `backup` — Back up Bitcoin wallet data to a .tar.zst archive
-* `restore` — Restore Bitcoin wallet data from a .tar.zst archive
+      --cancel
+          Mark the reservation Cancelled (mutually exclusive with --confirm)
 
+      --reason <REASON>
+          Required audit note (1..=512 chars) — why this reservation is being forced to a terminal state
 
+  -h, --help
+          Print help
+```
 
-## `afpay btc wallet`
+## Agent-First Pay skill - Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
 
-Wallet management
+```text
+Usage: skill <COMMAND>
 
-**Usage:** `afpay btc wallet <COMMAND>`
+Commands:
+  status     Show whether the skill is installed, valid, and up to date
+  install    Install or refresh the skill
+  uninstall  Remove a managed skill
+  help       Print this message or the help of the given subcommand(s)
 
-###### **Subcommands:**
+Options:
+  -h, --help
+          Print help
+```
 
-* `create` — Create a new Bitcoin wallet
-* `close` — Close a Bitcoin wallet
-* `list` — List Bitcoin wallets
-* `dangerously-show-seed` — Dangerously show wallet seed mnemonic (12 BIP39 words)
+### Agent-First Pay skill status - Show whether the skill is installed, valid, and up to date
 
+```text
+Usage: status [OPTIONS]
 
+Options:
+      --agent <AGENT>
+          Agent to manage. Defaults to every agent that supports the requested scope
 
-## `afpay btc wallet create`
+          Possible values:
+          - all:         Manage every agent that supports the requested scope
+          - codex:       Manage the Codex local skill under $CODEX_HOME/skills
+          - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
+          - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
 
-Create a new Bitcoin wallet
+          [default: all]
 
-**Usage:** `afpay btc wallet create [OPTIONS]`
+      --scope <SCOPE>
+          Skill scope
 
-###### **Options:**
+          Possible values:
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
 
-* `--btc-network <BTC_NETWORK>` — Bitcoin sub-network: mainnet or signet (default: mainnet)
+          [default: personal]
 
-  Default value: `mainnet`
-* `--btc-address-type <BTC_ADDRESS_TYPE>` — Address type: taproot or segwit (default: taproot)
+      --skills-dir <SKILLS_DIR>
+          Directory that contains skill folders. Requires an explicit single --agent
 
-  Default value: `taproot`
-* `--btc-backend <BTC_BACKEND>` — Chain-source backend: esplora (default), core-rpc, electrum
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
-  Possible values: `esplora`, `core-rpc`, `electrum`
+### Agent-First Pay skill install - Install or refresh the skill
 
-* `--btc-esplora-url <BTC_ESPLORA_URL>` — Custom Esplora API URL
-* `--btc-core-url <BTC_CORE_URL>` — Bitcoin Core RPC URL (core-rpc backend)
-* `--btc-core-auth-secret <BTC_CORE_AUTH_SECRET>` — Bitcoin Core RPC auth "user:pass" (core-rpc backend)
-* `--btc-electrum-url <BTC_ELECTRUM_URL>` — Electrum server URL (electrum backend)
-* `--mnemonic-secret <MNEMONIC_SECRET>` — Existing BIP39 mnemonic secret to restore wallet
-* `--label <LABEL>` — Optional label
+```text
+Usage: install [OPTIONS]
 
+Options:
+      --agent <AGENT>
+          Agent to manage. Defaults to every agent that supports the requested scope
 
+          Possible values:
+          - all:         Manage every agent that supports the requested scope
+          - codex:       Manage the Codex local skill under $CODEX_HOME/skills
+          - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
+          - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
 
-## `afpay btc wallet close`
+          [default: all]
 
-Close a Bitcoin wallet
+      --scope <SCOPE>
+          Skill scope
 
-**Usage:** `afpay btc wallet close [OPTIONS] --wallet <WALLET>`
+          Possible values:
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
 
-###### **Options:**
+          [default: personal]
 
-* `--wallet <WALLET>` — Wallet ID
-* `--dangerously-skip-balance-check-and-may-lose-money` — Dangerously skip balance checks when closing wallet
+      --skills-dir <SKILLS_DIR>
+          Directory that contains skill folders. Requires an explicit single --agent
 
+      --force
+          Overwrite or remove a skill this tool did not manage
 
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
-## `afpay btc wallet list`
+### Agent-First Pay skill uninstall - Remove a managed skill
 
-List Bitcoin wallets
+```text
+Usage: uninstall [OPTIONS]
 
-**Usage:** `afpay btc wallet list`
+Options:
+      --agent <AGENT>
+          Agent to manage. Defaults to every agent that supports the requested scope
 
+          Possible values:
+          - all:         Manage every agent that supports the requested scope
+          - codex:       Manage the Codex local skill under $CODEX_HOME/skills
+          - claude-code: Manage the Claude Code skill under ~/.claude/skills or .claude/skills
+          - opencode:    Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills
+          - hermes:      Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills
 
+          [default: all]
 
-## `afpay btc wallet dangerously-show-seed`
+      --scope <SCOPE>
+          Skill scope
 
-Dangerously show wallet seed mnemonic (12 BIP39 words)
+          Possible values:
+          - personal:  Install under the user-level skills directory
+          - workspace: Install under the current workspace's skills directory
 
-**Usage:** `afpay btc wallet dangerously-show-seed --wallet <WALLET>`
+          [default: personal]
 
-###### **Options:**
+      --skills-dir <SKILLS_DIR>
+          Directory that contains skill folders. Requires an explicit single --agent
 
-* `--wallet <WALLET>` — Wallet ID
+      --force
+          Overwrite or remove a skill this tool did not manage
 
+  -h, --help
+          Print help (see a summary with '-h')
+```
 
+## Agent-First Pay container - Build and run the afpay daemon container (Docker, Podman, or Apple) from the embedded recipe
 
-## `afpay btc send`
+```text
+Usage: container <COMMAND>
 
-Send BTC on-chain
+Commands:
+  install    Build the image if missing and run the daemon; print the client command
+  uninstall  Stop and remove the container (--purge also removes the image and cache)
+  status     Report whether the daemon is running, with its endpoint and client command
+  logs       Stream the container logs (raw passthrough)
+  help       Print this message or the help of the given subcommand(s)
 
-**Usage:** `afpay btc send [OPTIONS] --to <TO> --amount-sats <AMOUNT_SATS>`
+Options:
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay container install - Build the image if missing and run the daemon; print the client command
 
-* `--to <TO>` — Recipient Bitcoin address (bc1.../tb1...)
-* `--amount-sats <AMOUNT_SATS>` — Amount in satoshis
-* `--wallet <WALLET>` — Source wallet ID (auto-selected if omitted)
-* `--onchain-memo <ONCHAIN_MEMO>` — On-chain memo (sent with the transaction)
-* `--local-memo <LOCAL_MEMO>` — Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
+```text
+Usage: install [OPTIONS]
 
+Options:
+      --runtime <RUNTIME>
+          Container runtime: docker, podman, or apple (auto-detected if omitted)
 
+          [possible values: docker, podman, apple]
 
-## `afpay btc receive`
+      --name <NAME>
+          Container name
 
-Show wallet receive address
+          [default: afpay]
 
-**Usage:** `afpay btc receive [OPTIONS]`
+      --port <PORT>
+          Daemon port, published on 127.0.0.1
 
-###### **Options:**
+          [default: 9401]
 
-* `--wait-sync-limit <WAIT_SYNC_LIMIT>` — Max history records scanned per poll when resolving tx id
-* `--wallet <WALLET>` — Wallet ID (auto-selected if omitted)
-* `--wait` — Wait for payment / matching receive transaction
-* `--wait-timeout-s <WAIT_TIMEOUT_S>` — Timeout in seconds for --wait
-* `--wait-poll-interval-ms <WAIT_POLL_INTERVAL_MS>` — Poll interval in milliseconds for --wait
-* `--qr-svg-file` — Write receive QR payload to an SVG file
+      --mode <MODE>
+          Server mode: rest (HTTP + bearer key) or rpc (gRPC + PSK)
 
-  Default value: `false`
+          [default: rest]
+          [possible values: rest, rpc]
 
+      --with <DAEMON>
+          Optional bundled daemon to install and enable (repeatable): phoenixd, bitcoind
 
+      --allow <CATEGORY=URL>
+          Operator allowlist entry (repeatable), `<category>=<url>`. afpay refuses to expose a public listener without one. Categories: mint, esplora, sol-rpc, evm-rpc, btc-core, btc-electrum, ln
 
-## `afpay btc balance`
+      --btc-network <BTC_NETWORK>
+          Bitcoin network when --with bitcoind: mainnet or signet
 
-Check balance
+          [default: mainnet]
 
-**Usage:** `afpay btc balance [OPTIONS]`
+      --btc-rpc-port <BTC_RPC_PORT>
+          bitcoind RPC port when --with bitcoind
 
-###### **Options:**
+          [default: 8332]
 
-* `--wallet <WALLET>` — Wallet ID (omit to show all btc wallets)
+      --btc-prune-mb <BTC_PRUNE_MB>
+          bitcoind prune target (MB) when --with bitcoind
 
+          [default: 550]
 
+      --features <FEATURES>
+          Cargo feature set for --from-source builds (defaults to the Dockerfile's set)
 
-## `afpay btc limit`
+      --rebuild
+          Rebuild the image even if it already exists
 
-Spend limit for btc network or a specific btc wallet
+      --from-source
+          Build the full image from a source checkout instead of downloading the prebuilt release
 
-**Usage:** `afpay btc limit [OPTIONS] <COMMAND>`
+      --context <DIR>
+          Source checkout to build from with --from-source (default: current dir)
 
-###### **Subcommands:**
+  -h, --help
+          Print help
+```
 
-* `add` — Add a network or wallet spend limit
+### Agent-First Pay container uninstall - Stop and remove the container (--purge also removes the image and cache)
 
-###### **Options:**
+```text
+Usage: uninstall [OPTIONS]
 
-* `--wallet <WALLET>` — Wallet ID (omit for network-level limit)
+Options:
+      --runtime <RUNTIME>
+          Container runtime: docker, podman, or apple (auto-detected if omitted)
 
+          [possible values: docker, podman, apple]
 
+      --name <NAME>
+          Container name
 
-## `afpay btc limit add`
+          [default: afpay]
 
-Add a network or wallet spend limit
+      --purge
+          Also remove the built image and the cached build context
 
-**Usage:** `afpay btc limit add --window <WINDOW> --max-spend <MAX_SPEND>`
+  -h, --help
+          Print help
+```
 
-###### **Options:**
+### Agent-First Pay container status - Report whether the daemon is running, with its endpoint and client command
 
-* `--window <WINDOW>` — Time window: e.g. 30m, 1h, 24h, 7d
-* `--max-spend <MAX_SPEND>` — Maximum spend in base units
+```text
+Usage: status [OPTIONS]
 
+Options:
+      --runtime <RUNTIME>
+          Container runtime: docker, podman, or apple (auto-detected if omitted)
 
+          [possible values: docker, podman, apple]
 
-## `afpay btc config`
+      --name <NAME>
+          Container name
 
-Per-wallet configuration
+          [default: afpay]
 
-**Usage:** `afpay btc config --wallet <WALLET> <COMMAND>`
+      --port <PORT>
+          Published port, used to format the endpoint and client command
 
-###### **Subcommands:**
+          [default: 9401]
 
-* `show` — Show current wallet configuration
-* `set` — Update wallet settings
+      --mode <MODE>
+          Server mode, used to pick the secret file (rest-api-key vs rpc-secret)
 
-###### **Options:**
+          [default: rest]
+          [possible values: rest, rpc]
 
-* `--wallet <WALLET>` — Wallet ID
+  -h, --help
+          Print help
+```
 
+### Agent-First Pay container logs - Stream the container logs (raw passthrough)
 
+```text
+Usage: logs [OPTIONS]
 
-## `afpay btc config show`
+Options:
+      --runtime <RUNTIME>
+          Container runtime: docker, podman, or apple (auto-detected if omitted)
 
-Show current wallet configuration
+          [possible values: docker, podman, apple]
 
-**Usage:** `afpay btc config show`
+      --name <NAME>
+          Container name
 
+          [default: afpay]
 
+  -f, --follow
+          Follow the log output
 
-## `afpay btc config set`
-
-Update wallet settings
-
-**Usage:** `afpay btc config set [OPTIONS]`
-
-###### **Options:**
-
-* `--label <LABEL>` — New label
-
-
-
-## `afpay btc backup`
-
-Back up Bitcoin wallet data to a .tar.zst archive
-
-**Usage:** `afpay btc backup [OPTIONS]`
-
-###### **Options:**
-
-* `--output <OUTPUT>` — Output archive path (default: ./afpay-btc-{timestamp}.tar.zst)
-* `--wallet <WALLET>` — Wallet ID (omit to back up all btc wallets)
-
-
-
-## `afpay btc restore`
-
-Restore Bitcoin wallet data from a .tar.zst archive
-
-**Usage:** `afpay btc restore [OPTIONS] <ARCHIVE>`
-
-###### **Arguments:**
-
-* `<ARCHIVE>` — Path to the backup archive
-
-###### **Options:**
-
-* `--dangerously-overwrite` — Clear existing data before restoring (default: merge)
-* `--pg-url-secret <PG_URL_SECRET>` — Override PostgreSQL connection URL for the pg restore step
-
-
-
-## `afpay wallet`
-
-List all wallets (cross-network)
-
-**Usage:** `afpay wallet <COMMAND>`
-
-###### **Subcommands:**
-
-* `list` — List all wallets (cross-network)
-
-
-
-## `afpay wallet list`
-
-List all wallets (cross-network)
-
-**Usage:** `afpay wallet list [OPTIONS]`
-
-###### **Options:**
-
-* `--network <NETWORK>` — Filter by network: cashu, ln, sol, evm
-
-  Possible values: `ln`, `sol`, `evm`, `cashu`, `btc`
-
-
-
-
-## `afpay balance`
-
-All wallets balance (cross-network)
-
-**Usage:** `afpay balance [OPTIONS]`
-
-###### **Options:**
-
-* `--wallet <WALLET>` — Wallet ID (omit to show all wallets)
-* `--network <NETWORK>` — Filter by network: cashu, ln, sol, evm
-
-  Possible values: `ln`, `sol`, `evm`, `cashu`, `btc`
-
-* `--cashu-check` — Verify cashu proofs against mint (slower but accurate; cashu only)
-
-
-
-## `afpay history`
-
-History queries
-
-**Usage:** `afpay history <COMMAND>`
-
-###### **Subcommands:**
-
-* `list` — List history records from local store
-* `status` — Check history status
-* `update` — Incrementally sync on-chain/backend history into local store
-
-
-
-## `afpay history list`
-
-List history records from local store
-
-**Usage:** `afpay history list [OPTIONS]`
-
-###### **Options:**
-
-* `--wallet <WALLET>` — Filter by wallet ID
-* `--network <NETWORK>` — Filter by network: cashu, ln, sol, evm
-
-  Possible values: `ln`, `sol`, `evm`, `cashu`, `btc`
-
-* `--onchain-memo <ONCHAIN_MEMO>` — Filter by exact on-chain memo text
-* `--limit <LIMIT>` — Max results
-
-  Default value: `20`
-* `--offset <OFFSET>` — Offset
-
-  Default value: `0`
-* `--since-epoch-s <SINCE_EPOCH_S>` — Only include records created at or after this epoch second
-* `--until-epoch-s <UNTIL_EPOCH_S>` — Only include records created before this epoch second
-
-
-
-## `afpay history status`
-
-Check history status
-
-**Usage:** `afpay history status --transaction-id <TRANSACTION_ID>`
-
-###### **Options:**
-
-* `--transaction-id <TRANSACTION_ID>` — Transaction ID
-
-
-
-## `afpay history update`
-
-Incrementally sync on-chain/backend history into local store
-
-**Usage:** `afpay history update [OPTIONS]`
-
-###### **Options:**
-
-* `--wallet <WALLET>` — Sync a specific wallet (defaults to all wallets in scope)
-* `--network <NETWORK>` — Restrict sync to a single network
-
-  Possible values: `ln`, `sol`, `evm`, `cashu`, `btc`
-
-* `--limit <LIMIT>` — Max records to scan per wallet during this incremental sync
-
-  Default value: `200`
-
-
-
-## `afpay limit`
-
-Spend limit list and remove (cross-network)
-
-**Usage:** `afpay limit <COMMAND>`
-
-###### **Subcommands:**
-
-* `remove` — Remove a spend limit rule by ID
-* `list` — List current limit status
-
-
-
-## `afpay limit remove`
-
-Remove a spend limit rule by ID
-
-**Usage:** `afpay limit remove --rule-id <RULE_ID>`
-
-###### **Options:**
-
-* `--rule-id <RULE_ID>` — Rule ID (e.g. r_1a2b3c4d)
-
-
-
-## `afpay limit list`
-
-List current limit status
-
-**Usage:** `afpay limit list`
+  -h, --help
+          Print help
+```
+AFDATA: 0.22.0

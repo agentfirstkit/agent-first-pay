@@ -1,7 +1,7 @@
-use super::session::{parse_session_command, HostMessageKind, InteractionHost};
 use super::InteractiveSessionRuntime;
-use rustyline::error::ReadlineError;
+use super::session::{HostMessageKind, InteractionHost, parse_session_command};
 use rustyline::Editor;
+use rustyline::error::ReadlineError;
 use std::io::Write as _;
 
 struct LineHost;

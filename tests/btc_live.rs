@@ -20,8 +20,8 @@
 
 use agent_first_pay::provider::btc::BtcProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
-use agent_first_pay::store::redb_store::RedbStore;
 use agent_first_pay::store::StorageBackend;
+use agent_first_pay::store::redb_store::RedbStore;
 use agent_first_pay::types::{Network, TxStatus, WalletCreateRequest};
 use std::process::Command;
 use std::sync::Arc;
@@ -40,6 +40,7 @@ fn signet_request(label: &str) -> WalletCreateRequest {
         btc_core_url: None,
         btc_core_auth_secret: None,
         btc_electrum_url: None,
+        sol_cluster: None,
     }
 }
 
@@ -189,7 +190,7 @@ async fn btc_live_wallet_not_found() {
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
-        matches!(err, PayError::WalletNotFound(_)),
+        matches!(err, PayError::WalletNotFound { .. }),
         "expected WalletNotFound, got: {err}"
     );
 }
@@ -318,7 +319,7 @@ async fn btc_live_send_quote_supported() {
         .await
         .unwrap_err();
     assert!(
-        !matches!(err, PayError::NotImplemented(_)),
+        !matches!(err, PayError::NotImplemented { .. }),
         "send_quote should be implemented, got: {err}"
     );
 }

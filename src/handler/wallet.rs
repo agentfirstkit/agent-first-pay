@@ -1,11 +1,11 @@
 use crate::provider::PayError;
-use crate::store::wallet;
 use crate::store::PayStore;
+use crate::store::wallet;
 use crate::types::*;
 use std::time::Instant;
 
-use super::helpers::*;
 use super::App;
+use super::helpers::*;
 
 pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
     match input {
@@ -24,6 +24,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             btc_core_url,
             btc_core_auth_secret,
             btc_electrum_url,
+            sol_cluster,
         } => {
             let start = Instant::now();
             let mut log_args = serde_json::json!({
@@ -50,6 +51,71 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                 );
             }
             emit_log(app, "wallet", Some(id.clone()), log_args).await;
+
+            // Enforce operator URL allowlists before the provider sees anything.
+            // Empty allowlists keep current "anything goes" behaviour; non-empty
+            // ones surface PayError::Forbidden with a hint pointing at the
+            // exact config key, so an agent can ask the operator to widen.
+            let cfg = app.config.read().await;
+            let check = (|| -> Result<(), PayError> {
+                if let Some(url) = mint_url.as_deref() {
+                    validate_url_in_allowlist(
+                        url,
+                        &cfg.allowed_mint_urls,
+                        "mint_url",
+                        "allowed_mint_urls",
+                    )?;
+                }
+                if let Some(url) = btc_esplora_url.as_deref() {
+                    validate_url_in_allowlist(
+                        url,
+                        &cfg.allowed_esplora_urls,
+                        "btc_esplora_url",
+                        "allowed_esplora_urls",
+                    )?;
+                }
+                if let Some(url) = btc_core_url.as_deref() {
+                    validate_url_in_allowlist(
+                        url,
+                        &cfg.allowed_btc_core_urls,
+                        "btc_core_url",
+                        "allowed_btc_core_urls",
+                    )?;
+                }
+                if let Some(url) = btc_electrum_url.as_deref() {
+                    validate_url_in_allowlist(
+                        url,
+                        &cfg.allowed_btc_electrum_urls,
+                        "btc_electrum_url",
+                        "allowed_btc_electrum_urls",
+                    )?;
+                }
+                validate_rpc_endpoints(&cfg, network, &rpc_endpoints)?;
+                Ok(())
+            })();
+            drop(cfg);
+            if let Err(err) = check {
+                emit_error(&app.writer, Some(id), &err, start).await;
+                return;
+            }
+
+            // Validate sol_cluster value, if supplied. Accept the three known
+            // Solana clusters or reject early — silently dropping it later
+            // would defeat the point of the cluster check at send time.
+            if let Some(cluster) = sol_cluster.as_deref()
+                && !matches!(cluster, "mainnet-beta" | "devnet" | "testnet")
+            {
+                emit_error(
+                        &app.writer,
+                        Some(id),
+                        &PayError::invalid_amount(format!(
+                            "unknown sol_cluster '{cluster}'; expected one of mainnet-beta, devnet, testnet"
+                        )),
+                        start,
+                    )
+                    .await;
+                return;
+            }
             let request = WalletCreateRequest {
                 label: label.unwrap_or_else(|| "default".to_string()),
                 mint_url,
@@ -63,15 +129,16 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                 btc_core_url,
                 btc_core_auth_secret,
                 btc_electrum_url,
+                sol_cluster: sol_cluster.filter(|_| network == Network::Sol),
             };
             match get_provider(&app.providers, network) {
                 Some(p) => match p.create_wallet(&request).await {
                     Ok(info) => {
-                        if let Some(store) = app.store.as_ref() {
-                            if store.load_wallet_metadata(&info.id).is_err() {
-                                let meta = metadata_from_wallet_create(&info, &request);
-                                let _ = store.save_wallet_metadata(&meta);
-                            }
+                        if let Some(store) = app.store.as_ref()
+                            && store.load_wallet_metadata(&info.id).is_err()
+                        {
+                            let meta = metadata_from_wallet_create(&info, &request);
+                            let _ = store.save_wallet_metadata(&meta);
                         }
                         let _ = app
                             .writer
@@ -91,7 +158,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                     emit_error(
                         &app.writer,
                         Some(id),
-                        &PayError::NotImplemented(format!("no provider for {network}")),
+                        &PayError::not_implemented(format!("no provider for {network}")),
                         start,
                     )
                     .await;
@@ -113,14 +180,35 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             }
             emit_log(app, "wallet", Some(id.clone()), log_args).await;
 
+            // Enforce the LN endpoint allowlist before the provider sees the
+            // request. Without this, an agent could point a Lightning wallet
+            // at an attacker-controlled NWC/phoenixd/lnbits instance and the
+            // operator's mint/esplora/RPC allowlists wouldn't catch it.
+            let cfg = app.config.read().await;
+            let endpoint_check = if let Some(url) = request.endpoint.as_deref() {
+                validate_url_in_allowlist(
+                    url,
+                    &cfg.allowed_ln_endpoints,
+                    "ln endpoint",
+                    "allowed_ln_endpoints",
+                )
+            } else {
+                Ok(())
+            };
+            drop(cfg);
+            if let Err(err) = endpoint_check {
+                emit_error(&app.writer, Some(id), &err, start).await;
+                return;
+            }
+
             match get_provider(&app.providers, Network::Ln) {
                 Some(p) => match p.create_ln_wallet(request).await {
                     Ok(info) => {
-                        if let Some(store) = app.store.as_ref() {
-                            if store.load_wallet_metadata(&info.id).is_err() {
-                                let meta = metadata_from_ln_wallet_create(&info, &request_for_meta);
-                                let _ = store.save_wallet_metadata(&meta);
-                            }
+                        if let Some(store) = app.store.as_ref()
+                            && store.load_wallet_metadata(&info.id).is_err()
+                        {
+                            let meta = metadata_from_ln_wallet_create(&info, &request_for_meta);
+                            let _ = store.save_wallet_metadata(&meta);
                         }
                         let _ = app
                             .writer
@@ -140,7 +228,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                     emit_error(
                         &app.writer,
                         Some(id),
-                        &PayError::NotImplemented("no provider for ln".to_string()),
+                        &PayError::not_implemented("no provider for ln".to_string()),
                         start,
                     )
                     .await;
@@ -167,22 +255,26 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             .await;
             let close_result = if dangerously_skip_balance_check_and_may_lose_money {
                 match require_store(app).and_then(|s| s.load_wallet_metadata(&wallet)) {
-                    Ok(_) => require_store(app).and_then(|s| s.delete_wallet_metadata(&wallet)).map(|_| ()),
-                    Err(PayError::WalletNotFound(_)) => Err(PayError::WalletNotFound(format!(
-                        "wallet {wallet} not found locally; dangerous skip balance check only supports local wallets"
-                    ))),
+                    Ok(_) => require_store(app)
+                        .and_then(|s| s.delete_wallet_metadata(&wallet))
+                        .map(|_| ()),
+                    Err(PayError::WalletNotFound { .. }) => {
+                        Err(PayError::wallet_not_found(format!(
+                            "wallet {wallet} not found locally; dangerous skip balance check only supports local wallets"
+                        )))
+                    }
                     Err(error) => Err(error),
                 }
             } else {
                 match require_store(app).and_then(|s| s.load_wallet_metadata(&wallet)) {
                     Ok(meta) => match get_provider(&app.providers, meta.network) {
                         Some(provider) => provider.close_wallet(&wallet).await,
-                        None => Err(PayError::NotImplemented(format!(
+                        None => Err(PayError::not_implemented(format!(
                             "no provider for {}",
                             meta.network
                         ))),
                     },
-                    Err(e @ PayError::WalletNotFound(_)) => Err(e),
+                    Err(e @ PayError::WalletNotFound { .. }) => Err(e),
                     Err(error) => Err(error),
                 }
             };
@@ -233,7 +325,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                         emit_error(
                             &app.writer,
                             Some(id),
-                            &PayError::NotImplemented(format!("no provider for {network}")),
+                            &PayError::not_implemented(format!("no provider for {network}")),
                             start,
                         )
                         .await;
@@ -281,7 +373,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             emit_error(
                                 &app.writer,
                                 Some(id),
-                                &PayError::WalletNotFound(wallet_id),
+                                &PayError::wallet_not_found(wallet_id),
                                 start,
                             )
                             .await;
@@ -296,7 +388,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                     Some(provider) => {
                         if check {
                             match provider.check_balance(&wallet_for_call).await {
-                                Err(PayError::NotImplemented(_)) => {
+                                Err(PayError::NotImplemented { .. }) => {
                                     provider.balance(&wallet_for_call).await
                                 }
                                 other => other,
@@ -305,7 +397,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             provider.balance(&wallet_for_call).await
                         }
                     }
-                    None => Err(PayError::NotImplemented(format!(
+                    None => Err(PayError::not_implemented(format!(
                         "no provider for {target_network}"
                     ))),
                 };
@@ -379,12 +471,12 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                 match require_store(app).and_then(|s| s.load_wallet_metadata(&wallet)) {
                     Ok(meta) => match get_provider(&app.providers, meta.network) {
                         Some(p) => p.restore(&wallet).await,
-                        None => Err(PayError::NotImplemented(format!(
+                        None => Err(PayError::not_implemented(format!(
                             "no provider for {}",
                             meta.network
                         ))),
                     },
-                    Err(_) => Err(PayError::WalletNotFound(wallet.clone())),
+                    Err(_) => Err(PayError::wallet_not_found(wallet.clone())),
                 };
             match restore_result {
                 Ok(r) => {
@@ -434,7 +526,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             emit_error(
                                 &app.writer,
                                 Some(id),
-                                &PayError::InternalError("wallet has no seed".to_string()),
+                                &PayError::internal_error("wallet has no seed".to_string()),
                                 start,
                             )
                             .await;
@@ -456,7 +548,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                                 emit_error(
                                         &app.writer,
                                         Some(id),
-                                        &PayError::InvalidAmount(
+                                        &PayError::invalid_amount(
                                             "this sol wallet was created before mnemonic support; create a new sol wallet to get 12-word backup".to_string(),
                                         ),
                                         start,
@@ -468,7 +560,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             emit_error(
                                 &app.writer,
                                 Some(id),
-                                &PayError::InternalError("wallet has no seed".to_string()),
+                                &PayError::internal_error("wallet has no seed".to_string()),
                                 start,
                             )
                             .await;
@@ -478,7 +570,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                         emit_error(
                                 &app.writer,
                                 Some(id),
-                                &PayError::InvalidAmount(
+                                &PayError::invalid_amount(
                                     "ln wallets do not have mnemonic words; they store backend credentials (nwc-uri/password/admin-key)".to_string(),
                                 ),
                                 start,
@@ -501,7 +593,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                                 emit_error(
                                         &app.writer,
                                         Some(id),
-                                        &PayError::InvalidAmount(
+                                        &PayError::invalid_amount(
                                             "this wallet was created before mnemonic support; create a new wallet to get 12-word backup".to_string(),
                                         ),
                                         start,
@@ -513,7 +605,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             emit_error(
                                 &app.writer,
                                 Some(id),
-                                &PayError::InternalError("wallet has no seed".to_string()),
+                                &PayError::internal_error("wallet has no seed".to_string()),
                                 start,
                             )
                             .await;
@@ -567,6 +659,18 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                     }
 
                     if !rpc_endpoints.is_empty() {
+                        // Same allowlist gate as wallet_create — without this,
+                        // a CLI/pipe-mode agent could swap rpc endpoints to a
+                        // malicious node even when the operator restricted
+                        // them at create time.
+                        let cfg = app.config.read().await;
+                        let allow_check =
+                            validate_rpc_endpoints(&cfg, meta.network, &rpc_endpoints);
+                        drop(cfg);
+                        if let Err(err) = allow_check {
+                            emit_error(&app.writer, Some(id), &err, start).await;
+                            return;
+                        }
                         match meta.network {
                             Network::Sol => {
                                 meta.sol_rpc_endpoints = Some(rpc_endpoints);
@@ -580,7 +684,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                                 emit_error(
                                     &app.writer,
                                     Some(id),
-                                    &PayError::InvalidAmount(format!(
+                                    &PayError::invalid_amount(format!(
                                         "rpc-endpoint not supported for {} wallets",
                                         meta.network
                                     )),
@@ -597,7 +701,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             emit_error(
                                 &app.writer,
                                 Some(id),
-                                &PayError::InvalidAmount(
+                                &PayError::invalid_amount(
                                     "chain-id is only supported for evm wallets".to_string(),
                                 ),
                                 start,
@@ -613,7 +717,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                         emit_error(
                             &app.writer,
                             Some(id),
-                            &PayError::InvalidAmount(
+                            &PayError::invalid_amount(
                                 "no configuration changes specified".to_string(),
                             ),
                             start,
@@ -655,7 +759,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                         emit_error(
                             &app.writer,
                             Some(id),
-                            &PayError::InvalidAmount(format!(
+                            &PayError::invalid_amount(format!(
                                 "custom tokens not supported for {} wallets",
                                 meta.network
                             )),
@@ -674,7 +778,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                         emit_error(
                             &app.writer,
                             Some(id),
-                            &PayError::InvalidAmount(format!(
+                            &PayError::invalid_amount(format!(
                                 "custom token '{lower_symbol}' already registered"
                             )),
                             start,
@@ -723,7 +827,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                         emit_error(
                             &app.writer,
                             Some(id),
-                            &PayError::InvalidAmount(format!(
+                            &PayError::invalid_amount(format!(
                                 "custom token '{lower_symbol}' not found"
                             )),
                             start,
@@ -779,6 +883,10 @@ fn metadata_from_wallet_create(
         evm_chain_id: (info.network == Network::Evm)
             .then_some(request.chain_id)
             .flatten(),
+        sol_cluster: request
+            .sol_cluster
+            .clone()
+            .filter(|_| info.network == Network::Sol),
         // Do not mirror seed/backend secrets from downstream RPC nodes.
         seed_secret: None,
         backend: None,
@@ -827,6 +935,7 @@ fn metadata_from_ln_wallet_create(
         sol_rpc_endpoints: None,
         evm_rpc_endpoints: None,
         evm_chain_id: None,
+        sol_cluster: None,
         seed_secret: None,
         backend: Some(request.backend.as_str().to_string()),
         btc_esplora_url: None,

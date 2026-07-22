@@ -22,15 +22,36 @@ use std::fmt;
 // ═══════════════════════════════════════════
 // PayError
 // ═══════════════════════════════════════════
+//
+// All variants carry a structured `hint: Option<String>` so agents can recover
+// programmatically. Constructor helpers (`not_implemented`, `wallet_not_found`, …)
+// keep ergonomic call-sites short; pass an explicit struct literal when a call-site
+// has a more specific hint than the default returned by `hint()`.
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum PayError {
-    NotImplemented(String),
-    WalletNotFound(String),
-    InvalidAmount(String),
-    NetworkError(String),
-    InternalError(String),
+    NotImplemented {
+        message: String,
+        hint: Option<String>,
+    },
+    WalletNotFound {
+        wallet: String,
+        hint: Option<String>,
+    },
+    InvalidAmount {
+        message: String,
+        hint: Option<String>,
+    },
+    NetworkError {
+        message: String,
+        hint: Option<String>,
+        retry_after_ms: Option<u64>,
+    },
+    InternalError {
+        message: String,
+        hint: Option<String>,
+    },
     LimitExceeded {
         rule_id: String,
         scope: SpendScope,
@@ -41,17 +62,43 @@ pub enum PayError {
         remaining_s: u64,
         /// Which node rejected: None = local, Some(endpoint) = remote.
         origin: Option<String>,
+        hint: Option<String>,
+    },
+    /// A mutating limit/admin operation was attempted on a client that does not
+    /// hold the spend ledger locally. The agent should send the request to the
+    /// daemon at `daemon_endpoint` instead.
+    ConfigureOnDaemon {
+        operation: String,
+        daemon_endpoint: Option<String>,
+    },
+    /// A remote afpay daemon returned a response that violates the wire protocol
+    /// (missing required fields, wrong types, etc.). Distinct from NetworkError
+    /// which is transient.
+    RemoteProtocolError {
+        endpoint: String,
+        detail: String,
+        hint: Option<String>,
+    },
+    /// A request targeted a resource (mint URL, esplora endpoint, …) that is not
+    /// in the operator's allowlist. Distinct from InvalidAmount so agents can
+    /// surface the allowlist hint without ambiguity.
+    Forbidden {
+        message: String,
+        hint: Option<String>,
+    },
+    InvalidRequest {
+        message: String,
     },
 }
 
 impl fmt::Display for PayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotImplemented(msg) => write!(f, "{msg}"),
-            Self::WalletNotFound(msg) => write!(f, "{msg}"),
-            Self::InvalidAmount(msg) => write!(f, "{msg}"),
-            Self::NetworkError(msg) => write!(f, "{msg}"),
-            Self::InternalError(msg) => write!(f, "{msg}"),
+            Self::NotImplemented { message, .. } => write!(f, "{message}"),
+            Self::WalletNotFound { wallet, .. } => write!(f, "wallet not found: {wallet}"),
+            Self::InvalidAmount { message, .. } => write!(f, "{message}"),
+            Self::NetworkError { message, .. } => write!(f, "{message}"),
+            Self::InternalError { message, .. } => write!(f, "{message}"),
             Self::LimitExceeded {
                 scope,
                 scope_key,
@@ -74,6 +121,24 @@ impl fmt::Display for PayError {
                     )
                 }
             }
+            Self::ConfigureOnDaemon {
+                operation,
+                daemon_endpoint,
+            } => match daemon_endpoint {
+                Some(ep) => write!(
+                    f,
+                    "operation `{operation}` must be sent to the daemon at {ep}"
+                ),
+                None => write!(
+                    f,
+                    "operation `{operation}` must be configured on the spend-ledger daemon"
+                ),
+            },
+            Self::RemoteProtocolError {
+                endpoint, detail, ..
+            } => write!(f, "remote {endpoint} returned malformed response: {detail}"),
+            Self::Forbidden { message, .. } => write!(f, "{message}"),
+            Self::InvalidRequest { message } => write!(f, "{message}"),
         }
     }
 }
@@ -81,25 +146,146 @@ impl fmt::Display for PayError {
 impl PayError {
     pub fn error_code(&self) -> &'static str {
         match self {
-            Self::NotImplemented(_) => "not_implemented",
-            Self::WalletNotFound(_) => "wallet_not_found",
-            Self::InvalidAmount(_) => "invalid_amount",
-            Self::NetworkError(_) => "network_error",
-            Self::InternalError(_) => "internal_error",
+            Self::NotImplemented { .. } => "not_implemented",
+            Self::WalletNotFound { .. } => "wallet_not_found",
+            Self::InvalidAmount { .. } => "invalid_amount",
+            Self::NetworkError { .. } => "network_error",
+            Self::InternalError { .. } => "internal_error",
             Self::LimitExceeded { .. } => "limit_exceeded",
+            Self::ConfigureOnDaemon { .. } => "configure_on_daemon",
+            Self::RemoteProtocolError { .. } => "remote_protocol_error",
+            Self::Forbidden { .. } => "forbidden",
+            Self::InvalidRequest { .. } => "invalid_request",
         }
     }
 
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::NetworkError(_))
+        matches!(self, Self::NetworkError { .. })
     }
 
+    /// Optional retry-after hint for caller backoff. Returns Some only for
+    /// transient errors where the upstream gave a concrete delay (e.g. a 429).
+    #[allow(dead_code)]
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::NetworkError { retry_after_ms, .. } => *retry_after_ms,
+            _ => None,
+        }
+    }
+
+    /// Agent-actionable hint. Variants return the call-site override when set,
+    /// otherwise a sensible default. Every variant returns Some — silent None
+    /// means a programming error.
     pub fn hint(&self) -> Option<String> {
         match self {
-            Self::NotImplemented(_) => Some("enable redb or postgres storage backend".to_string()),
-            Self::WalletNotFound(_) => Some("list wallets with: afpay wallet list".to_string()),
-            Self::LimitExceeded { .. } => Some("check limits with: afpay limit list".to_string()),
-            _ => None,
+            Self::NotImplemented { hint, .. } => hint.clone().or_else(|| {
+                Some(
+                    "this build does not support the requested operation; check `--help` for enabled features"
+                        .to_string(),
+                )
+            }),
+            Self::WalletNotFound { hint, wallet } => hint.clone().or_else(|| {
+                Some(format!(
+                    "wallet `{wallet}` not found; list wallets with `afpay wallet list` or create one with `afpay wallet create`"
+                ))
+            }),
+            Self::InvalidAmount { hint, .. } => hint.clone().or_else(|| {
+                Some(
+                    "amount must be a positive integer in the network's base unit (sats/lamports/wei)"
+                        .to_string(),
+                )
+            }),
+            Self::NetworkError { hint, .. } => hint.clone().or_else(|| {
+                Some("transient network failure; retry with exponential backoff".to_string())
+            }),
+            Self::InternalError { hint, .. } => hint.clone().or_else(|| {
+                Some(
+                    "internal error; rerun with `--log debug` for diagnostics and report if reproducible"
+                        .to_string(),
+                )
+            }),
+            Self::LimitExceeded { hint, .. } => hint
+                .clone()
+                .or_else(|| Some("inspect active rules with `afpay limit list`".to_string())),
+            Self::ConfigureOnDaemon {
+                operation,
+                daemon_endpoint,
+            } => Some(match daemon_endpoint {
+                Some(ep) => format!(
+                    "send `{operation}` to the spend-ledger daemon at {ep}; this client does not enforce limits locally"
+                ),
+                None => format!(
+                    "`{operation}` requires a local spend-ledger; enable a storage backend (redb/postgres) or point `afpay_rpc` at a daemon in config.toml"
+                ),
+            }),
+            Self::RemoteProtocolError { hint, endpoint, .. } => hint.clone().or_else(|| {
+                Some(format!(
+                    "remote {endpoint} returned a malformed response; verify it runs a compatible afpay version"
+                ))
+            }),
+            Self::Forbidden { hint, .. } => hint.clone().or_else(|| {
+                Some(
+                    "operator policy rejected this request; check `allowed_*_urls` in runtime config"
+                        .to_string(),
+                )
+            }),
+            Self::InvalidRequest { message } => Some(format!(
+                "invalid request: {message}; check `afpay config --help` for valid keys"
+            )),
+        }
+    }
+
+    // ────────────────────────────────────────
+    // Constructor helpers (the common "no call-site hint" case)
+    // ────────────────────────────────────────
+
+    pub fn not_implemented(message: impl Into<String>) -> Self {
+        Self::NotImplemented {
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    pub fn wallet_not_found(wallet: impl Into<String>) -> Self {
+        Self::WalletNotFound {
+            wallet: wallet.into(),
+            hint: None,
+        }
+    }
+
+    pub fn invalid_amount(message: impl Into<String>) -> Self {
+        Self::InvalidAmount {
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    pub fn network_error(message: impl Into<String>) -> Self {
+        Self::NetworkError {
+            message: message.into(),
+            hint: None,
+            retry_after_ms: None,
+        }
+    }
+
+    pub fn internal_error(message: impl Into<String>) -> Self {
+        Self::InternalError {
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::Forbidden {
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            message: message.into(),
         }
     }
 }
@@ -136,7 +322,7 @@ pub trait PayProvider: Send + Sync {
         &self,
         _request: LnWalletCreateRequest,
     ) -> Result<WalletInfo, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "ln wallet creation not supported".to_string(),
         ))
     }
@@ -144,12 +330,12 @@ pub trait PayProvider: Send + Sync {
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError>;
     async fn balance(&self, wallet: &str) -> Result<BalanceInfo, PayError>;
     async fn check_balance(&self, _wallet: &str) -> Result<BalanceInfo, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "check_balance not supported".to_string(),
         ))
     }
     async fn restore(&self, _wallet: &str) -> Result<RestoreResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "restore not supported".to_string(),
         ))
     }
@@ -167,7 +353,7 @@ pub trait PayProvider: Send + Sync {
         _wallet: &str,
         _amount: &Amount,
     ) -> Result<CashuSendQuoteInfo, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "cashu_send_quote not supported".to_string(),
         ))
     }
@@ -197,7 +383,7 @@ pub trait PayProvider: Send + Sync {
         _to: &str,
         _mints: Option<&[String]>,
     ) -> Result<SendQuoteInfo, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "send_quote not supported".to_string(),
         ))
     }
@@ -250,30 +436,30 @@ impl PayProvider for StubProvider {
     }
 
     async fn create_wallet(&self, _request: &WalletCreateRequest) -> Result<WalletInfo, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn create_ln_wallet(
         &self,
         _request: LnWalletCreateRequest,
     ) -> Result<WalletInfo, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn close_wallet(&self, _wallet: &str) -> Result<(), PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn list_wallets(&self) -> Result<Vec<WalletSummary>, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn balance(&self, _wallet: &str) -> Result<BalanceInfo, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn balance_all(&self) -> Result<Vec<WalletBalanceItem>, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn receive_info(
@@ -281,11 +467,11 @@ impl PayProvider for StubProvider {
         _wallet: &str,
         _amount: Option<Amount>,
     ) -> Result<ReceiveInfo, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn receive_claim(&self, _wallet: &str, _quote_id: &str) -> Result<u64, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn cashu_send(
@@ -295,7 +481,7 @@ impl PayProvider for StubProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn cashu_receive(
@@ -303,7 +489,7 @@ impl PayProvider for StubProvider {
         _wallet: &str,
         _token: &str,
     ) -> Result<CashuReceiveResult, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn send(
@@ -313,7 +499,7 @@ impl PayProvider for StubProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<SendResult, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn history_list(
@@ -322,10 +508,10 @@ impl PayProvider for StubProvider {
         _limit: usize,
         _offset: usize,
     ) -> Result<Vec<HistoryRecord>, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 
     async fn history_status(&self, _transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
-        Err(PayError::NotImplemented("network not enabled".to_string()))
+        Err(PayError::not_implemented("network not enabled".to_string()))
     }
 }

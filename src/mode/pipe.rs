@@ -5,13 +5,17 @@ use crate::handler::{self, App};
 use crate::store;
 use crate::types::*;
 use crate::writer;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 const OUTPUT_CHANNEL_CAPACITY: usize = 4096;
+/// Cap on concurrently in-flight async dispatches. Above this, the pipe
+/// returns `error_code: "busy"` with a `retry_after_ms` hint so a runaway
+/// agent cannot exhaust task slots and starve shutdown drain.
+const PIPE_IN_FLIGHT_CAP: usize = 32;
 
 pub(super) async fn run(init: PipeInit) {
     let PipeInit {
@@ -21,6 +25,7 @@ pub(super) async fn run(init: PipeInit) {
         startup_argv,
         startup_args,
         startup_requested,
+        scrub_parse_errors,
     } = init;
 
     let resolved_dir = data_dir.unwrap_or_else(|| RuntimeConfig::default().data_dir);
@@ -35,8 +40,9 @@ pub(super) async fn run(init: PipeInit) {
         config.log = log.clone();
     }
 
+    let log_filters = agent_first_data::LogFilters::new(config.log.clone());
     if let Some(event) = config::maybe_startup_log(
-        &config.log,
+        &log_filters,
         startup_requested,
         Some(startup_argv),
         Some(&config),
@@ -70,17 +76,35 @@ pub(super) async fn run(init: PipeInit) {
             continue;
         }
 
-        let input: Input = match serde_json::from_str(trimmed) {
+        let request: Request = match serde_json::from_str(trimmed) {
             Ok(value) => value,
             Err(error) => {
+                // In public-listen mode keep the byte offset (useful for an
+                // operator inspecting the wire) but strip the field name /
+                // variant detail so a probing attacker cannot enumerate the
+                // schema. Without --public-listen the full serde message is
+                // surfaced, matching prior dev-friendly behaviour.
+                let wire_message = if scrub_parse_errors {
+                    format!(
+                        "parse error at line {} column {}",
+                        error.line(),
+                        error.column()
+                    )
+                } else {
+                    format!("parse error: {error}")
+                };
                 let _ = app
                     .writer
                     .send(Output::Error {
                         id: None,
                         error_code: "invalid_request".to_string(),
-                        error: format!("parse error: {error}"),
-                        hint: None,
+                        error: wire_message,
+                        hint: Some(
+                            "request must be valid JSON matching the Input/Request schema; pass `dry_run: true` to validate without executing"
+                                .to_string(),
+                        ),
                         retryable: false,
+                        retry_after_ms: None,
                         trace: Trace::from_duration(0),
                     })
                     .await;
@@ -88,21 +112,53 @@ pub(super) async fn run(init: PipeInit) {
             }
         };
 
-        let is_close = matches!(input, Input::Close);
+        let is_close = matches!(request.input, Input::Close);
 
-        match &input {
-            Input::Version | Input::Config(_) | Input::ConfigShow { .. } | Input::Close => {
+        match &request.input {
+            Input::Version | Input::ConfigGet { .. } | Input::ConfigSet { .. } | Input::Close => {
                 app.requests_total.fetch_add(1, Ordering::Relaxed);
-                handler::dispatch(&app, input).await;
+                handler::dispatch(&app, request).await;
             }
             _ => {
+                // Reap finished tasks BEFORE checking the cap so steady-state
+                // pipelining is not gated on the periodic retain() at the
+                // bottom of the loop.
+                {
+                    let mut in_flight = app.in_flight.lock().await;
+                    in_flight.retain(|_, handle| !handle.is_finished());
+                    if in_flight.len() >= PIPE_IN_FLIGHT_CAP {
+                        drop(in_flight);
+                        let req_id = request_id_for_tracking(&request.input).map(str::to_string);
+                        let _ = app
+                            .writer
+                            .send(Output::Error {
+                                id: req_id,
+                                error_code: "busy".to_string(),
+                                error: format!(
+                                    "pipe in-flight cap reached ({PIPE_IN_FLIGHT_CAP}); back off and retry"
+                                ),
+                                hint: Some(format!(
+                                    "the daemon caps concurrent async dispatches at {PIPE_IN_FLIGHT_CAP} to keep shutdown drain bounded; resubmit after prior requests complete"
+                                )),
+                                retryable: true,
+                                // 100ms is the empirical mean dispatch time
+                                // for cached cashu/sol sends; longer than that
+                                // and the cap was the real bottleneck, not
+                                // backpressure noise. Tune if dispatches grow.
+                                retry_after_ms: Some(100),
+                                trace: Trace::from_duration(0),
+                            })
+                            .await;
+                        continue;
+                    }
+                }
                 let app2 = app.clone();
                 app.requests_total.fetch_add(1, Ordering::Relaxed);
-                let request_id = request_id_for_tracking(&input).unwrap_or("anonymous");
+                let request_id = request_id_for_tracking(&request.input).unwrap_or("anonymous");
                 let key = format!("{request_id}#{task_seq}");
                 task_seq = task_seq.wrapping_add(1);
                 let handle = tokio::spawn(async move {
-                    handler::dispatch(&app2, input).await;
+                    handler::dispatch(&app2, request).await;
                 });
                 app.in_flight.lock().await.insert(key, handle);
             }

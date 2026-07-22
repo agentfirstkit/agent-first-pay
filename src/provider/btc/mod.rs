@@ -51,11 +51,11 @@ fn resolve_chain_source(meta: &WalletMetadata) -> Result<Box<dyn BtcChainSource>
         Some("electrum") => Ok(Box::new(electrum::ElectrumSource::new(meta)?)),
 
         #[cfg(not(feature = "btc-esplora"))]
-        None => Err(PayError::InternalError(
+        None => Err(PayError::internal_error(
             "no default btc backend available; enable btc-esplora feature".to_string(),
         )),
 
-        Some(other) => Err(PayError::InternalError(format!(
+        Some(other) => Err(PayError::internal_error(format!(
             "unknown btc backend '{other}'; expected: esplora, core-rpc, electrum"
         ))),
     }
@@ -92,7 +92,7 @@ fn ensure_backend_enabled(backend: BtcBackend) -> Result<(), PayError> {
         return Ok(());
     }
     let feature = backend_feature_name(backend);
-    Err(PayError::NotImplemented(format!(
+    Err(PayError::not_implemented(format!(
         "btc backend '{}' is not enabled in this build; rebuild with --features {feature}",
         backend.as_str()
     )))
@@ -105,7 +105,7 @@ fn validate_backend_request(
     match backend {
         BtcBackend::Esplora => {
             if matches!(request.btc_esplora_url.as_deref(), Some(url) if url.trim().is_empty()) {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "btc_esplora_url must not be empty when provided".to_string(),
                 ));
             }
@@ -118,7 +118,7 @@ fn validate_backend_request(
                 .filter(|s| !s.is_empty())
                 .is_none()
             {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "btc_core_url is required when btc_backend=core-rpc".to_string(),
                 ));
             }
@@ -131,7 +131,7 @@ fn validate_backend_request(
                 .filter(|s| !s.is_empty())
                 .is_none()
             {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "btc_electrum_url is required when btc_backend=electrum".to_string(),
                 ));
             }
@@ -141,10 +141,10 @@ fn validate_backend_request(
 }
 
 fn chain_txid_from_record(record: &HistoryRecord) -> Option<Txid> {
-    if let Some(onchain_id) = record.onchain_memo.as_deref() {
-        if let Ok(txid) = Txid::from_str(onchain_id) {
-            return Some(txid);
-        }
+    if let Some(onchain_id) = record.onchain_memo.as_deref()
+        && let Ok(txid) = Txid::from_str(onchain_id)
+    {
+        return Some(txid);
     }
     Txid::from_str(&record.transaction_id).ok()
 }
@@ -201,7 +201,7 @@ impl BtcProvider {
         let id = self.resolve_wallet_id(wallet_id)?;
         let meta = self.store.load_wallet_metadata(&id)?;
         if meta.network != Network::Btc {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "wallet {id} is not a btc wallet"
             )));
         }
@@ -246,14 +246,14 @@ impl PayProvider for BtcProvider {
         let is_restore = request.mnemonic_secret.is_some();
         let mnemonic_str = if let Some(ref mnemonic) = request.mnemonic_secret {
             Mnemonic::parse(mnemonic)
-                .map_err(|e| PayError::InvalidAmount(format!("invalid mnemonic: {e}")))?;
+                .map_err(|e| PayError::invalid_amount(format!("invalid mnemonic: {e}")))?;
             mnemonic.clone()
         } else {
             let mut entropy = [0u8; 16];
             getrandom::fill(&mut entropy)
-                .map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
             let mnemonic = Mnemonic::from_entropy(&entropy)
-                .map_err(|e| PayError::InternalError(format!("mnemonic gen: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("mnemonic gen: {e}")))?;
             mnemonic.to_string()
         };
 
@@ -269,12 +269,12 @@ impl PayProvider for BtcProvider {
             .to_string();
 
         if !["mainnet", "signet"].contains(&btc_network_str.as_str()) {
-            return Err(PayError::InvalidAmount(format!(
+            return Err(PayError::invalid_amount(format!(
                 "unsupported btc_network '{btc_network_str}'; expected: mainnet, signet"
             )));
         }
         if !["taproot", "segwit"].contains(&btc_address_type.as_str()) {
-            return Err(PayError::InvalidAmount(format!(
+            return Err(PayError::invalid_amount(format!(
                 "unsupported btc_address_type '{btc_address_type}'; expected: taproot, segwit"
             )));
         }
@@ -283,7 +283,16 @@ impl PayProvider for BtcProvider {
         ensure_backend_enabled(btc_backend)?;
         validate_backend_request(request, btc_backend)?;
 
-        let wallet_id = wallet::generate_wallet_identifier()?;
+        // Derive a stable wallet_id from (network, btc_network, address_type,
+        // mnemonic). The same mnemonic on mainnet vs signet, or as taproot vs
+        // segwit, lives in distinct id-spaces; re-running create with identical
+        // parameters always hits the load_wallet_metadata idempotency path.
+        let wallet_id = wallet::derive_wallet_identifier(&[
+            b"btc",
+            btc_network_str.as_bytes(),
+            btc_address_type.as_bytes(),
+            mnemonic_str.trim().as_bytes(),
+        ]);
         let normalized_label = {
             let trimmed = request.label.trim();
             if trimmed.is_empty() || trimmed == "default" {
@@ -301,6 +310,7 @@ impl PayProvider for BtcProvider {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: None,
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: Some(mnemonic_str.clone()),
             backend: Some(btc_backend.as_str().to_string()),
             btc_esplora_url: request.btc_esplora_url.clone(),
@@ -322,11 +332,11 @@ impl PayProvider for BtcProvider {
         let _ = bdk_wallet.reveal_addresses_to(KeychainKind::External, 0);
         persist_changeset(&self.data_dir, &meta, &mut bdk_wallet)?;
 
-        if is_restore {
-            if let Err(e) = Self::full_scan_wallet(&self.data_dir, &meta, &mut bdk_wallet).await {
-                let _ = self.store.delete_wallet_metadata(&wallet_id);
-                return Err(e);
-            }
+        if is_restore
+            && let Err(e) = Self::full_scan_wallet(&self.data_dir, &meta, &mut bdk_wallet).await
+        {
+            let _ = self.store.delete_wallet_metadata(&wallet_id);
+            return Err(e);
         }
 
         Ok(WalletInfo {
@@ -347,7 +357,7 @@ impl PayProvider for BtcProvider {
         let balance = bdk_wallet.balance();
         let total = balance.total().to_sat();
         if total > 0 {
-            return Err(PayError::InvalidAmount(format!(
+            return Err(PayError::invalid_amount(format!(
                 "wallet {id} has {total} sats remaining; transfer funds before closing, \
                  or use --dangerously-skip-balance-check-and-may-lose-money"
             )));
@@ -422,7 +432,7 @@ impl PayProvider for BtcProvider {
     }
 
     async fn receive_claim(&self, _wallet: &str, _quote_id: &str) -> Result<u64, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "btc does not use receive_claim; on-chain transactions are automatic".to_string(),
         ))
     }
@@ -434,7 +444,7 @@ impl PayProvider for BtcProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "cashu_send not supported for btc".to_string(),
         ))
     }
@@ -444,7 +454,7 @@ impl PayProvider for BtcProvider {
         _wallet: &str,
         _token: &str,
     ) -> Result<CashuReceiveResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "cashu_receive not supported for btc".to_string(),
         ))
     }
@@ -460,16 +470,16 @@ impl PayProvider for BtcProvider {
         let meta = self.load_btc_wallet(&id)?;
         let target = parse_transfer_target(to)?;
         if target.amount_sats == 0 {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "amount must be greater than 0 sats".to_string(),
             ));
         }
 
         let btc_net = btc_network_for_meta(&meta);
         let recipient = Address::from_str(&target.address)
-            .map_err(|e| PayError::InvalidAmount(format!("invalid btc address: {e}")))?
+            .map_err(|e| PayError::invalid_amount(format!("invalid btc address: {e}")))?
             .require_network(btc_net)
-            .map_err(|e| PayError::InvalidAmount(format!("address network mismatch: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("address network mismatch: {e}")))?;
 
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
 
@@ -483,22 +493,22 @@ impl PayProvider for BtcProvider {
 
         let mut psbt = tx_builder
             .finish()
-            .map_err(|e| PayError::InternalError(format!("build tx: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("build tx: {e}")))?;
 
         #[allow(deprecated)]
         let finalized = bdk_wallet
             .sign(&mut psbt, bdk_wallet::SignOptions::default())
-            .map_err(|e| PayError::InternalError(format!("sign tx: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("sign tx: {e}")))?;
 
         if !finalized {
-            return Err(PayError::InternalError(
+            return Err(PayError::internal_error(
                 "transaction signing did not finalize".to_string(),
             ));
         }
 
         let tx = psbt
             .extract_tx()
-            .map_err(|e| PayError::InternalError(format!("extract tx: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("extract tx: {e}")))?;
         let txid = tx.compute_txid().to_string();
 
         // Broadcast via resolved chain source
@@ -531,6 +541,7 @@ impl PayProvider for BtcProvider {
                 token: "sats".to_string(),
             }),
             reference_keys: None,
+            reservation_ids: Vec::new(),
         };
 
         let _ = self.store.append_transaction_record(&record);
@@ -560,16 +571,16 @@ impl PayProvider for BtcProvider {
         let meta = self.load_btc_wallet(&id)?;
         let target = parse_transfer_target(to)?;
         if target.amount_sats == 0 {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "amount must be greater than 0 sats".to_string(),
             ));
         }
 
         let btc_net = btc_network_for_meta(&meta);
         let recipient = Address::from_str(&target.address)
-            .map_err(|e| PayError::InvalidAmount(format!("invalid btc address: {e}")))?
+            .map_err(|e| PayError::invalid_amount(format!("invalid btc address: {e}")))?
             .require_network(btc_net)
-            .map_err(|e| PayError::InvalidAmount(format!("address network mismatch: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("address network mismatch: {e}")))?;
 
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
         Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
@@ -582,21 +593,21 @@ impl PayProvider for BtcProvider {
 
         let mut psbt = tx_builder
             .finish()
-            .map_err(|e| PayError::InternalError(format!("build tx quote: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("build tx quote: {e}")))?;
 
         #[allow(deprecated)]
         let finalized = bdk_wallet
             .sign(&mut psbt, bdk_wallet::SignOptions::default())
-            .map_err(|e| PayError::InternalError(format!("sign tx quote: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("sign tx quote: {e}")))?;
         if !finalized {
-            return Err(PayError::InternalError(
+            return Err(PayError::internal_error(
                 "transaction quote signing did not finalize".to_string(),
             ));
         }
 
         let tx = psbt
             .extract_tx()
-            .map_err(|e| PayError::InternalError(format!("extract tx quote: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("extract tx quote: {e}")))?;
         let fee_estimate_native = bdk_wallet
             .calculate_fee(&tx)
             .map(|fee| fee.to_sat())
@@ -632,43 +643,42 @@ impl PayProvider for BtcProvider {
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
         match self.store.find_transaction_record_by_id(transaction_id)? {
             Some(mut rec) => {
-                if let Some(chain_txid) = chain_txid_from_record(&rec) {
-                    if let Ok(meta) = self.load_btc_wallet(&rec.wallet) {
-                        let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
-                        Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
-                        if let Some(wallet_tx) = bdk_wallet.get_tx(chain_txid) {
-                            let tip_height = bdk_wallet.latest_checkpoint().height();
-                            let (status, confirmations) =
-                                status_and_confirmations(wallet_tx.chain_position, tip_height);
-                            let confirmed_at_epoch_s = if status == TxStatus::Confirmed {
-                                Some(
-                                    rec.confirmed_at_epoch_s
-                                        .unwrap_or_else(wallet::now_epoch_seconds),
-                                )
-                            } else {
-                                None
-                            };
+                if let Some(chain_txid) = chain_txid_from_record(&rec)
+                    && let Ok(meta) = self.load_btc_wallet(&rec.wallet)
+                {
+                    let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
+                    Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
+                    if let Some(wallet_tx) = bdk_wallet.get_tx(chain_txid) {
+                        let tip_height = bdk_wallet.latest_checkpoint().height();
+                        let (status, confirmations) =
+                            status_and_confirmations(wallet_tx.chain_position, tip_height);
+                        let confirmed_at_epoch_s = if status == TxStatus::Confirmed {
+                            Some(
+                                rec.confirmed_at_epoch_s
+                                    .unwrap_or_else(wallet::now_epoch_seconds),
+                            )
+                        } else {
+                            None
+                        };
 
-                            if rec.status != status
-                                || rec.confirmed_at_epoch_s != confirmed_at_epoch_s
-                            {
-                                let _ = self.store.update_transaction_record_status(
-                                    &rec.transaction_id,
-                                    status,
-                                    confirmed_at_epoch_s,
-                                );
-                                rec.status = status;
-                                rec.confirmed_at_epoch_s = confirmed_at_epoch_s;
-                            }
-
-                            return Ok(HistoryStatusInfo {
-                                transaction_id: rec.transaction_id.clone(),
-                                status: rec.status,
-                                confirmations: Some(confirmations),
-                                preimage: rec.preimage.clone(),
-                                item: Some(rec),
-                            });
+                        if rec.status != status || rec.confirmed_at_epoch_s != confirmed_at_epoch_s
+                        {
+                            let _ = self.store.update_transaction_record_status(
+                                &rec.transaction_id,
+                                status,
+                                confirmed_at_epoch_s,
+                            );
+                            rec.status = status;
+                            rec.confirmed_at_epoch_s = confirmed_at_epoch_s;
                         }
+
+                        return Ok(HistoryStatusInfo {
+                            transaction_id: rec.transaction_id.clone(),
+                            status: rec.status,
+                            confirmations: Some(confirmations),
+                            preimage: rec.preimage.clone(),
+                            item: Some(rec),
+                        });
                     }
                 }
 
@@ -680,7 +690,7 @@ impl PayProvider for BtcProvider {
                     item: Some(rec),
                 })
             }
-            None => Err(PayError::WalletNotFound(format!(
+            None => Err(PayError::wallet_not_found(format!(
                 "transaction {transaction_id} not found"
             ))),
         }
@@ -778,6 +788,7 @@ impl PayProvider for BtcProvider {
                     token: "sats".to_string(),
                 }),
                 reference_keys: None,
+                reservation_ids: Vec::new(),
             };
             let _ = self.store.append_transaction_record(&record);
             local_by_chain_txid.insert(chain_txid, record);
@@ -791,8 +802,8 @@ impl PayProvider for BtcProvider {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::common::*;
     use super::BtcProvider;
+    use super::common::*;
     use crate::provider::{PayError, PayProvider};
     use crate::store::StorageBackend;
     use crate::types::{BtcBackend, WalletCreateRequest};
@@ -873,6 +884,7 @@ mod tests {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         }
     }
 
@@ -886,7 +898,7 @@ mod tests {
 
         let err = provider.create_wallet(&req).await.unwrap_err();
         assert!(
-            matches!(err, PayError::InvalidAmount(_)),
+            matches!(err, PayError::InvalidAmount { .. }),
             "expected InvalidAmount, got: {err}"
         );
     }
@@ -903,7 +915,7 @@ mod tests {
 
         let err = provider.create_wallet(&req).await.unwrap_err();
         assert!(
-            matches!(err, PayError::NotImplemented(_)),
+            matches!(err, PayError::NotImplemented { .. }),
             "expected NotImplemented, got: {err}"
         );
     }
@@ -920,7 +932,7 @@ mod tests {
 
         let err = provider.create_wallet(&req).await.unwrap_err();
         assert!(
-            matches!(err, PayError::InvalidAmount(_)),
+            matches!(err, PayError::InvalidAmount { .. }),
             "expected InvalidAmount, got: {err}"
         );
     }
@@ -937,7 +949,7 @@ mod tests {
 
         let err = provider.create_wallet(&req).await.unwrap_err();
         assert!(
-            matches!(err, PayError::InvalidAmount(_)),
+            matches!(err, PayError::InvalidAmount { .. }),
             "expected InvalidAmount, got: {err}"
         );
     }
@@ -957,7 +969,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, PayError::InvalidAmount(_)),
+            matches!(err, PayError::InvalidAmount { .. }),
             "expected InvalidAmount, got: {err}"
         );
     }
@@ -978,7 +990,7 @@ mod tests {
 
         let err = provider.create_wallet(&req).await.unwrap_err();
         assert!(
-            matches!(err, PayError::NetworkError(_)),
+            matches!(err, PayError::NetworkError { .. }),
             "expected NetworkError from full_scan, got: {err}"
         );
         let wallets = provider.list_wallets().await.unwrap();

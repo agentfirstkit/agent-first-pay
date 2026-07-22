@@ -9,6 +9,24 @@ BITCOIND_DATADIR="${BITCOIND_DATADIR:-/data/bitcoind}"
 PHOENIXD_DATADIR="${PHOENIXD_DATADIR:-/data/phoenixd}"
 AFPAY_PORT="${AFPAY_PORT:-9401}"
 
+# Emit a TOML `key = ["a", "b"]` line from a comma-separated value list; emits
+# nothing when the list is empty. Used to seed the operator allowlists below.
+emit_allowlist() {
+    key="$1"
+    csv="$2"
+    [ -n "$csv" ] || return 0
+    arr=""
+    OLD_IFS="$IFS"
+    IFS=','
+    for item in $csv; do
+        [ -n "$item" ] || continue
+        [ -n "$arr" ] && arr="$arr, "
+        arr="$arr\"$item\""
+    done
+    IFS="$OLD_IFS"
+    printf '%s = [%s]\n' "$key" "$arr"
+}
+
 mkdir -p "$AFPAY_DATA_DIR" "$BITCOIND_DATADIR" "$PHOENIXD_DATADIR"
 chmod 700 "$AFPAY_DATA_DIR" "$BITCOIND_DATADIR" "$PHOENIXD_DATADIR" 2>/dev/null || true
 
@@ -125,6 +143,8 @@ rpcpassword=${BTC_RPC_PASS}
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1/32
 EOF
+    # bitcoin.conf carries rpcpassword; same posture as the afpay secret file.
+    chmod 600 "${BITCOIND_DATADIR}/bitcoin.conf" 2>/dev/null || true
 else
     rm -f /etc/supervisor/conf.d/bitcoind.conf
 fi
@@ -135,11 +155,23 @@ if [ "$ENABLE_PHOENIXD" != "true" ]; then
 fi
 
 # ── 3. generate afpay config.toml (only if not already present) ──
+# Operator allowlists (allowed_* arrays) come from the AFPAY_ALLOWED_* env, set by
+# `afpay container install --allow <category>=<url>`. afpay refuses to start a
+# public listener with an empty allowlist, so this is where the agent-unreachable
+# boundary is seeded. config.toml is written once per data volume; to change the
+# allowlists later, edit it or recreate the volume.
 CONFIG_FILE="${AFPAY_DATA_DIR}/config.toml"
 if [ ! -f "$CONFIG_FILE" ]; then
-    cat > "$CONFIG_FILE" <<EOF
-storage_backend = "redb"
-EOF
+    {
+        echo 'storage_backend = "redb"'
+        emit_allowlist allowed_mint_urls "${AFPAY_ALLOWED_MINT_URLS:-}"
+        emit_allowlist allowed_esplora_urls "${AFPAY_ALLOWED_ESPLORA_URLS:-}"
+        emit_allowlist allowed_sol_rpc_endpoints "${AFPAY_ALLOWED_SOL_RPC_ENDPOINTS:-}"
+        emit_allowlist allowed_evm_rpc_endpoints "${AFPAY_ALLOWED_EVM_RPC_ENDPOINTS:-}"
+        emit_allowlist allowed_btc_core_urls "${AFPAY_ALLOWED_BTC_CORE_URLS:-}"
+        emit_allowlist allowed_btc_electrum_urls "${AFPAY_ALLOWED_BTC_ELECTRUM_URLS:-}"
+        emit_allowlist allowed_ln_endpoints "${AFPAY_ALLOWED_LN_ENDPOINTS:-}"
+    } > "$CONFIG_FILE"
 fi
 
 # ── 4. write env file for container-setup.sh ──

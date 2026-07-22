@@ -1,16 +1,53 @@
 syntax = "proto3";
 package afpay;
 
+// Wire protocol overview
+//
+// 1. Client opens a session via Handshake. Server responds with a random 32-byte
+//    salt and an 8-byte session_id. Both sides derive an AES-256-GCM Cipher via
+//    HKDF(PSK, salt). The salt is freshly generated per session: even if an
+//    operator deploys a weak PSK, rainbow tables built against one salt do not
+//    help an attacker against any other session.
+// 2. Subsequent Call requests carry session_id along with the (nonce, ciphertext)
+//    encrypted under that session's Cipher. Server looks up the session, decrypts,
+//    runs the handler, encrypts the response with the same Cipher, and replies.
+// 3. Sessions expire on the server after an idle period (currently 1h). A client
+//    that hits an expired session re-issues Handshake transparently and retries.
 service AfPay {
+  rpc Handshake (HandshakeRequest) returns (HandshakeResponse);
   rpc Call (EncryptedRequest) returns (EncryptedResponse);
 }
 
+message HandshakeRequest {
+  // Client-chosen 16-byte nonce, mixed into the salt to bind both sides to a
+  // contribution. Prevents the server from being the sole entropy source.
+  bytes client_nonce = 1;
+}
+
+message HandshakeResponse {
+  // 32-byte HKDF salt. Server-generated, returned in plaintext (its purpose is
+  // public — only the PSK + salt combination grants key access).
+  bytes salt = 1;
+  // 8-byte opaque session handle. Echoed by the client in every Call.
+  uint64 session_id = 2;
+  // Idle TTL in seconds. Client may re-handshake earlier than this; server will
+  // not honor sessions older than this.
+  uint64 session_idle_timeout_s = 3;
+}
+
 message EncryptedRequest {
-  bytes nonce = 1;       // 12 bytes
-  bytes ciphertext = 2;  // AES-256-GCM(key, zstd(JSON Input))
+  // Handshake-issued session handle.
+  uint64 session_id = 1;
+  // 12-byte AES-GCM nonce.
+  bytes nonce = 2;
+  // AES-256-GCM(session_key, zstd(JSON Request)).
+  bytes ciphertext = 3;
 }
 
 message EncryptedResponse {
-  bytes nonce = 1;       // 12 bytes
-  bytes ciphertext = 2;  // AES-256-GCM(key, zstd(JSON Output[]))
+  // Echoed for client-side correlation (matches the request's session_id).
+  uint64 session_id = 1;
+  bytes nonce = 2;
+  // AES-256-GCM(session_key, zstd(JSON Output[])).
+  bytes ciphertext = 3;
 }

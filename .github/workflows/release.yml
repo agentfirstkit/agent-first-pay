@@ -14,9 +14,21 @@ permissions:
   contents: write
 
 jobs:
+  check-skill:
+    name: Validate Agent Skill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install afdata skill validator
+        run: cargo install agent-first-data --locked --features skill
+      - name: Validate Agent Skill
+        run: afdata skill validate skills/agent-first-pay
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    needs: [check-skill]
     strategy:
       matrix:
         include:
@@ -28,6 +40,9 @@ jobs:
             archive: tar
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            archive: tar
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
             archive: tar
           - os: windows-latest
             target: x86_64-pc-windows-msvc

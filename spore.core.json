@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control.",
@@ -11,19 +11,25 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Migrate to the agentfirstkit identity",
-    "Rewrite README around agent ergonomics, with the full guide in docs/overview.md",
-    "Add backup/restore commands and a TUI Data view",
-    "Harden security and remote flows",
-    "Fix spend-limit assets and receive watchers",
-    "Feature-gate rpc, backup, and ln dependencies for leaner builds",
-    "Major dependency bumps: alloy 1→2, bdk_wallet 2→3, redb 3→4, sqlx 0.8→0.9 — stay aligned with upstream releases",
-    "Bump agent-first-data dependency to 0.8"
+    "Reorganize the codebase into a clean per-mode architecture (cli, pipe, interactive, tui, rpc, rest, session) with types split into config/domain/limits/protocol modules, routing all CLI output through Agent-First Data event emitters",
+    "Add a full-screen TUI mode (--mode tui) driving the same command interface as the interactive REPL for human terminal workflows",
+    "Add a REST server mode (--mode rest) exposing POST /v1/afpay with Bearer-token auth alongside the encrypted gRPC RPC mode, both enforcing spend limits independently",
+    "Make sends idempotent: replaying a Send or CashuSend with the same agent-supplied idempotency key returns the original result instead of double-spending on retry",
+    "Add spend reservations with per-network TTLs and reservation_ids on Sent outputs, cross-linked into history, plus an operator-only ReconcileReservation input to repair stuck reservations",
+    "Pin EVM chain_id and Solana cluster at send time and fail closed when omitted or mismatched, preventing cross-chain/cross-cluster misdelivery",
+    "Add opt-in URL allowlists covering Cashu mints, Bitcoin (esplora/core/electrum), Lightning endpoints, Solana/EVM RPC, and wallet_config_set",
+    "Harden the RPC transport with a per-session handshake (random salt, TTL-bounded replay cache) and rate-limit handshakes to bound session-table flooding",
+    "Add structured PayError and retry_after_ms on Output::Error so agents can pace retries, plus a Request wrapper and dry_run support across all modes",
+    "Expose Input::Schema in every mode and a /v1/schema REST endpoint, and emit schema_version for protocol discoverability",
+    "Add receive-watching that waits for on-chain/Lightning confirmation across Bitcoin, EVM, and Solana",
+    "Add a container orchestration command with an operator allowlist and a Docker deployment (Dockerfile/compose/entrypoint/backup/restore + .dockerignore), dropping the Apple container scripts",
+    "Replace silent numeric truncation/saturation in fee paths with checked arithmetic, tighten ledger accounting across confirm/cancel/wallet-id paths, and scrub errors on public pipe/listen surfaces",
+    "Migrate to Agent-First Data 0.22 (builder APIs, structured CLI exits, config-on-DocumentFile, protocol-v1 --version with DISPLAY_NAME + git SHA, skill-admin asset bundling) and ship an embedded Agent Skill (afpay skill install/status) with restructured docs"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.DRSaYD5qjBZoBHEukpEoRzDoBk3aangKVgYo8hBrftqZ",
+      "uri": "cmn://agentfirstkit.com/b3.eDai9QqMqX9gR8Fayep7D2HiWCtLd4EW8o8UtwDgCaQ",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions and output formats"
     }

@@ -34,11 +34,22 @@ const SPEND_EVENT_BY_ID: TableDefinition<u64, &str> = TableDefinition::new("spen
 #[cfg(feature = "redb")]
 const FX_QUOTE_BY_PAIR: TableDefinition<&str, &str> = TableDefinition::new("quote_by_pair");
 #[cfg(feature = "redb")]
+const IDEMPOTENCY_BY_KEY: TableDefinition<&str, &str> =
+    TableDefinition::new("idempotency_by_key_v1");
+#[cfg(feature = "redb")]
 const NEXT_RESERVATION_ID_KEY: &str = "next_reservation_id";
 #[cfg(feature = "redb")]
 const NEXT_EVENT_ID_KEY: &str = "next_event_id";
 #[cfg(feature = "redb")]
 const SPEND_VERSION: u64 = 1;
+
+/// Idempotency records live for 24h. Long enough to cover a slow BTC settlement
+/// or a multi-hop LN retry; short enough that the key→hash table never balloons.
+pub(crate) const IDEMPOTENCY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// Max length of an agent-supplied idempotency key. Mirrors common payment APIs
+/// (Stripe, PayPal) and bounds the storage cost per record.
+pub const IDEMPOTENCY_KEY_MAX_LEN: usize = 128;
 #[cfg(feature = "redb")]
 const FX_CACHE_VERSION: u64 = 1;
 
@@ -74,6 +85,99 @@ struct SpendReservation {
     finalized_at_epoch_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_hash: Option<String>,
+    /// Free-form operator note set by `force_confirm` / `force_cancel`. Surfaced
+    /// in audit logs and reservation queries so operators can later see why a
+    /// state transition happened outside the normal Pending→Confirmed flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reconcile_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum IdempotencyState {
+    Pending,
+    Final,
+}
+
+/// Replay payload persisted by `idempotency_finalize`. Stores only the
+/// "effect data" of the terminal output — fields the agent could not have
+/// guessed (transaction_id, fees, preimage) — and never the wrapping `id`
+/// field or trace timing. The handler reconstructs a full `Output` from
+/// this payload + the current request's id at replay time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IdempotentReplayPayload {
+    Sent {
+        wallet: String,
+        transaction_id: String,
+        amount: crate::types::Amount,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fee: Option<crate::types::Amount>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preimage: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reservation_ids: Vec<u64>,
+    },
+    CashuSent {
+        wallet: String,
+        transaction_id: String,
+        status: crate::types::TxStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fee: Option<crate::types::Amount>,
+        token: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reservation_ids: Vec<u64>,
+    },
+    AccountingInconsistent {
+        transaction_id: String,
+        reservation_ids: Vec<u64>,
+        confirm_errors: Vec<String>,
+        hint: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IdempotencyRecord {
+    input_hash: String,
+    state: IdempotencyState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload: Option<IdempotentReplayPayload>,
+    created_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+}
+
+/// Outcome of `SpendLedger::idempotency_claim` — drives how the handler
+/// short-circuits the Send / CashuSend flow.
+#[derive(Debug)]
+pub enum IdempotencyLookup {
+    /// Fresh slot claimed. Caller proceeds with the real operation and must
+    /// finalize or clear the slot on its terminal output.
+    Fresh,
+    /// A request with this key + matching hash is already in flight elsewhere.
+    /// Caller should return `idempotency_in_progress` to the agent.
+    InProgress,
+    /// A previous request with this key used a DIFFERENT body. Caller must
+    /// return `idempotency_conflict` and refuse to execute.
+    Conflict,
+    /// The key was used before by an identical request that ran to completion.
+    /// Caller replays the stored payload as a fresh Output.
+    Replay(IdempotentReplayPayload),
+}
+
+/// Outcome of `force_confirm` / `force_cancel`.
+#[derive(Debug)]
+pub enum ReconcileOutcome {
+    /// Reservation existed and was successfully moved to its new state.
+    Reconciled {
+        previous_status: &'static str,
+        new_status: &'static str,
+    },
+    /// No reservation with that id exists.
+    NotFound,
+    /// Reservation exists but is already in a terminal state that cannot be
+    /// flipped (e.g. asking to confirm a Cancelled one, or vice versa). The
+    /// current status is returned so the caller can explain it to the agent.
+    AlreadyTerminal { current_status: &'static str },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +280,7 @@ impl SpendLedger {
             SpendBackend::Redb { .. } => self.add_limit_redb(limit),
             #[cfg(feature = "postgres")]
             SpendBackend::Postgres { .. } => self.add_limit_postgres(limit).await,
-            SpendBackend::None => Err(PayError::NotImplemented(
+            SpendBackend::None => Err(PayError::not_implemented(
                 "no storage backend for spend limits".to_string(),
             )),
         }
@@ -191,7 +295,7 @@ impl SpendLedger {
             SpendBackend::Redb { .. } => self.remove_limit_redb(_rule_id),
             #[cfg(feature = "postgres")]
             SpendBackend::Postgres { .. } => self.remove_limit_postgres(_rule_id).await,
-            SpendBackend::None => Err(PayError::NotImplemented(
+            SpendBackend::None => Err(PayError::not_implemented(
                 "no storage backend for spend limits".to_string(),
             )),
         }
@@ -212,7 +316,7 @@ impl SpendLedger {
             SpendBackend::Redb { .. } => self.set_limits_redb(&limits),
             #[cfg(feature = "postgres")]
             SpendBackend::Postgres { .. } => self.set_limits_postgres(&limits).await,
-            SpendBackend::None => Err(PayError::NotImplemented(
+            SpendBackend::None => Err(PayError::not_implemented(
                 "no storage backend for spend limits".to_string(),
             )),
         }
@@ -234,10 +338,12 @@ impl SpendLedger {
     /// Reserve spend against all matching limits, returns reservation id.
     pub async fn reserve(&self, op_id: &str, ctx: &SpendContext) -> Result<u64, PayError> {
         if op_id.trim().is_empty() {
-            return Err(PayError::InvalidAmount("op_id cannot be empty".to_string()));
+            return Err(PayError::invalid_amount(
+                "op_id cannot be empty".to_string(),
+            ));
         }
         if ctx.network.trim().is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "network cannot be empty for spend check".to_string(),
             ));
         }
@@ -250,7 +356,7 @@ impl SpendLedger {
             SpendBackend::Redb { .. } => self.reserve_redb(op_id, ctx, &request_hash).await,
             #[cfg(feature = "postgres")]
             SpendBackend::Postgres { .. } => self.reserve_postgres(op_id, ctx, &request_hash).await,
-            SpendBackend::None => Err(PayError::NotImplemented(
+            SpendBackend::None => Err(PayError::not_implemented(
                 "no storage backend for spend limits".to_string(),
             )),
         }
@@ -264,7 +370,7 @@ impl SpendLedger {
             SpendBackend::Redb { .. } => self.confirm_redb(_reservation_id),
             #[cfg(feature = "postgres")]
             SpendBackend::Postgres { .. } => self.confirm_postgres(_reservation_id).await,
-            SpendBackend::None => Err(PayError::NotImplemented(
+            SpendBackend::None => Err(PayError::not_implemented(
                 "no storage backend for spend limits".to_string(),
             )),
         }
@@ -279,6 +385,122 @@ impl SpendLedger {
             #[cfg(feature = "postgres")]
             SpendBackend::Postgres { .. } => self.cancel_postgres(_reservation_id).await,
             SpendBackend::None => Ok(()),
+        }
+    }
+
+    /// Atomic key/hash claim: insert a `Pending` slot if the key is unused,
+    /// otherwise classify the existing record (Replay / Conflict / InProgress).
+    /// Expired records are swept here so the caller never sees them.
+    pub async fn idempotency_claim(
+        &self,
+        key: &str,
+        hash: &str,
+    ) -> Result<IdempotencyLookup, PayError> {
+        if key.is_empty() {
+            return Err(PayError::invalid_amount(
+                "idempotency_key cannot be empty".to_string(),
+            ));
+        }
+        if key.len() > IDEMPOTENCY_KEY_MAX_LEN {
+            return Err(PayError::invalid_amount(format!(
+                "idempotency_key length {} exceeds max {IDEMPOTENCY_KEY_MAX_LEN}",
+                key.len()
+            )));
+        }
+
+        let _guard = self.mu.lock().await;
+        match &self.backend {
+            #[cfg(feature = "redb")]
+            SpendBackend::Redb { .. } => self.idempotency_claim_redb(key, hash),
+            #[cfg(feature = "postgres")]
+            SpendBackend::Postgres { .. } => self.idempotency_claim_postgres(key, hash).await,
+            SpendBackend::None => Err(PayError::not_implemented(
+                "no storage backend for idempotency".to_string(),
+            )),
+        }
+    }
+
+    /// Promote a claimed Pending slot to Final and stash its replay payload.
+    /// Idempotent: if the slot is already Final with the same hash, return Ok
+    /// (the in-flight retry won the race and this caller is the late one).
+    /// Returns Err if the slot was finalized by a different hash — that means
+    /// two callers raced with different bodies AND both squeezed past the
+    /// claim window, which shouldn't happen and indicates a bug to surface.
+    pub async fn idempotency_finalize(
+        &self,
+        key: &str,
+        hash: &str,
+        payload: IdempotentReplayPayload,
+    ) -> Result<(), PayError> {
+        let _guard = self.mu.lock().await;
+        match &self.backend {
+            #[cfg(feature = "redb")]
+            SpendBackend::Redb { .. } => self.idempotency_finalize_redb(key, hash, payload),
+            #[cfg(feature = "postgres")]
+            SpendBackend::Postgres { .. } => {
+                self.idempotency_finalize_postgres(key, hash, payload).await
+            }
+            SpendBackend::None => Err(PayError::not_implemented(
+                "no storage backend for idempotency".to_string(),
+            )),
+        }
+    }
+
+    /// Release a Pending claim so the same key can be retried fresh (e.g. the
+    /// underlying send failed before broadcast). No-op if the slot is already
+    /// Final or has a different hash.
+    pub async fn idempotency_clear(&self, key: &str, hash: &str) -> Result<(), PayError> {
+        let _guard = self.mu.lock().await;
+        match &self.backend {
+            #[cfg(feature = "redb")]
+            SpendBackend::Redb { .. } => self.idempotency_clear_redb(key, hash),
+            #[cfg(feature = "postgres")]
+            SpendBackend::Postgres { .. } => self.idempotency_clear_postgres(key, hash).await,
+            SpendBackend::None => Ok(()),
+        }
+    }
+
+    /// Force a reservation to Confirmed regardless of Pending/Expired state.
+    /// Writes a `SpendEvent` so subsequent limit checks count the spend. The
+    /// reason is stored on the reservation for audit.
+    pub async fn force_confirm(
+        &self,
+        reservation_id: u64,
+        reason: &str,
+    ) -> Result<ReconcileOutcome, PayError> {
+        let _guard = self.mu.lock().await;
+        match &self.backend {
+            #[cfg(feature = "redb")]
+            SpendBackend::Redb { .. } => self.force_confirm_redb(reservation_id, reason),
+            #[cfg(feature = "postgres")]
+            SpendBackend::Postgres { .. } => {
+                self.force_confirm_postgres(reservation_id, reason).await
+            }
+            SpendBackend::None => Err(PayError::not_implemented(
+                "no storage backend for spend limits".to_string(),
+            )),
+        }
+    }
+
+    /// Force a reservation to Cancelled regardless of Pending/Expired state.
+    /// Does NOT write a SpendEvent — the money never moved. Reason is stored
+    /// for audit.
+    pub async fn force_cancel(
+        &self,
+        reservation_id: u64,
+        reason: &str,
+    ) -> Result<ReconcileOutcome, PayError> {
+        let _guard = self.mu.lock().await;
+        match &self.backend {
+            #[cfg(feature = "redb")]
+            SpendBackend::Redb { .. } => self.force_cancel_redb(reservation_id, reason),
+            #[cfg(feature = "postgres")]
+            SpendBackend::Postgres { .. } => {
+                self.force_cancel_postgres(reservation_id, reason).await
+            }
+            SpendBackend::None => Err(PayError::not_implemented(
+                "no storage backend for spend limits".to_string(),
+            )),
         }
     }
 }
@@ -336,18 +558,18 @@ impl SpendLedger {
         let encoded = encode(limit)?;
         let write_txn = db
             .begin_write()
-            .map_err(|e| PayError::InternalError(format!("spend begin_write: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_write: {e}")))?;
         {
             let mut rule_table = write_txn
                 .open_table(RULE_BY_ID)
-                .map_err(|e| PayError::InternalError(format!("spend open rule table: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend open rule table: {e}")))?;
             rule_table
                 .insert(rule_id.as_str(), encoded.as_str())
-                .map_err(|e| PayError::InternalError(format!("spend insert rule: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend insert rule: {e}")))?;
         }
         write_txn
             .commit()
-            .map_err(|e| PayError::InternalError(format!("spend commit add_limit: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend commit add_limit: {e}")))?;
         Ok(rule_id)
     }
 
@@ -355,48 +577,48 @@ impl SpendLedger {
         let db = self.open_spend_db()?;
         let write_txn = db
             .begin_write()
-            .map_err(|e| PayError::InternalError(format!("spend begin_write: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_write: {e}")))?;
         {
             let mut rule_table = write_txn
                 .open_table(RULE_BY_ID)
-                .map_err(|e| PayError::InternalError(format!("spend open rule table: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend open rule table: {e}")))?;
             let existed = rule_table
                 .remove(rule_id)
-                .map_err(|e| PayError::InternalError(format!("spend remove rule: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend remove rule: {e}")))?;
             if existed.is_none() {
-                return Err(PayError::InvalidAmount(format!(
+                return Err(PayError::invalid_amount(format!(
                     "rule_id '{rule_id}' not found"
                 )));
             }
         }
         write_txn
             .commit()
-            .map_err(|e| PayError::InternalError(format!("spend commit remove_limit: {e}")))
+            .map_err(|e| PayError::internal_error(format!("spend commit remove_limit: {e}")))
     }
 
     fn set_limits_redb(&self, limits: &[SpendLimit]) -> Result<(), PayError> {
         let db = self.open_spend_db()?;
         let write_txn = db
             .begin_write()
-            .map_err(|e| PayError::InternalError(format!("spend begin_write: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_write: {e}")))?;
         {
             let mut rule_table = write_txn
                 .open_table(RULE_BY_ID)
-                .map_err(|e| PayError::InternalError(format!("spend open rule table: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend open rule table: {e}")))?;
             // Clear existing rules
             let existing_ids = rule_table
                 .iter()
-                .map_err(|e| PayError::InternalError(format!("spend iterate rules: {e}")))?
+                .map_err(|e| PayError::internal_error(format!("spend iterate rules: {e}")))?
                 .map(|entry| {
                     entry
                         .map(|(k, _)| k.value().to_string())
-                        .map_err(|e| PayError::InternalError(format!("spend read rule key: {e}")))
+                        .map_err(|e| PayError::internal_error(format!("spend read rule key: {e}")))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for rid in existing_ids {
                 rule_table
                     .remove(rid.as_str())
-                    .map_err(|e| PayError::InternalError(format!("spend remove rule: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("spend remove rule: {e}")))?;
             }
 
             // Insert new rules with generated IDs
@@ -407,19 +629,19 @@ impl SpendLedger {
                 let encoded = encode(&rule)?;
                 rule_table
                     .insert(rid.as_str(), encoded.as_str())
-                    .map_err(|e| PayError::InternalError(format!("spend insert rule: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("spend insert rule: {e}")))?;
             }
         }
         write_txn
             .commit()
-            .map_err(|e| PayError::InternalError(format!("spend commit set_limits: {e}")))
+            .map_err(|e| PayError::internal_error(format!("spend commit set_limits: {e}")))
     }
 
     fn get_status_redb(&self) -> Result<Vec<SpendLimitStatus>, PayError> {
         let db = self.open_spend_db()?;
         let read_txn = db
             .begin_read()
-            .map_err(|e| PayError::InternalError(format!("spend begin_read: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_read: {e}")))?;
         let rules = load_rules(&read_txn)?;
         let reservations = load_reservations(&read_txn)?;
         let now = now_epoch_ms();
@@ -459,7 +681,7 @@ impl SpendLedger {
 
         let read_txn = db
             .begin_read()
-            .map_err(|e| PayError::InternalError(format!("spend begin_read: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_read: {e}")))?;
         let rules = load_rules(&read_txn)?;
 
         if rules.iter().any(|r| {
@@ -467,7 +689,7 @@ impl SpendLedger {
                 && r.network.as_deref() == Some(ctx.network.as_str())
                 && ctx.wallet.is_none()
         }) {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "wallet-scoped limits require an explicit wallet".to_string(),
             ));
         }
@@ -485,25 +707,25 @@ impl SpendLedger {
 
         let write_txn = db
             .begin_write()
-            .map_err(|e| PayError::InternalError(format!("spend begin_write: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_write: {e}")))?;
 
         let mut encoded_blobs: Vec<String> = Vec::new();
         let reservation_id = {
             let mut reservation_index =
                 write_txn.open_table(RESERVATION_ID_BY_OP_ID).map_err(|e| {
-                    PayError::InternalError(format!("spend open reservation op index: {e}"))
+                    PayError::internal_error(format!("spend open reservation op index: {e}"))
                 })?;
             if let Some(existing) = reservation_index
                 .get(op_id)
-                .map_err(|e| PayError::InternalError(format!("spend read op index: {e}")))?
+                .map_err(|e| PayError::internal_error(format!("spend read op index: {e}")))?
             {
                 let existing_id = existing.value();
                 let reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
-                    PayError::InternalError(format!("spend open reservation table: {e}"))
+                    PayError::internal_error(format!("spend open reservation table: {e}"))
                 })?;
                 let status = reservation_table
                     .get(existing_id)
-                    .map_err(|e| PayError::InternalError(format!("spend read reservation: {e}")))?
+                    .map_err(|e| PayError::internal_error(format!("spend read reservation: {e}")))?
                     .map(|value| decode::<SpendReservation>(value.value()))
                     .transpose()?
                     .map(|reservation| reservation.status)
@@ -512,17 +734,17 @@ impl SpendLedger {
             }
 
             let mut reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
-                PayError::InternalError(format!("spend open reservation table: {e}"))
+                PayError::internal_error(format!("spend open reservation table: {e}"))
             })?;
 
             expire_pending(&mut reservation_table, now)?;
 
             let reservations = reservation_table
                 .iter()
-                .map_err(|e| PayError::InternalError(format!("spend iterate reservations: {e}")))?
+                .map_err(|e| PayError::internal_error(format!("spend iterate reservations: {e}")))?
                 .map(|entry| {
                     let (_k, v) = entry.map_err(|e| {
-                        PayError::InternalError(format!("spend read reservation: {e}"))
+                        PayError::internal_error(format!("spend read reservation: {e}"))
                     })?;
                     decode::<SpendReservation>(v.value())
                         .map_err(|e| prepend_err("spend decode reservation", e))
@@ -558,6 +780,7 @@ impl SpendLedger {
                         token: rule.token.clone(),
                         remaining_s,
                         origin: None,
+                        hint: None,
                     });
                 }
             }
@@ -573,26 +796,28 @@ impl SpendLedger {
                 amount_usd_cents,
                 status: ReservationStatus::Pending,
                 created_at_epoch_ms: now,
-                expires_at_epoch_ms: now.saturating_add(300_000),
+                expires_at_epoch_ms: now
+                    .saturating_add(reservation_ttl_ms_for_network(&ctx.network)),
                 finalized_at_epoch_ms: None,
                 request_hash: Some(request_hash.to_string()),
+                reconcile_reason: None,
             };
             encoded_blobs.push(encode(&reservation)?);
             let encoded = encoded_blobs
                 .last()
-                .ok_or_else(|| PayError::InternalError("missing reservation blob".to_string()))?;
+                .ok_or_else(|| PayError::internal_error("missing reservation blob".to_string()))?;
             reservation_table
                 .insert(reservation_id, encoded.as_str())
-                .map_err(|e| PayError::InternalError(format!("spend insert reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend insert reservation: {e}")))?;
             reservation_index
                 .insert(op_id, reservation_id)
-                .map_err(|e| PayError::InternalError(format!("spend insert op index: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend insert op index: {e}")))?;
             reservation_id
         };
 
         write_txn
             .commit()
-            .map_err(|e| PayError::InternalError(format!("spend commit reserve: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend commit reserve: {e}")))?;
         Ok(reservation_id)
     }
 
@@ -602,19 +827,19 @@ impl SpendLedger {
 
         let write_txn = db
             .begin_write()
-            .map_err(|e| PayError::InternalError(format!("spend begin_write: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_write: {e}")))?;
 
         let mut encoded_blobs: Vec<String> = Vec::new();
         {
             let mut reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
-                PayError::InternalError(format!("spend open reservation table: {e}"))
+                PayError::internal_error(format!("spend open reservation table: {e}"))
             })?;
             let Some(existing_bytes) = reservation_table
                 .get(reservation_id)
-                .map_err(|e| PayError::InternalError(format!("spend read reservation: {e}")))?
+                .map_err(|e| PayError::internal_error(format!("spend read reservation: {e}")))?
                 .map(|g| g.value().to_string())
             else {
-                return Err(PayError::InternalError(format!(
+                return Err(PayError::internal_error(format!(
                     "reservation {reservation_id} not found"
                 )));
             };
@@ -629,14 +854,14 @@ impl SpendLedger {
             encoded_blobs.push(encode(&reservation)?);
             let encoded = encoded_blobs
                 .last()
-                .ok_or_else(|| PayError::InternalError("missing reservation blob".to_string()))?;
+                .ok_or_else(|| PayError::internal_error("missing reservation blob".to_string()))?;
             reservation_table
                 .insert(reservation_id, encoded.as_str())
-                .map_err(|e| PayError::InternalError(format!("spend update reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend update reservation: {e}")))?;
 
             let mut events = write_txn
                 .open_table(SPEND_EVENT_BY_ID)
-                .map_err(|e| PayError::InternalError(format!("spend open event table: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend open event table: {e}")))?;
             let event_id = next_counter(&write_txn, NEXT_EVENT_ID_KEY)?;
             let event = SpendEvent {
                 event_id,
@@ -653,15 +878,15 @@ impl SpendLedger {
             encoded_blobs.push(encode(&event)?);
             let encoded_event = encoded_blobs
                 .last()
-                .ok_or_else(|| PayError::InternalError("missing event blob".to_string()))?;
+                .ok_or_else(|| PayError::internal_error("missing event blob".to_string()))?;
             events
                 .insert(event_id, encoded_event.as_str())
-                .map_err(|e| PayError::InternalError(format!("spend insert event: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend insert event: {e}")))?;
         }
 
         write_txn
             .commit()
-            .map_err(|e| PayError::InternalError(format!("spend commit confirm: {e}")))
+            .map_err(|e| PayError::internal_error(format!("spend commit confirm: {e}")))
     }
 
     fn cancel_redb(&self, reservation_id: u64) -> Result<(), PayError> {
@@ -670,16 +895,16 @@ impl SpendLedger {
 
         let write_txn = db
             .begin_write()
-            .map_err(|e| PayError::InternalError(format!("spend begin_write: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("spend begin_write: {e}")))?;
 
         let mut encoded_blobs: Vec<String> = Vec::new();
         {
             let mut reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
-                PayError::InternalError(format!("spend open reservation table: {e}"))
+                PayError::internal_error(format!("spend open reservation table: {e}"))
             })?;
             let existing = reservation_table
                 .get(reservation_id)
-                .map_err(|e| PayError::InternalError(format!("spend read reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend read reservation: {e}")))?;
             let existing_bytes = existing.map(|g| g.value().to_string());
             if let Some(existing_bytes) = existing_bytes {
                 let mut reservation: SpendReservation = decode(&existing_bytes)?;
@@ -688,12 +913,12 @@ impl SpendLedger {
                     reservation.finalized_at_epoch_ms = Some(now);
                     encoded_blobs.push(encode(&reservation)?);
                     let encoded = encoded_blobs.last().ok_or_else(|| {
-                        PayError::InternalError("missing reservation blob".to_string())
+                        PayError::internal_error("missing reservation blob".to_string())
                     })?;
                     reservation_table
                         .insert(reservation_id, encoded.as_str())
                         .map_err(|e| {
-                            PayError::InternalError(format!("spend update reservation: {e}"))
+                            PayError::internal_error(format!("spend update reservation: {e}"))
                         })?;
                 }
             }
@@ -701,7 +926,311 @@ impl SpendLedger {
 
         write_txn
             .commit()
-            .map_err(|e| PayError::InternalError(format!("spend commit cancel: {e}")))
+            .map_err(|e| PayError::internal_error(format!("spend commit cancel: {e}")))
+    }
+
+    // ─── idempotency ───────────────────────────
+
+    fn idempotency_claim_redb(&self, key: &str, hash: &str) -> Result<IdempotencyLookup, PayError> {
+        let db = self.open_spend_db()?;
+        let now = now_epoch_ms();
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| PayError::internal_error(format!("idem begin_write: {e}")))?;
+
+        let outcome = {
+            let mut table = write_txn
+                .open_table(IDEMPOTENCY_BY_KEY)
+                .map_err(|e| PayError::internal_error(format!("idem open table: {e}")))?;
+
+            // Sweep expired records lazily, so the table doesn't grow forever
+            // and so an expired Pending slot doesn't masquerade as InProgress.
+            sweep_expired_idempotency_redb(&mut table, now)?;
+
+            let existing = table
+                .get(key)
+                .map_err(|e| PayError::internal_error(format!("idem read: {e}")))?
+                .map(|g| g.value().to_string());
+
+            if let Some(bytes) = existing {
+                let record: IdempotencyRecord = decode(&bytes)?;
+                if record.input_hash != hash {
+                    IdempotencyLookup::Conflict
+                } else {
+                    match record.state {
+                        IdempotencyState::Pending => IdempotencyLookup::InProgress,
+                        IdempotencyState::Final => {
+                            let payload = record.payload.ok_or_else(|| {
+                                PayError::internal_error(
+                                    "idempotency record final without payload".to_string(),
+                                )
+                            })?;
+                            IdempotencyLookup::Replay(payload)
+                        }
+                    }
+                }
+            } else {
+                let record = IdempotencyRecord {
+                    input_hash: hash.to_string(),
+                    state: IdempotencyState::Pending,
+                    payload: None,
+                    created_at_epoch_ms: now,
+                    expires_at_epoch_ms: now.saturating_add(IDEMPOTENCY_TTL_MS),
+                };
+                let encoded = encode(&record)?;
+                table
+                    .insert(key, encoded.as_str())
+                    .map_err(|e| PayError::internal_error(format!("idem insert pending: {e}")))?;
+                IdempotencyLookup::Fresh
+            }
+        };
+
+        write_txn
+            .commit()
+            .map_err(|e| PayError::internal_error(format!("idem commit claim: {e}")))?;
+        Ok(outcome)
+    }
+
+    fn idempotency_finalize_redb(
+        &self,
+        key: &str,
+        hash: &str,
+        payload: IdempotentReplayPayload,
+    ) -> Result<(), PayError> {
+        let db = self.open_spend_db()?;
+        let now = now_epoch_ms();
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| PayError::internal_error(format!("idem begin_write: {e}")))?;
+
+        {
+            let mut table = write_txn
+                .open_table(IDEMPOTENCY_BY_KEY)
+                .map_err(|e| PayError::internal_error(format!("idem open table: {e}")))?;
+
+            let existing = table
+                .get(key)
+                .map_err(|e| PayError::internal_error(format!("idem read: {e}")))?
+                .map(|g| g.value().to_string());
+
+            let record = match existing {
+                Some(bytes) => {
+                    let mut existing_rec: IdempotencyRecord = decode(&bytes)?;
+                    if existing_rec.input_hash != hash {
+                        return Err(PayError::internal_error(
+                            "idempotency_finalize: input_hash drift between claim and finalize"
+                                .to_string(),
+                        ));
+                    }
+                    if existing_rec.state == IdempotencyState::Final {
+                        return Ok(());
+                    }
+                    existing_rec.state = IdempotencyState::Final;
+                    existing_rec.payload = Some(payload);
+                    existing_rec.expires_at_epoch_ms = now.saturating_add(IDEMPOTENCY_TTL_MS);
+                    existing_rec
+                }
+                None => IdempotencyRecord {
+                    input_hash: hash.to_string(),
+                    state: IdempotencyState::Final,
+                    payload: Some(payload),
+                    created_at_epoch_ms: now,
+                    expires_at_epoch_ms: now.saturating_add(IDEMPOTENCY_TTL_MS),
+                },
+            };
+
+            let encoded = encode(&record)?;
+            table
+                .insert(key, encoded.as_str())
+                .map_err(|e| PayError::internal_error(format!("idem insert final: {e}")))?;
+        }
+
+        write_txn
+            .commit()
+            .map_err(|e| PayError::internal_error(format!("idem commit finalize: {e}")))
+    }
+
+    fn idempotency_clear_redb(&self, key: &str, hash: &str) -> Result<(), PayError> {
+        let db = self.open_spend_db()?;
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| PayError::internal_error(format!("idem begin_write: {e}")))?;
+
+        {
+            let mut table = write_txn
+                .open_table(IDEMPOTENCY_BY_KEY)
+                .map_err(|e| PayError::internal_error(format!("idem open table: {e}")))?;
+
+            let existing = table
+                .get(key)
+                .map_err(|e| PayError::internal_error(format!("idem read: {e}")))?
+                .map(|g| g.value().to_string());
+            if let Some(bytes) = existing {
+                let record: IdempotencyRecord = decode(&bytes)?;
+                if record.input_hash == hash && record.state == IdempotencyState::Pending {
+                    table.remove(key).map_err(|e| {
+                        PayError::internal_error(format!("idem remove pending: {e}"))
+                    })?;
+                }
+            }
+        }
+
+        write_txn
+            .commit()
+            .map_err(|e| PayError::internal_error(format!("idem commit clear: {e}")))
+    }
+
+    // ─── reconcile ─────────────────────────────
+
+    fn force_confirm_redb(
+        &self,
+        reservation_id: u64,
+        reason: &str,
+    ) -> Result<ReconcileOutcome, PayError> {
+        let db = self.open_spend_db()?;
+        let now = now_epoch_ms();
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| PayError::internal_error(format!("reconcile begin_write: {e}")))?;
+
+        let mut encoded_blobs: Vec<String> = Vec::new();
+        let outcome = {
+            let mut reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
+                PayError::internal_error(format!("reconcile open reservation table: {e}"))
+            })?;
+            let Some(existing_bytes) = reservation_table
+                .get(reservation_id)
+                .map_err(|e| PayError::internal_error(format!("reconcile read reservation: {e}")))?
+                .map(|g| g.value().to_string())
+            else {
+                return Ok(ReconcileOutcome::NotFound);
+            };
+
+            let mut reservation: SpendReservation = decode(&existing_bytes)?;
+            let previous = reservation_status_label(&reservation.status);
+            match reservation.status {
+                ReservationStatus::Confirmed => {
+                    return Ok(ReconcileOutcome::AlreadyTerminal {
+                        current_status: previous,
+                    });
+                }
+                ReservationStatus::Cancelled => {
+                    return Ok(ReconcileOutcome::AlreadyTerminal {
+                        current_status: previous,
+                    });
+                }
+                ReservationStatus::Pending | ReservationStatus::Expired => {}
+            }
+
+            reservation.status = ReservationStatus::Confirmed;
+            reservation.finalized_at_epoch_ms = Some(now);
+            reservation.reconcile_reason = Some(reason.to_string());
+            encoded_blobs.push(encode(&reservation)?);
+            let encoded = encoded_blobs
+                .last()
+                .ok_or_else(|| PayError::internal_error("missing reservation blob".to_string()))?;
+            reservation_table
+                .insert(reservation_id, encoded.as_str())
+                .map_err(|e| {
+                    PayError::internal_error(format!("reconcile update reservation: {e}"))
+                })?;
+
+            let mut events = write_txn.open_table(SPEND_EVENT_BY_ID).map_err(|e| {
+                PayError::internal_error(format!("reconcile open event table: {e}"))
+            })?;
+            let event_id = next_counter(&write_txn, NEXT_EVENT_ID_KEY)?;
+            let event = SpendEvent {
+                event_id,
+                reservation_id,
+                op_id: reservation.op_id.clone(),
+                network: reservation.network.clone(),
+                wallet: reservation.wallet.clone(),
+                token: reservation.token.clone(),
+                amount_native: reservation.amount_native,
+                amount_usd_cents: reservation.amount_usd_cents,
+                created_at_epoch_ms: reservation.created_at_epoch_ms,
+                confirmed_at_epoch_ms: now,
+            };
+            encoded_blobs.push(encode(&event)?);
+            let encoded_event = encoded_blobs
+                .last()
+                .ok_or_else(|| PayError::internal_error("missing event blob".to_string()))?;
+            events
+                .insert(event_id, encoded_event.as_str())
+                .map_err(|e| PayError::internal_error(format!("reconcile insert event: {e}")))?;
+
+            ReconcileOutcome::Reconciled {
+                previous_status: previous,
+                new_status: "confirmed",
+            }
+        };
+
+        write_txn
+            .commit()
+            .map_err(|e| PayError::internal_error(format!("reconcile commit confirm: {e}")))?;
+        Ok(outcome)
+    }
+
+    fn force_cancel_redb(
+        &self,
+        reservation_id: u64,
+        reason: &str,
+    ) -> Result<ReconcileOutcome, PayError> {
+        let db = self.open_spend_db()?;
+        let now = now_epoch_ms();
+        let write_txn = db
+            .begin_write()
+            .map_err(|e| PayError::internal_error(format!("reconcile begin_write: {e}")))?;
+
+        let mut encoded_blobs: Vec<String> = Vec::new();
+        let outcome = {
+            let mut reservation_table = write_txn.open_table(RESERVATION_BY_ID).map_err(|e| {
+                PayError::internal_error(format!("reconcile open reservation table: {e}"))
+            })?;
+            let Some(existing_bytes) = reservation_table
+                .get(reservation_id)
+                .map_err(|e| PayError::internal_error(format!("reconcile read reservation: {e}")))?
+                .map(|g| g.value().to_string())
+            else {
+                return Ok(ReconcileOutcome::NotFound);
+            };
+            let mut reservation: SpendReservation = decode(&existing_bytes)?;
+            let previous = reservation_status_label(&reservation.status);
+            match reservation.status {
+                ReservationStatus::Confirmed => {
+                    return Ok(ReconcileOutcome::AlreadyTerminal {
+                        current_status: previous,
+                    });
+                }
+                ReservationStatus::Cancelled => {
+                    return Ok(ReconcileOutcome::AlreadyTerminal {
+                        current_status: previous,
+                    });
+                }
+                ReservationStatus::Pending | ReservationStatus::Expired => {}
+            }
+            reservation.status = ReservationStatus::Cancelled;
+            reservation.finalized_at_epoch_ms = Some(now);
+            reservation.reconcile_reason = Some(reason.to_string());
+            encoded_blobs.push(encode(&reservation)?);
+            let encoded = encoded_blobs
+                .last()
+                .ok_or_else(|| PayError::internal_error("missing reservation blob".to_string()))?;
+            reservation_table
+                .insert(reservation_id, encoded.as_str())
+                .map_err(|e| {
+                    PayError::internal_error(format!("reconcile update reservation: {e}"))
+                })?;
+            ReconcileOutcome::Reconciled {
+                previous_status: previous,
+                new_status: "cancelled",
+            }
+        };
+
+        write_txn
+            .commit()
+            .map_err(|e| PayError::internal_error(format!("reconcile commit cancel: {e}")))?;
+        Ok(outcome)
     }
 }
 
@@ -714,7 +1243,7 @@ impl SpendLedger {
     fn pg_pool(&self) -> Result<&sqlx::PgPool, PayError> {
         match &self.backend {
             SpendBackend::Postgres { pool } => Ok(pool),
-            _ => Err(PayError::InternalError(
+            _ => Err(PayError::internal_error(
                 "expected postgres spend backend".to_string(),
             )),
         }
@@ -725,14 +1254,14 @@ impl SpendLedger {
         let rule_id = generate_rule_identifier()?;
         limit.rule_id = Some(rule_id.clone());
         let rule_json = serde_json::to_value(limit)
-            .map_err(|e| PayError::InternalError(format!("serialize spend rule: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("serialize spend rule: {e}")))?;
 
         sqlx::query("INSERT INTO spend_rules (rule_id, rule) VALUES ($1, $2)")
             .bind(&rule_id)
             .bind(&rule_json)
             .execute(pool)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg insert spend rule: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg insert spend rule: {e}")))?;
 
         Ok(rule_id)
     }
@@ -743,10 +1272,10 @@ impl SpendLedger {
             .bind(rule_id)
             .execute(pool)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg delete spend rule: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg delete spend rule: {e}")))?;
 
         if result.rows_affected() == 0 {
-            return Err(PayError::InvalidAmount(format!(
+            return Err(PayError::invalid_amount(format!(
                 "rule_id '{rule_id}' not found"
             )));
         }
@@ -758,30 +1287,30 @@ impl SpendLedger {
         let mut tx = pool
             .begin()
             .await
-            .map_err(|e| PayError::InternalError(format!("pg begin tx: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
 
         sqlx::query("DELETE FROM spend_rules")
             .execute(&mut *tx)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg clear spend rules: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg clear spend rules: {e}")))?;
 
         for limit in limits {
             let mut rule = limit.clone();
             let rid = generate_rule_identifier()?;
             rule.rule_id = Some(rid.clone());
             let rule_json = serde_json::to_value(&rule)
-                .map_err(|e| PayError::InternalError(format!("serialize spend rule: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("serialize spend rule: {e}")))?;
             sqlx::query("INSERT INTO spend_rules (rule_id, rule) VALUES ($1, $2)")
                 .bind(&rid)
                 .bind(&rule_json)
                 .execute(&mut *tx)
                 .await
-                .map_err(|e| PayError::InternalError(format!("pg insert spend rule: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("pg insert spend rule: {e}")))?;
         }
 
         tx.commit()
             .await
-            .map_err(|e| PayError::InternalError(format!("pg commit set_limits: {e}")))
+            .map_err(|e| PayError::internal_error(format!("pg commit set_limits: {e}")))
     }
 
     async fn get_status_postgres(&self) -> Result<Vec<SpendLimitStatus>, PayError> {
@@ -833,7 +1362,7 @@ impl SpendLedger {
                 && r.network.as_deref() == Some(ctx.network.as_str())
                 && ctx.wallet.is_none()
         }) {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "wallet-scoped limits require an explicit wallet".to_string(),
             ));
         }
@@ -852,13 +1381,13 @@ impl SpendLedger {
         let mut tx = pool
             .begin()
             .await
-            .map_err(|e| PayError::InternalError(format!("pg begin tx: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
 
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(SPEND_ADVISORY_LOCK_KEY)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg advisory lock: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg advisory lock: {e}")))?;
 
         // Check for existing reservation with same op_id (idempotency)
         let existing: Option<(i64, serde_json::Value)> = sqlx::query_as(
@@ -867,7 +1396,7 @@ impl SpendLedger {
         .bind(op_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| PayError::InternalError(format!("pg check op_id: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("pg check op_id: {e}")))?;
 
         if let Some((rid, reservation_json)) = existing {
             let status = serde_json::from_value::<SpendReservation>(reservation_json)
@@ -915,6 +1444,7 @@ impl SpendLedger {
                     token: rule.token.clone(),
                     remaining_s,
                     origin: None,
+                    hint: None,
                 });
             }
         }
@@ -930,12 +1460,13 @@ impl SpendLedger {
             amount_usd_cents,
             status: ReservationStatus::Pending,
             created_at_epoch_ms: now,
-            expires_at_epoch_ms: now.saturating_add(300_000),
+            expires_at_epoch_ms: now.saturating_add(reservation_ttl_ms_for_network(&ctx.network)),
             finalized_at_epoch_ms: None,
             request_hash: Some(request_hash.to_string()),
+            reconcile_reason: None,
         };
         let reservation_json = serde_json::to_value(&reservation)
-            .map_err(|e| PayError::InternalError(format!("serialize reservation: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("serialize reservation: {e}")))?;
 
         let row: (i64,) = sqlx::query_as(
             "INSERT INTO spend_reservations (op_id, reservation) \
@@ -945,7 +1476,7 @@ impl SpendLedger {
         .bind(&reservation_json)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| PayError::InternalError(format!("pg insert reservation: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("pg insert reservation: {e}")))?;
 
         let reservation_id = row.0 as u64;
 
@@ -957,44 +1488,65 @@ impl SpendLedger {
             .bind(row.0)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg update reservation id: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg update reservation id: {e}")))?;
 
         tx.commit()
             .await
-            .map_err(|e| PayError::InternalError(format!("pg commit reserve: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg commit reserve: {e}")))?;
 
         Ok(reservation_id)
     }
 
     async fn confirm_postgres(&self, reservation_id: u64) -> Result<(), PayError> {
+        use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
+
         let pool = self.pg_pool()?;
         let now = now_epoch_ms();
         let rid = reservation_id as i64;
 
-        let row: Option<(serde_json::Value,)> =
-            sqlx::query_as("SELECT reservation FROM spend_reservations WHERE reservation_id = $1")
-                .bind(rid)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| PayError::InternalError(format!("pg read reservation: {e}")))?;
+        // Run read + update + event insert under the same `pg_advisory_xact_lock`
+        // that `reserve` holds. Without this, two daemons sharing the same PG
+        // instance could race a confirm against another confirm/cancel and one
+        // update would silently win. The `FOR UPDATE` row lock is belt-and-braces
+        // for cases where confirms touch DIFFERENT reservation_ids concurrently
+        // (advisory lock is per-key — a single key serializes everything).
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg advisory lock: {e}")))?;
+
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT reservation FROM spend_reservations WHERE reservation_id = $1 FOR UPDATE",
+        )
+        .bind(rid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PayError::internal_error(format!("pg read reservation: {e}")))?;
 
         let Some((res_json,)) = row else {
-            return Err(PayError::InternalError(format!(
+            return Err(PayError::internal_error(format!(
                 "reservation {reservation_id} not found"
             )));
         };
 
         let mut reservation: SpendReservation = serde_json::from_value(res_json)
-            .map_err(|e| PayError::InternalError(format!("pg parse reservation: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg parse reservation: {e}")))?;
 
         if !matches!(reservation.status, ReservationStatus::Pending) {
+            // Already finalized (confirmed or cancelled) — idempotent no-op.
             return Ok(());
         }
 
         reservation.status = ReservationStatus::Confirmed;
         reservation.finalized_at_epoch_ms = Some(now);
         let updated_json = serde_json::to_value(&reservation)
-            .map_err(|e| PayError::InternalError(format!("serialize reservation: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("serialize reservation: {e}")))?;
 
         let event = SpendEvent {
             event_id: 0, // assigned by BIGSERIAL
@@ -1009,66 +1561,402 @@ impl SpendLedger {
             confirmed_at_epoch_ms: now,
         };
         let event_json = serde_json::to_value(&event)
-            .map_err(|e| PayError::InternalError(format!("serialize spend event: {e}")))?;
-
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| PayError::InternalError(format!("pg begin tx: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("serialize spend event: {e}")))?;
 
         sqlx::query("UPDATE spend_reservations SET reservation = $1 WHERE reservation_id = $2")
             .bind(&updated_json)
             .bind(rid)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg update reservation: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg update reservation: {e}")))?;
 
         sqlx::query("INSERT INTO spend_events (reservation_id, event) VALUES ($1, $2)")
             .bind(rid)
             .bind(&event_json)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg insert spend event: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg insert spend event: {e}")))?;
 
         tx.commit()
             .await
-            .map_err(|e| PayError::InternalError(format!("pg commit confirm: {e}")))
+            .map_err(|e| PayError::internal_error(format!("pg commit confirm: {e}")))
     }
 
     async fn cancel_postgres(&self, reservation_id: u64) -> Result<(), PayError> {
+        use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
+
         let pool = self.pg_pool()?;
         let now = now_epoch_ms();
         let rid = reservation_id as i64;
 
-        let row: Option<(serde_json::Value,)> =
-            sqlx::query_as("SELECT reservation FROM spend_reservations WHERE reservation_id = $1")
-                .bind(rid)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| PayError::InternalError(format!("pg read reservation: {e}")))?;
+        // Same advisory-lock + FOR UPDATE pattern as `confirm_postgres`. A bare
+        // pool query (as the previous implementation used) raced against confirm
+        // and other cancels, letting two daemons silently overwrite each other.
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg advisory lock: {e}")))?;
+
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT reservation FROM spend_reservations WHERE reservation_id = $1 FOR UPDATE",
+        )
+        .bind(rid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PayError::internal_error(format!("pg read reservation: {e}")))?;
 
         if let Some((res_json,)) = row {
             let mut reservation: SpendReservation = serde_json::from_value(res_json)
-                .map_err(|e| PayError::InternalError(format!("pg parse reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("pg parse reservation: {e}")))?;
 
             if matches!(reservation.status, ReservationStatus::Pending) {
                 reservation.status = ReservationStatus::Cancelled;
                 reservation.finalized_at_epoch_ms = Some(now);
                 let updated_json = serde_json::to_value(&reservation)
-                    .map_err(|e| PayError::InternalError(format!("serialize reservation: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("serialize reservation: {e}")))?;
 
                 sqlx::query(
                     "UPDATE spend_reservations SET reservation = $1 WHERE reservation_id = $2",
                 )
                 .bind(&updated_json)
                 .bind(rid)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
-                .map_err(|e| PayError::InternalError(format!("pg update reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("pg update reservation: {e}")))?;
             }
         }
 
+        tx.commit()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg commit cancel: {e}")))?;
+
         Ok(())
+    }
+
+    // ─── idempotency (postgres) ────────────────
+
+    async fn idempotency_claim_postgres(
+        &self,
+        key: &str,
+        hash: &str,
+    ) -> Result<IdempotencyLookup, PayError> {
+        use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
+
+        let pool = self.pg_pool()?;
+        let now = now_epoch_ms();
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg advisory lock: {e}")))?;
+
+        sqlx::query("DELETE FROM afpay_idempotency WHERE expires_at_ms <= $1")
+            .bind(now as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg idem sweep: {e}")))?;
+
+        let row: Option<(String, String, Option<serde_json::Value>)> = sqlx::query_as(
+            "SELECT state, input_hash, payload_json FROM afpay_idempotency \
+             WHERE key = $1 FOR UPDATE",
+        )
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PayError::internal_error(format!("pg idem read: {e}")))?;
+
+        let outcome = if let Some((state, existing_hash, payload_json)) = row {
+            if existing_hash != hash {
+                IdempotencyLookup::Conflict
+            } else if state == "pending" {
+                IdempotencyLookup::InProgress
+            } else {
+                let value = payload_json.ok_or_else(|| {
+                    PayError::internal_error("pg idem record final without payload".to_string())
+                })?;
+                let payload: IdempotentReplayPayload = serde_json::from_value(value)
+                    .map_err(|e| PayError::internal_error(format!("pg idem parse payload: {e}")))?;
+                IdempotencyLookup::Replay(payload)
+            }
+        } else {
+            sqlx::query(
+                "INSERT INTO afpay_idempotency \
+                 (key, input_hash, state, payload_json, created_at_ms, expires_at_ms) \
+                 VALUES ($1, $2, 'pending', NULL, $3, $4)",
+            )
+            .bind(key)
+            .bind(hash)
+            .bind(now as i64)
+            .bind(now.saturating_add(IDEMPOTENCY_TTL_MS) as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg idem insert pending: {e}")))?;
+            IdempotencyLookup::Fresh
+        };
+
+        tx.commit()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg idem commit claim: {e}")))?;
+        Ok(outcome)
+    }
+
+    async fn idempotency_finalize_postgres(
+        &self,
+        key: &str,
+        hash: &str,
+        payload: IdempotentReplayPayload,
+    ) -> Result<(), PayError> {
+        use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
+
+        let pool = self.pg_pool()?;
+        let now = now_epoch_ms();
+        let payload_json = serde_json::to_value(&payload)
+            .map_err(|e| PayError::internal_error(format!("serialize idem payload: {e}")))?;
+        let expires_at = now.saturating_add(IDEMPOTENCY_TTL_MS) as i64;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg advisory lock: {e}")))?;
+
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT state, input_hash FROM afpay_idempotency WHERE key = $1 FOR UPDATE",
+        )
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PayError::internal_error(format!("pg idem read finalize: {e}")))?;
+
+        match row {
+            Some((state, existing_hash)) => {
+                if existing_hash != hash {
+                    return Err(PayError::internal_error(
+                        "idempotency_finalize: input_hash drift between claim and finalize"
+                            .to_string(),
+                    ));
+                }
+                if state == "final" {
+                    tx.commit().await.map_err(|e| {
+                        PayError::internal_error(format!("pg idem commit finalize: {e}"))
+                    })?;
+                    return Ok(());
+                }
+                sqlx::query(
+                    "UPDATE afpay_idempotency \
+                     SET state = 'final', payload_json = $1, expires_at_ms = $2 \
+                     WHERE key = $3",
+                )
+                .bind(&payload_json)
+                .bind(expires_at)
+                .bind(key)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PayError::internal_error(format!("pg idem promote final: {e}")))?;
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO afpay_idempotency \
+                     (key, input_hash, state, payload_json, created_at_ms, expires_at_ms) \
+                     VALUES ($1, $2, 'final', $3, $4, $5)",
+                )
+                .bind(key)
+                .bind(hash)
+                .bind(&payload_json)
+                .bind(now as i64)
+                .bind(expires_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PayError::internal_error(format!("pg idem insert final: {e}")))?;
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg idem commit finalize: {e}")))
+    }
+
+    async fn idempotency_clear_postgres(&self, key: &str, hash: &str) -> Result<(), PayError> {
+        let pool = self.pg_pool()?;
+        sqlx::query(
+            "DELETE FROM afpay_idempotency \
+             WHERE key = $1 AND input_hash = $2 AND state = 'pending'",
+        )
+        .bind(key)
+        .bind(hash)
+        .execute(pool)
+        .await
+        .map_err(|e| PayError::internal_error(format!("pg idem clear: {e}")))?;
+        Ok(())
+    }
+
+    // ─── reconcile (postgres) ──────────────────
+
+    async fn force_confirm_postgres(
+        &self,
+        reservation_id: u64,
+        reason: &str,
+    ) -> Result<ReconcileOutcome, PayError> {
+        use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
+
+        let pool = self.pg_pool()?;
+        let now = now_epoch_ms();
+        let rid = reservation_id as i64;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg advisory lock: {e}")))?;
+
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT reservation FROM spend_reservations WHERE reservation_id = $1 FOR UPDATE",
+        )
+        .bind(rid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PayError::internal_error(format!("pg read reservation: {e}")))?;
+
+        let Some((res_json,)) = row else {
+            return Ok(ReconcileOutcome::NotFound);
+        };
+        let mut reservation: SpendReservation = serde_json::from_value(res_json)
+            .map_err(|e| PayError::internal_error(format!("pg parse reservation: {e}")))?;
+        let previous = reservation_status_label(&reservation.status);
+        match reservation.status {
+            ReservationStatus::Confirmed | ReservationStatus::Cancelled => {
+                return Ok(ReconcileOutcome::AlreadyTerminal {
+                    current_status: previous,
+                });
+            }
+            ReservationStatus::Pending | ReservationStatus::Expired => {}
+        }
+
+        reservation.status = ReservationStatus::Confirmed;
+        reservation.finalized_at_epoch_ms = Some(now);
+        reservation.reconcile_reason = Some(reason.to_string());
+        let updated_json = serde_json::to_value(&reservation)
+            .map_err(|e| PayError::internal_error(format!("serialize reservation: {e}")))?;
+        let event = SpendEvent {
+            event_id: 0,
+            reservation_id,
+            op_id: reservation.op_id.clone(),
+            network: reservation.network.clone(),
+            wallet: reservation.wallet.clone(),
+            token: reservation.token.clone(),
+            amount_native: reservation.amount_native,
+            amount_usd_cents: reservation.amount_usd_cents,
+            created_at_epoch_ms: reservation.created_at_epoch_ms,
+            confirmed_at_epoch_ms: now,
+        };
+        let event_json = serde_json::to_value(&event)
+            .map_err(|e| PayError::internal_error(format!("serialize spend event: {e}")))?;
+
+        sqlx::query("UPDATE spend_reservations SET reservation = $1 WHERE reservation_id = $2")
+            .bind(&updated_json)
+            .bind(rid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg update reservation: {e}")))?;
+        sqlx::query("INSERT INTO spend_events (reservation_id, event) VALUES ($1, $2)")
+            .bind(rid)
+            .bind(&event_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg insert spend event: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg commit reconcile confirm: {e}")))?;
+
+        Ok(ReconcileOutcome::Reconciled {
+            previous_status: previous,
+            new_status: "confirmed",
+        })
+    }
+
+    async fn force_cancel_postgres(
+        &self,
+        reservation_id: u64,
+        reason: &str,
+    ) -> Result<ReconcileOutcome, PayError> {
+        use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
+
+        let pool = self.pg_pool()?;
+        let now = now_epoch_ms();
+        let rid = reservation_id as i64;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg begin tx: {e}")))?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg advisory lock: {e}")))?;
+
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT reservation FROM spend_reservations WHERE reservation_id = $1 FOR UPDATE",
+        )
+        .bind(rid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PayError::internal_error(format!("pg read reservation: {e}")))?;
+        let Some((res_json,)) = row else {
+            return Ok(ReconcileOutcome::NotFound);
+        };
+        let mut reservation: SpendReservation = serde_json::from_value(res_json)
+            .map_err(|e| PayError::internal_error(format!("pg parse reservation: {e}")))?;
+        let previous = reservation_status_label(&reservation.status);
+        match reservation.status {
+            ReservationStatus::Confirmed | ReservationStatus::Cancelled => {
+                return Ok(ReconcileOutcome::AlreadyTerminal {
+                    current_status: previous,
+                });
+            }
+            ReservationStatus::Pending | ReservationStatus::Expired => {}
+        }
+        reservation.status = ReservationStatus::Cancelled;
+        reservation.finalized_at_epoch_ms = Some(now);
+        reservation.reconcile_reason = Some(reason.to_string());
+        let updated_json = serde_json::to_value(&reservation)
+            .map_err(|e| PayError::internal_error(format!("serialize reservation: {e}")))?;
+        sqlx::query("UPDATE spend_reservations SET reservation = $1 WHERE reservation_id = $2")
+            .bind(&updated_json)
+            .bind(rid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg update reservation: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg commit reconcile cancel: {e}")))?;
+
+        Ok(ReconcileOutcome::Reconciled {
+            previous_status: previous,
+            new_status: "cancelled",
+        })
     }
 }
 
@@ -1078,11 +1966,11 @@ async fn pg_load_rules(pool: &sqlx::PgPool) -> Result<Vec<SpendLimit>, PayError>
         sqlx::query_as("SELECT rule FROM spend_rules ORDER BY rule_id")
             .fetch_all(pool)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg load spend rules: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg load spend rules: {e}")))?;
     rows.into_iter()
         .map(|(v,)| {
             serde_json::from_value(v)
-                .map_err(|e| PayError::InternalError(format!("pg parse spend rule: {e}")))
+                .map_err(|e| PayError::internal_error(format!("pg parse spend rule: {e}")))
         })
         .collect()
 }
@@ -1095,11 +1983,11 @@ async fn pg_load_rules_tx(
         sqlx::query_as("SELECT rule FROM spend_rules ORDER BY rule_id")
             .fetch_all(&mut **tx)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg load spend rules: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg load spend rules: {e}")))?;
     rows.into_iter()
         .map(|(v,)| {
             serde_json::from_value(v)
-                .map_err(|e| PayError::InternalError(format!("pg parse spend rule: {e}")))
+                .map_err(|e| PayError::internal_error(format!("pg parse spend rule: {e}")))
         })
         .collect()
 }
@@ -1110,11 +1998,11 @@ async fn pg_load_reservations(pool: &sqlx::PgPool) -> Result<Vec<SpendReservatio
         sqlx::query_as("SELECT reservation FROM spend_reservations ORDER BY reservation_id")
             .fetch_all(pool)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg load reservations: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg load reservations: {e}")))?;
     rows.into_iter()
         .map(|(v,)| {
             serde_json::from_value(v)
-                .map_err(|e| PayError::InternalError(format!("pg parse reservation: {e}")))
+                .map_err(|e| PayError::internal_error(format!("pg parse reservation: {e}")))
         })
         .collect()
 }
@@ -1127,11 +2015,11 @@ async fn pg_load_reservations_tx(
         sqlx::query_as("SELECT reservation FROM spend_reservations ORDER BY reservation_id")
             .fetch_all(&mut **tx)
             .await
-            .map_err(|e| PayError::InternalError(format!("pg load reservations: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg load reservations: {e}")))?;
     rows.into_iter()
         .map(|(v,)| {
             serde_json::from_value(v)
-                .map_err(|e| PayError::InternalError(format!("pg parse reservation: {e}")))
+                .map_err(|e| PayError::internal_error(format!("pg parse reservation: {e}")))
         })
         .collect()
 }
@@ -1147,25 +2035,25 @@ async fn pg_expire_pending(
             .fetch_all(&mut **tx)
             .await
             .map_err(|e| {
-                PayError::InternalError(format!("pg load reservations for expire: {e}"))
+                PayError::internal_error(format!("pg load reservations for expire: {e}"))
             })?;
 
     for (rid, res_json) in rows {
         let mut reservation: SpendReservation = serde_json::from_value(res_json)
-            .map_err(|e| PayError::InternalError(format!("pg parse reservation: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("pg parse reservation: {e}")))?;
         if matches!(reservation.status, ReservationStatus::Pending)
             && reservation.expires_at_epoch_ms <= now_ms
         {
             reservation.status = ReservationStatus::Expired;
             reservation.finalized_at_epoch_ms = Some(now_ms);
             let updated = serde_json::to_value(&reservation)
-                .map_err(|e| PayError::InternalError(format!("serialize reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("serialize reservation: {e}")))?;
             sqlx::query("UPDATE spend_reservations SET reservation = $1 WHERE reservation_id = $2")
                 .bind(&updated)
                 .bind(rid)
                 .execute(&mut **tx)
                 .await
-                .map_err(|e| PayError::InternalError(format!("pg expire reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("pg expire reservation: {e}")))?;
         }
     }
     Ok(())
@@ -1183,7 +2071,7 @@ impl SpendLedger {
         amount_native: u64,
     ) -> Result<u64, PayError> {
         let (symbol, divisor) = token_asset(network, token).ok_or_else(|| {
-            PayError::InvalidAmount(format!(
+            PayError::invalid_amount(format!(
                 "network '{network}' token '{token:?}' is unsupported for global-usd-cents limits"
             ))
         })?;
@@ -1205,7 +2093,7 @@ impl SpendLedger {
         // in a prior call, or the clock jumped).
         let now = now_epoch_ms();
         if quote.expires_at_epoch_ms > 0 && now > quote.expires_at_epoch_ms {
-            return Err(PayError::NetworkError(
+            return Err(PayError::network_error(
                 "exchange-rate quote expired — cannot convert to USD; check exchange_rate sources"
                     .to_string(),
             ));
@@ -1224,7 +2112,7 @@ impl SpendLedger {
 
         let usd = (amount_native as f64 / divisor) * quote.price;
         if !usd.is_finite() || usd < 0f64 {
-            return Err(PayError::InternalError(
+            return Err(PayError::internal_error(
                 "invalid exchange-rate conversion result".to_string(),
             ));
         }
@@ -1249,16 +2137,15 @@ impl SpendLedger {
             let fx_db = self.open_exchange_rate_db()?;
             let read_txn = fx_db
                 .begin_read()
-                .map_err(|e| PayError::InternalError(format!("fx begin_read: {e}")))?;
-            if let Ok(table) = read_txn.open_table(FX_QUOTE_BY_PAIR) {
-                if let Some(entry) = table
+                .map_err(|e| PayError::internal_error(format!("fx begin_read: {e}")))?;
+            if let Ok(table) = read_txn.open_table(FX_QUOTE_BY_PAIR)
+                && let Some(entry) = table
                     .get(pair.as_str())
-                    .map_err(|e| PayError::InternalError(format!("fx read quote: {e}")))?
-                {
-                    let cached: ExchangeRateQuote = decode(entry.value())?;
-                    if cached.expires_at_epoch_ms > now {
-                        return Ok(cached);
-                    }
+                    .map_err(|e| PayError::internal_error(format!("fx read quote: {e}")))?
+            {
+                let cached: ExchangeRateQuote = decode(entry.value())?;
+                if cached.expires_at_epoch_ms > now {
+                    return Ok(cached);
                 }
             }
         }
@@ -1271,10 +2158,10 @@ impl SpendLedger {
                     .bind(&pair)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|e| PayError::InternalError(format!("pg fx read cache: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("pg fx read cache: {e}")))?;
             if let Some((quote_json,)) = row {
                 let cached: ExchangeRateQuote = serde_json::from_value(quote_json)
-                    .map_err(|e| PayError::InternalError(format!("pg fx parse cache: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("pg fx parse cache: {e}")))?;
                 if cached.expires_at_epoch_ms > now {
                     return Ok(cached);
                 }
@@ -1302,30 +2189,30 @@ impl SpendLedger {
             let fx_db = self.open_exchange_rate_db()?;
             let write_txn = fx_db
                 .begin_write()
-                .map_err(|e| PayError::InternalError(format!("fx begin_write: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("fx begin_write: {e}")))?;
             let mut encoded_blobs: Vec<String> = Vec::new();
             {
                 let mut table = write_txn
                     .open_table(FX_QUOTE_BY_PAIR)
-                    .map_err(|e| PayError::InternalError(format!("fx open quote table: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("fx open quote table: {e}")))?;
                 encoded_blobs.push(encode(&new_quote)?);
                 let encoded = encoded_blobs
                     .last()
-                    .ok_or_else(|| PayError::InternalError("missing quote blob".to_string()))?;
+                    .ok_or_else(|| PayError::internal_error("missing quote blob".to_string()))?;
                 table
                     .insert(pair.as_str(), encoded.as_str())
-                    .map_err(|e| PayError::InternalError(format!("fx insert quote: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("fx insert quote: {e}")))?;
             }
             write_txn
                 .commit()
-                .map_err(|e| PayError::InternalError(format!("fx commit write: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("fx commit write: {e}")))?;
         }
 
         // Write cache — postgres
         #[cfg(feature = "postgres")]
         if let SpendBackend::Postgres { pool } = &self.backend {
             let quote_json = serde_json::to_value(&new_quote)
-                .map_err(|e| PayError::InternalError(format!("serialize fx quote: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("serialize fx quote: {e}")))?;
             let _ = sqlx::query(
                 "INSERT INTO exchange_rate_cache (pair, quote) VALUES ($1, $2) \
                  ON CONFLICT (pair) DO UPDATE SET quote = $2",
@@ -1348,7 +2235,7 @@ impl SpendLedger {
         let cfg = self.exchange_rate.as_ref().cloned().unwrap_or_default();
 
         if cfg.sources.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "exchange_rate.sources is empty — no exchange-rate API configured".to_string(),
             ));
         }
@@ -1366,7 +2253,7 @@ impl SpendLedger {
             }
         }
 
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "all exchange-rate sources failed; last: {last_err}"
         )))
     }
@@ -1377,7 +2264,7 @@ impl SpendLedger {
         _base: &str,
         _quote_currency: &str,
     ) -> Result<(f64, String), PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "exchange-rate HTTP support is not built in this feature set".to_string(),
         ))
     }
@@ -1386,6 +2273,22 @@ impl SpendLedger {
 // ═══════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════
+
+/// Reservation TTL by network. Picked to bracket the typical settlement
+/// window: long enough that a successful payment confirms within it, short
+/// enough that a stuck reservation does not silently lock spend headroom
+/// for hours. BTC is the outlier (10+ min confirms), Cashu/LN are nearly
+/// instant.
+pub(crate) fn reservation_ttl_ms_for_network(network: &str) -> u64 {
+    match network.to_ascii_lowercase().as_str() {
+        "cashu" => 60_000,        // 60s
+        "ln" => 90_000,           // 90s
+        "sol" => 120_000,         // 120s
+        "evm" => 180_000,         // 180s
+        "btc" => 30 * 60 * 1_000, // 30 minutes
+        _ => 5 * 60 * 1_000,      // 5 minutes — pre-existing default
+    }
+}
 
 fn now_epoch_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1415,7 +2318,7 @@ fn duplicate_reservation_error(
     reservation_id: u64,
     status: &ReservationStatus,
 ) -> PayError {
-    PayError::InvalidAmount(format!(
+    PayError::invalid_amount(format!(
         "duplicate spend operation id '{op_id}' already has reservation {reservation_id} ({status}); refusing to re-execute payment",
         status = reservation_status_label(status)
     ))
@@ -1617,7 +2520,7 @@ async fn fetch_from_source(
 #[cfg(feature = "redb")]
 fn encode<T: Serialize>(value: &T) -> Result<String, PayError> {
     serde_json::to_string(value)
-        .map_err(|e| PayError::InternalError(format!("spend encode failed: {e}")))
+        .map_err(|e| PayError::internal_error(format!("spend encode failed: {e}")))
 }
 
 #[cfg(feature = "redb")]
@@ -1625,7 +2528,7 @@ fn decode<T: DeserializeOwned>(encoded: &str) -> Result<T, PayError> {
     serde_json::from_str(encoded).map_err(|e| {
         let preview_len = encoded.len().min(48);
         let preview = &encoded[..preview_len];
-        PayError::InternalError(format!(
+        PayError::internal_error(format!(
             "spend decode failed (len={}, preview={}): {e}",
             encoded.len(),
             preview
@@ -1636,14 +2539,17 @@ fn decode<T: DeserializeOwned>(encoded: &str) -> Result<T, PayError> {
 #[cfg(feature = "redb")]
 fn prepend_err(prefix: &str, err: PayError) -> PayError {
     match err {
-        PayError::InternalError(msg) => PayError::InternalError(format!("{prefix}: {msg}")),
+        PayError::InternalError { message, hint } => PayError::InternalError {
+            message: format!("{prefix}: {message}"),
+            hint,
+        },
         other => other,
     }
 }
 
 fn generate_rule_identifier() -> Result<String, PayError> {
     let mut buf = [0u8; 4];
-    getrandom::fill(&mut buf).map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+    getrandom::fill(&mut buf).map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
     Ok(format!("r_{}", hex::encode(buf)))
 }
 
@@ -1652,12 +2558,12 @@ fn validate_limit(
     exchange_rate: Option<&ExchangeRateConfig>,
 ) -> Result<(), PayError> {
     if rule.window_s == 0 {
-        return Err(PayError::InvalidAmount(
+        return Err(PayError::invalid_amount(
             "limit rule has zero window_s".to_string(),
         ));
     }
     if rule.max_spend == 0 {
-        return Err(PayError::InvalidAmount(
+        return Err(PayError::invalid_amount(
             "limit rule has zero max_spend".to_string(),
         ));
     }
@@ -1665,36 +2571,36 @@ fn validate_limit(
     match rule.scope {
         SpendScope::GlobalUsdCents => {
             if rule.network.is_some() || rule.wallet.is_some() {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "scope=global-usd-cents cannot set network/wallet".to_string(),
                 ));
             }
             if rule.token.is_some() {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "scope=global-usd-cents cannot set token".to_string(),
                 ));
             }
         }
         SpendScope::Network => {
             if rule.network.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "scope=network requires network".to_string(),
                 ));
             }
             if rule.wallet.is_some() {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "scope=network cannot set wallet".to_string(),
                 ));
             }
         }
         SpendScope::Wallet => {
             if rule.network.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "scope=wallet requires network".to_string(),
                 ));
             }
             if rule.wallet.as_deref().unwrap_or("").trim().is_empty() {
-                return Err(PayError::InvalidAmount(
+                return Err(PayError::invalid_amount(
                     "scope=wallet requires wallet".to_string(),
                 ));
             }
@@ -1702,7 +2608,7 @@ fn validate_limit(
     }
 
     if rule.scope == SpendScope::GlobalUsdCents && exchange_rate.is_none() {
-        return Err(PayError::InvalidAmount(
+        return Err(PayError::invalid_amount(
             "scope=global-usd-cents requires config.exchange_rate".to_string(),
         ));
     }
@@ -1716,10 +2622,10 @@ fn load_rules(read_txn: &redb::ReadTransaction) -> Result<Vec<SpendLimit>, PayEr
     };
     rule_table
         .iter()
-        .map_err(|e| PayError::InternalError(format!("spend iterate rules: {e}")))?
+        .map_err(|e| PayError::internal_error(format!("spend iterate rules: {e}")))?
         .map(|entry| {
             let (_k, v) = entry
-                .map_err(|e| PayError::InternalError(format!("spend read rule entry: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend read rule entry: {e}")))?;
             decode::<SpendLimit>(v.value()).map_err(|e| prepend_err("spend decode rule", e))
         })
         .collect()
@@ -1732,10 +2638,10 @@ fn load_reservations(read_txn: &redb::ReadTransaction) -> Result<Vec<SpendReserv
     };
     table
         .iter()
-        .map_err(|e| PayError::InternalError(format!("spend iterate reservations: {e}")))?
+        .map_err(|e| PayError::internal_error(format!("spend iterate reservations: {e}")))?
         .map(|entry| {
             let (_k, v) = entry
-                .map_err(|e| PayError::InternalError(format!("spend read reservation: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("spend read reservation: {e}")))?;
             decode::<SpendReservation>(v.value())
                 .map_err(|e| prepend_err("spend decode reservation", e))
         })
@@ -1747,6 +2653,36 @@ fn expire_pending(_table: &mut redb::Table<u64, &str>, _now_ms: u64) -> Result<(
     Ok(())
 }
 
+/// Drop idempotency records whose `expires_at_epoch_ms` has passed. Called at
+/// the top of every `idempotency_claim` so the table size is bounded by the
+/// 24h TTL window and an expired Pending slot can never block a retry.
+#[cfg(feature = "redb")]
+fn sweep_expired_idempotency_redb(
+    table: &mut redb::Table<&str, &str>,
+    now_ms: u64,
+) -> Result<(), PayError> {
+    let mut stale: Vec<String> = Vec::new();
+    {
+        let iter = table
+            .iter()
+            .map_err(|e| PayError::internal_error(format!("idem iterate: {e}")))?;
+        for entry in iter {
+            let (k, v) =
+                entry.map_err(|e| PayError::internal_error(format!("idem iter entry: {e}")))?;
+            let record: IdempotencyRecord = decode(v.value())?;
+            if record.expires_at_epoch_ms <= now_ms {
+                stale.push(k.value().to_string());
+            }
+        }
+    }
+    for key in stale {
+        table
+            .remove(key.as_str())
+            .map_err(|e| PayError::internal_error(format!("idem sweep remove: {e}")))?;
+    }
+    Ok(())
+}
+
 fn amount_for_rule(
     _rule: &SpendLimit,
     amount_native: u64,
@@ -1755,7 +2691,7 @@ fn amount_for_rule(
 ) -> Result<u64, PayError> {
     if use_usd {
         amount_usd_cents.ok_or_else(|| {
-            PayError::InternalError("missing USD amount for non-native unit rule".to_string())
+            PayError::internal_error("missing USD amount for non-native unit rule".to_string())
         })
     } else {
         Ok(amount_native)
@@ -1829,7 +2765,7 @@ fn spent_in_window(
 
         let amount = if use_usd {
             r.amount_usd_cents.ok_or_else(|| {
-                PayError::InternalError("reservation missing USD amount".to_string())
+                PayError::internal_error("reservation missing USD amount".to_string())
             })?
         } else {
             r.amount_native
@@ -1845,17 +2781,17 @@ fn spent_in_window(
 fn next_counter(write_txn: &redb::WriteTransaction, key: &str) -> Result<u64, PayError> {
     let mut meta = write_txn
         .open_table(META_COUNTER)
-        .map_err(|e| PayError::InternalError(format!("spend open meta table: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("spend open meta table: {e}")))?;
     let current = match meta
         .get(key)
-        .map_err(|e| PayError::InternalError(format!("spend read counter {key}: {e}")))?
+        .map_err(|e| PayError::internal_error(format!("spend read counter {key}: {e}")))?
     {
         Some(v) => v.value(),
         None => 0,
     };
     let next = current.saturating_add(1);
     meta.insert(key, next)
-        .map_err(|e| PayError::InternalError(format!("spend write counter {key}: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("spend write counter {key}: {e}")))?;
     Ok(next)
 }
 
@@ -1863,6 +2799,20 @@ fn next_counter(write_txn: &redb::WriteTransaction, key: &str) -> Result<u64, Pa
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ttl_per_network_matches_spec() {
+        // Spec from the agent-hardening audit:
+        // Cashu 60s, LN 90s, SOL 120s, EVM 180s, BTC 30 min, fallback 5 min.
+        assert_eq!(reservation_ttl_ms_for_network("cashu"), 60_000);
+        assert_eq!(reservation_ttl_ms_for_network("ln"), 90_000);
+        assert_eq!(reservation_ttl_ms_for_network("sol"), 120_000);
+        assert_eq!(reservation_ttl_ms_for_network("evm"), 180_000);
+        assert_eq!(reservation_ttl_ms_for_network("btc"), 30 * 60 * 1_000);
+        assert_eq!(reservation_ttl_ms_for_network("unknown"), 5 * 60 * 1_000);
+        // Case-insensitive matching so callers don't have to normalize.
+        assert_eq!(reservation_ttl_ms_for_network("BTC"), 30 * 60 * 1_000);
+    }
 
     fn make_limit(scope: SpendScope, network: Option<&str>, wallet: Option<&str>) -> SpendLimit {
         SpendLimit {
@@ -1924,7 +2874,7 @@ mod tests {
         ledger.confirm(rid).await.unwrap();
 
         let err = ledger.reserve("op_duplicate", &ctx).await.unwrap_err();
-        assert!(matches!(err, PayError::InvalidAmount(_)));
+        assert!(matches!(err, PayError::InvalidAmount { .. }));
         assert!(err.to_string().contains("refusing to re-execute"));
     }
 
@@ -1946,7 +2896,7 @@ mod tests {
             token: None,
         };
         let err = ledger.reserve("op_1", &ctx).await.unwrap_err();
-        assert!(matches!(err, PayError::InvalidAmount(_)));
+        assert!(matches!(err, PayError::InvalidAmount { .. }));
     }
 
     #[tokio::test]
@@ -1967,7 +2917,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, PayError::InvalidAmount(_)));
+        assert!(matches!(err, PayError::InvalidAmount { .. }));
     }
 
     #[cfg(feature = "redb")]
@@ -2008,6 +2958,230 @@ mod tests {
         let mut evm_limit = make_limit(SpendScope::Wallet, Some("evm"), Some("w_evm"));
         normalize_limit(&mut evm_limit);
         assert_eq!(evm_limit.token.as_deref(), Some("native"));
+    }
+
+    // ─── idempotency ────────────────────────────────────────────────────
+
+    fn dummy_payload() -> IdempotentReplayPayload {
+        IdempotentReplayPayload::Sent {
+            wallet: "w_test".into(),
+            transaction_id: "tx_abc".into(),
+            amount: crate::types::Amount {
+                value: 42,
+                token: "sats".into(),
+            },
+            fee: None,
+            preimage: None,
+            reservation_ids: vec![],
+        }
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn idempotency_claim_fresh_then_replay_after_finalize() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        let r = ledger.idempotency_claim("k1", "hash_a").await.unwrap();
+        assert!(matches!(r, IdempotencyLookup::Fresh));
+
+        // Same key+hash while Pending → InProgress.
+        let r = ledger.idempotency_claim("k1", "hash_a").await.unwrap();
+        assert!(matches!(r, IdempotencyLookup::InProgress));
+
+        ledger
+            .idempotency_finalize("k1", "hash_a", dummy_payload())
+            .await
+            .unwrap();
+
+        // After finalize → Replay returned with the stored payload.
+        let r = ledger.idempotency_claim("k1", "hash_a").await.unwrap();
+        match r {
+            IdempotencyLookup::Replay(IdempotentReplayPayload::Sent { transaction_id, .. }) => {
+                assert_eq!(transaction_id, "tx_abc")
+            }
+            other => panic!("expected Replay::Sent, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn idempotency_claim_conflict_when_hash_differs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        assert!(matches!(
+            ledger.idempotency_claim("k2", "hash_a").await.unwrap(),
+            IdempotencyLookup::Fresh
+        ));
+        let r = ledger.idempotency_claim("k2", "hash_b").await.unwrap();
+        assert!(matches!(r, IdempotencyLookup::Conflict));
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn idempotency_clear_releases_pending_for_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        assert!(matches!(
+            ledger.idempotency_claim("k3", "hash_a").await.unwrap(),
+            IdempotencyLookup::Fresh
+        ));
+        ledger.idempotency_clear("k3", "hash_a").await.unwrap();
+        // Cleared → next claim is Fresh again.
+        assert!(matches!(
+            ledger.idempotency_claim("k3", "hash_a").await.unwrap(),
+            IdempotencyLookup::Fresh
+        ));
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn idempotency_clear_refuses_to_drop_final_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        assert!(matches!(
+            ledger.idempotency_claim("k4", "hash_a").await.unwrap(),
+            IdempotencyLookup::Fresh
+        ));
+        ledger
+            .idempotency_finalize("k4", "hash_a", dummy_payload())
+            .await
+            .unwrap();
+        // Clear is a no-op on Final entries (only Pending can be released).
+        ledger.idempotency_clear("k4", "hash_a").await.unwrap();
+        let r = ledger.idempotency_claim("k4", "hash_a").await.unwrap();
+        assert!(matches!(r, IdempotencyLookup::Replay(_)));
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn idempotency_finalize_with_wrong_hash_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        ledger.idempotency_claim("k5", "hash_a").await.unwrap();
+        let err = ledger
+            .idempotency_finalize("k5", "hash_b", dummy_payload())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("idempotency_finalize"));
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn idempotency_key_length_is_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+        let too_long: String = "a".repeat(IDEMPOTENCY_KEY_MAX_LEN + 1);
+        let err = ledger.idempotency_claim(&too_long, "x").await.unwrap_err();
+        assert!(matches!(err, PayError::InvalidAmount { .. }));
+    }
+
+    // ─── reconcile ──────────────────────────────────────────────────────
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn force_confirm_promotes_pending_and_writes_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        ledger
+            .set_limits(&[make_limit(SpendScope::Network, Some("cashu"), None)])
+            .await
+            .unwrap();
+        let ctx = SpendContext {
+            network: "cashu".to_string(),
+            wallet: Some("w_01".to_string()),
+            amount_native: 100,
+            token: None,
+        };
+        let rid = ledger.reserve("op_x", &ctx).await.unwrap();
+
+        let outcome = ledger.force_confirm(rid, "manual fix").await.unwrap();
+        match outcome {
+            ReconcileOutcome::Reconciled {
+                previous_status,
+                new_status,
+            } => {
+                assert_eq!(previous_status, "pending");
+                assert_eq!(new_status, "confirmed");
+            }
+            other => panic!("expected Reconciled, got {other:?}"),
+        }
+
+        // After reconcile, status reflects the spend: 100/1000 confirmed.
+        let status = ledger.get_status().await.unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].spent, 100);
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn force_confirm_refuses_terminal_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        ledger
+            .set_limits(&[make_limit(SpendScope::Network, Some("cashu"), None)])
+            .await
+            .unwrap();
+        let ctx = SpendContext {
+            network: "cashu".to_string(),
+            wallet: Some("w_01".to_string()),
+            amount_native: 50,
+            token: None,
+        };
+        let rid = ledger.reserve("op_y", &ctx).await.unwrap();
+        ledger.confirm(rid).await.unwrap();
+
+        let outcome = ledger.force_confirm(rid, "redo").await.unwrap();
+        assert!(matches!(
+            outcome,
+            ReconcileOutcome::AlreadyTerminal {
+                current_status: "confirmed"
+            }
+        ));
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn force_cancel_releases_pending_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        ledger
+            .set_limits(&[make_limit(SpendScope::Network, Some("cashu"), None)])
+            .await
+            .unwrap();
+        let ctx = SpendContext {
+            network: "cashu".to_string(),
+            wallet: Some("w_01".to_string()),
+            amount_native: 700,
+            token: None,
+        };
+        let rid = ledger.reserve("op_z", &ctx).await.unwrap();
+        let outcome = ledger.force_cancel(rid, "never sent").await.unwrap();
+        assert!(matches!(
+            outcome,
+            ReconcileOutcome::Reconciled {
+                previous_status: "pending",
+                new_status: "cancelled"
+            }
+        ));
+        let status = ledger.get_status().await.unwrap();
+        assert_eq!(status[0].spent, 0);
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn force_confirm_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+        let outcome = ledger.force_confirm(9999, "nothing").await.unwrap();
+        assert!(matches!(outcome, ReconcileOutcome::NotFound));
     }
 
     #[test]

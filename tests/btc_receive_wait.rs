@@ -1,14 +1,14 @@
 #![cfg(feature = "redb")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use agent_first_pay::handler::{dispatch, App};
+use agent_first_pay::handler::{App, dispatch};
 use agent_first_pay::provider::{HistorySyncStats, PayError, PayProvider};
 use agent_first_pay::store::wallet::{self, WalletMetadata};
-use agent_first_pay::store::{create_storage_backend, PayStore};
+use agent_first_pay::store::{PayStore, create_storage_backend};
 use agent_first_pay::types::{
     Amount, BalanceInfo, CashuReceiveResult, CashuSendResult, Direction, HistoryRecord,
-    HistoryStatusInfo, Input, Network, Output, ReceiveInfo, RuntimeConfig, SendResult, TxStatus,
-    WalletBalanceItem, WalletCreateRequest, WalletInfo, WalletSummary,
+    HistoryStatusInfo, Input, Network, Output, ReceiveInfo, Request, RuntimeConfig, SendResult,
+    TxStatus, WalletBalanceItem, WalletCreateRequest, WalletInfo, WalletSummary,
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,6 +50,7 @@ impl MockBtcWaitProvider {
             confirmed_at_epoch_s: None,
             fee: None,
             reference_keys: None,
+            reservation_ids: Vec::new(),
         }
     }
 }
@@ -61,13 +62,13 @@ impl PayProvider for MockBtcWaitProvider {
     }
 
     async fn create_wallet(&self, _request: &WalletCreateRequest) -> Result<WalletInfo, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "create_wallet not used in this test".to_string(),
         ))
     }
 
     async fn close_wallet(&self, _wallet: &str) -> Result<(), PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "close_wallet not used in this test".to_string(),
         ))
     }
@@ -102,7 +103,7 @@ impl PayProvider for MockBtcWaitProvider {
     }
 
     async fn receive_claim(&self, _wallet: &str, _quote_id: &str) -> Result<u64, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "receive_claim not used in this test".to_string(),
         ))
     }
@@ -114,7 +115,7 @@ impl PayProvider for MockBtcWaitProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "cashu_send not used in this test".to_string(),
         ))
     }
@@ -124,7 +125,7 @@ impl PayProvider for MockBtcWaitProvider {
         _wallet: &str,
         _token: &str,
     ) -> Result<CashuReceiveResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "cashu_receive not used in this test".to_string(),
         ))
     }
@@ -136,7 +137,7 @@ impl PayProvider for MockBtcWaitProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<SendResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "send not used in this test".to_string(),
         ))
     }
@@ -156,7 +157,7 @@ impl PayProvider for MockBtcWaitProvider {
 
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
         if transaction_id != self.tx_id {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "transaction {transaction_id} not found"
             )));
         }
@@ -198,6 +199,7 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
         sol_rpc_endpoints: None,
         evm_rpc_endpoints: None,
         evm_chain_id: None,
+        sol_cluster: None,
         seed_secret: Some("seed".to_string()),
         backend: Some("esplora".to_string()),
         btc_esplora_url: Some("https://example.invalid".to_string()),
@@ -221,7 +223,7 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
 
     dispatch(
         &app,
-        Input::Receive {
+        Request::from_input(Input::Receive {
             id: "req_btc_wait".to_string(),
             wallet: wallet_id.clone(),
             network: Some(Network::Btc),
@@ -237,7 +239,7 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
             write_qr_svg_file: false,
             min_confirmations: None,
             reference: None,
-        },
+        }),
     )
     .await;
 

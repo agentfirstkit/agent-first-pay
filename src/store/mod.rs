@@ -49,7 +49,7 @@ pub trait PayStore: Send + Sync {
         wallet_id: &str,
     ) -> Result<Vec<HistoryRecord>, PayError>;
     fn find_transaction_record_by_id(&self, tx_id: &str)
-        -> Result<Option<HistoryRecord>, PayError>;
+    -> Result<Option<HistoryRecord>, PayError>;
     fn update_transaction_record_memo(
         &self,
         tx_id: &str,
@@ -66,6 +66,15 @@ pub trait PayStore: Send + Sync {
         tx_id: &str,
         status: crate::types::TxStatus,
         confirmed_at_epoch_s: Option<u64>,
+    ) -> Result<(), PayError>;
+    /// Attach spend-ledger reservation ids to an existing history record.
+    /// No-op if the record does not exist yet (best-effort cross-link — the
+    /// provider may not have written the history row by the time the handler
+    /// reaches this call).
+    fn update_transaction_record_reservation_ids(
+        &self,
+        tx_id: &str,
+        reservation_ids: &[u64],
     ) -> Result<(), PayError>;
 
     // Migration log
@@ -191,6 +200,19 @@ impl PayStore for StorageBackend {
             tx_id,
             status,
             confirmed_at_epoch_s
+        )
+    }
+
+    fn update_transaction_record_reservation_ids(
+        &self,
+        tx_id: &str,
+        reservation_ids: &[u64],
+    ) -> Result<(), PayError> {
+        dispatch_storage!(
+            self,
+            update_transaction_record_reservation_ids,
+            tx_id,
+            reservation_ids
         )
     }
 

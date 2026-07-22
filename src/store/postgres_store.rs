@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS exchange_rate_cache (
     pair TEXT PRIMARY KEY,
     quote JSONB NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS afpay_idempotency (
+    key            TEXT PRIMARY KEY,
+    input_hash     TEXT NOT NULL,
+    state          TEXT NOT NULL,
+    payload_json   JSONB,
+    created_at_ms  BIGINT NOT NULL,
+    expires_at_ms  BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS afpay_idempotency_expires_at
+    ON afpay_idempotency (expires_at_ms);
 "#;
 
 /// Advisory lock key for spend operations (prevents concurrent spend check-then-write).
@@ -66,12 +77,12 @@ impl PostgresStore {
     pub async fn connect(database_url: &str, data_dir: &str) -> Result<Self, PayError> {
         let pool = PgPool::connect(database_url)
             .await
-            .map_err(|e| PayError::InternalError(format!("postgres connect: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("postgres connect: {e}")))?;
 
         sqlx::raw_sql(SCHEMA_SQL)
             .execute(&pool)
             .await
-            .map_err(|e| PayError::InternalError(format!("postgres schema init: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("postgres schema init: {e}")))?;
 
         Ok(Self {
             pool,
@@ -84,7 +95,7 @@ impl PayStore for PostgresStore {
     fn save_wallet_metadata(&self, meta: &WalletMetadata) -> Result<(), PayError> {
         let pool = self.pool.clone();
         let meta_json = serde_json::to_value(meta)
-            .map_err(|e| PayError::InternalError(format!("serialize wallet metadata: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("serialize wallet metadata: {e}")))?;
         let network_str = meta.network.to_string();
         let id = meta.id.clone();
         let created = meta.created_at_epoch_s as i64;
@@ -102,7 +113,7 @@ impl PayStore for PostgresStore {
                 .bind(created)
                 .execute(&pool)
                 .await
-                .map_err(|e| PayError::InternalError(format!("postgres save wallet: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("postgres save wallet: {e}")))?;
                 Ok(())
             })
         })
@@ -120,12 +131,12 @@ impl PayStore for PostgresStore {
                         .fetch_optional(&pool)
                         .await
                         .map_err(|e| {
-                            PayError::InternalError(format!("postgres load wallet: {e}"))
+                            PayError::internal_error(format!("postgres load wallet: {e}"))
                         })?;
 
                 match row {
                     Some((meta_json,)) => serde_json::from_value(meta_json).map_err(|e| {
-                        PayError::InternalError(format!("postgres parse wallet metadata: {e}"))
+                        PayError::internal_error(format!("postgres parse wallet metadata: {e}"))
                     }),
                     None => {
                         // Label fallback
@@ -137,19 +148,19 @@ impl PayStore for PostgresStore {
                             .fetch_optional(&pool)
                             .await
                             .map_err(|e| {
-                                PayError::InternalError(format!(
+                                PayError::internal_error(format!(
                                     "postgres load wallet by label: {e}"
                                 ))
                             })?;
                             if let Some((meta_json,)) = row {
                                 return serde_json::from_value(meta_json).map_err(|e| {
-                                    PayError::InternalError(format!(
+                                    PayError::internal_error(format!(
                                         "postgres parse wallet metadata: {e}"
                                     ))
                                 });
                             }
                         }
-                        Err(PayError::WalletNotFound(format!(
+                        Err(PayError::wallet_not_found(format!(
                             "wallet {wallet_id} not found"
                         )))
                     }
@@ -181,12 +192,12 @@ impl PayStore for PostgresStore {
                             .await
                     }
                 }
-                .map_err(|e| PayError::InternalError(format!("postgres list wallets: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("postgres list wallets: {e}")))?;
 
                 rows.into_iter()
                     .map(|(meta_json,)| {
                         serde_json::from_value(meta_json).map_err(|e| {
-                            PayError::InternalError(format!("postgres parse wallet metadata: {e}"))
+                            PayError::internal_error(format!("postgres parse wallet metadata: {e}"))
                         })
                     })
                     .collect()
@@ -204,10 +215,12 @@ impl PayStore for PostgresStore {
                     .bind(&wallet_id)
                     .execute(&pool)
                     .await
-                    .map_err(|e| PayError::InternalError(format!("postgres delete wallet: {e}")))?;
+                    .map_err(|e| {
+                        PayError::internal_error(format!("postgres delete wallet: {e}"))
+                    })?;
 
                 if result.rows_affected() == 0 {
-                    return Err(PayError::WalletNotFound(format!(
+                    return Err(PayError::wallet_not_found(format!(
                         "wallet {wallet_id} not found"
                     )));
                 }
@@ -238,11 +251,11 @@ impl PayStore for PostgresStore {
             .filter(|w| w.label.as_deref() == Some(id_or_label))
             .collect();
         match matches.len() {
-            0 => Err(PayError::WalletNotFound(format!(
+            0 => Err(PayError::wallet_not_found(format!(
                 "no wallet found with ID or label '{id_or_label}'"
             ))),
             1 => Ok(matches.remove(0).id.clone()),
-            n => Err(PayError::InvalidAmount(format!(
+            n => Err(PayError::invalid_amount(format!(
                 "label '{id_or_label}' matches {n} wallets — use wallet ID instead"
             ))),
         }
@@ -251,7 +264,7 @@ impl PayStore for PostgresStore {
     fn append_transaction_record(&self, record: &HistoryRecord) -> Result<(), PayError> {
         let pool = self.pool.clone();
         let record_json = serde_json::to_value(record)
-            .map_err(|e| PayError::InternalError(format!("serialize transaction record: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("serialize transaction record: {e}")))?;
         let tx_id = record.transaction_id.clone();
         let wallet = record.wallet.clone();
 
@@ -268,7 +281,7 @@ impl PayStore for PostgresStore {
                 .execute(&pool)
                 .await
                 .map_err(|e| {
-                    PayError::InternalError(format!("postgres append transaction: {e}"))
+                    PayError::internal_error(format!("postgres append transaction: {e}"))
                 })?;
                 Ok(())
             })
@@ -290,12 +303,14 @@ impl PayStore for PostgresStore {
                 .bind(&wallet_id)
                 .fetch_all(&pool)
                 .await
-                .map_err(|e| PayError::InternalError(format!("postgres load transactions: {e}")))?;
+                .map_err(|e| {
+                    PayError::internal_error(format!("postgres load transactions: {e}"))
+                })?;
 
                 rows.into_iter()
                     .map(|(record_json,)| {
                         serde_json::from_value(record_json).map_err(|e| {
-                            PayError::InternalError(format!(
+                            PayError::internal_error(format!(
                                 "postgres parse transaction record: {e}"
                             ))
                         })
@@ -320,14 +335,14 @@ impl PayStore for PostgresStore {
                         .fetch_optional(&pool)
                         .await
                         .map_err(|e| {
-                            PayError::InternalError(format!("postgres find transaction: {e}"))
+                            PayError::internal_error(format!("postgres find transaction: {e}"))
                         })?;
 
                 match row {
                     Some((record_json,)) => {
                         let record: HistoryRecord =
                             serde_json::from_value(record_json).map_err(|e| {
-                                PayError::InternalError(format!(
+                                PayError::internal_error(format!(
                                     "postgres parse transaction record: {e}"
                                 ))
                             })?;
@@ -347,7 +362,7 @@ impl PayStore for PostgresStore {
         let pool = self.pool.clone();
         let tx_id = tx_id.to_string();
         let memo_json = serde_json::to_value(memo)
-            .map_err(|e| PayError::InternalError(format!("serialize memo: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("serialize memo: {e}")))?;
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -358,21 +373,21 @@ impl PayStore for PostgresStore {
                         .fetch_optional(&pool)
                         .await
                         .map_err(|e| {
-                            PayError::InternalError(format!("postgres read transaction: {e}"))
+                            PayError::internal_error(format!("postgres read transaction: {e}"))
                         })?;
 
                 let Some((record_json,)) = row else {
-                    return Err(PayError::WalletNotFound(format!(
+                    return Err(PayError::wallet_not_found(format!(
                         "transaction {tx_id} not found"
                     )));
                 };
 
                 let mut record: HistoryRecord = serde_json::from_value(record_json)
-                    .map_err(|e| PayError::InternalError(format!("postgres parse record: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("postgres parse record: {e}")))?;
                 record.local_memo = serde_json::from_value(memo_json)
-                    .map_err(|e| PayError::InternalError(format!("postgres parse memo: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("postgres parse memo: {e}")))?;
                 let updated_json = serde_json::to_value(&record).map_err(|e| {
-                    PayError::InternalError(format!("serialize updated record: {e}"))
+                    PayError::internal_error(format!("serialize updated record: {e}"))
                 })?;
 
                 sqlx::query("UPDATE transactions SET record = $1 WHERE transaction_id = $2")
@@ -381,7 +396,7 @@ impl PayStore for PostgresStore {
                     .execute(&pool)
                     .await
                     .map_err(|e| {
-                        PayError::InternalError(format!("postgres update transaction memo: {e}"))
+                        PayError::internal_error(format!("postgres update transaction memo: {e}"))
                     })?;
                 Ok(())
             })
@@ -406,23 +421,23 @@ impl PayStore for PostgresStore {
                         .fetch_optional(&pool)
                         .await
                         .map_err(|e| {
-                            PayError::InternalError(format!("postgres read transaction: {e}"))
+                            PayError::internal_error(format!("postgres read transaction: {e}"))
                         })?;
 
                 let Some((record_json,)) = row else {
-                    return Err(PayError::WalletNotFound(format!(
+                    return Err(PayError::wallet_not_found(format!(
                         "transaction {tx_id} not found"
                     )));
                 };
 
                 let mut record: HistoryRecord = serde_json::from_value(record_json)
-                    .map_err(|e| PayError::InternalError(format!("postgres parse record: {e}")))?;
+                    .map_err(|e| PayError::internal_error(format!("postgres parse record: {e}")))?;
                 record.fee = Some(crate::types::Amount {
                     value: fee_value,
                     token: fee_unit,
                 });
                 let updated_json = serde_json::to_value(&record).map_err(|e| {
-                    PayError::InternalError(format!("serialize updated record: {e}"))
+                    PayError::internal_error(format!("serialize updated record: {e}"))
                 })?;
 
                 sqlx::query("UPDATE transactions SET record = $1 WHERE transaction_id = $2")
@@ -431,7 +446,7 @@ impl PayStore for PostgresStore {
                     .execute(&pool)
                     .await
                     .map_err(|e| {
-                        PayError::InternalError(format!("postgres update transaction fee: {e}"))
+                        PayError::internal_error(format!("postgres update transaction fee: {e}"))
                     })?;
                 Ok(())
             })
@@ -455,23 +470,23 @@ impl PayStore for PostgresStore {
                         .fetch_optional(&pool)
                         .await
                         .map_err(|e| {
-                            PayError::InternalError(format!("postgres read transaction: {e}"))
+                            PayError::internal_error(format!("postgres read transaction: {e}"))
                         })?;
 
                 let Some((record_json,)) = row else {
-                    return Err(PayError::WalletNotFound(format!(
+                    return Err(PayError::wallet_not_found(format!(
                         "transaction {tx_id} not found"
                     )));
                 };
 
                 let mut record: crate::types::HistoryRecord = serde_json::from_value(record_json)
                     .map_err(|e| {
-                    PayError::InternalError(format!("postgres parse record: {e}"))
+                    PayError::internal_error(format!("postgres parse record: {e}"))
                 })?;
                 record.status = status;
                 record.confirmed_at_epoch_s = confirmed_at_epoch_s;
                 let updated_json = serde_json::to_value(&record).map_err(|e| {
-                    PayError::InternalError(format!("serialize updated record: {e}"))
+                    PayError::internal_error(format!("serialize updated record: {e}"))
                 })?;
 
                 sqlx::query("UPDATE transactions SET record = $1 WHERE transaction_id = $2")
@@ -480,7 +495,62 @@ impl PayStore for PostgresStore {
                     .execute(&pool)
                     .await
                     .map_err(|e| {
-                        PayError::InternalError(format!("postgres update transaction status: {e}"))
+                        PayError::internal_error(format!("postgres update transaction status: {e}"))
+                    })?;
+                Ok(())
+            })
+        })
+    }
+
+    fn update_transaction_record_reservation_ids(
+        &self,
+        tx_id: &str,
+        reservation_ids: &[u64],
+    ) -> Result<(), PayError> {
+        if reservation_ids.is_empty() {
+            return Ok(());
+        }
+        let pool = self.pool.clone();
+        let tx_id = tx_id.to_string();
+        let reservation_ids = reservation_ids.to_vec();
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let row: Option<(serde_json::Value,)> =
+                    sqlx::query_as("SELECT record FROM transactions WHERE transaction_id = $1")
+                        .bind(&tx_id)
+                        .fetch_optional(&pool)
+                        .await
+                        .map_err(|e| {
+                            PayError::internal_error(format!(
+                                "postgres read transaction for reservation update: {e}"
+                            ))
+                        })?;
+
+                // Best-effort: race window between provider broadcast and the
+                // handler's reservation_ids update means the row may not be
+                // present yet. The reservation_ids still go to the agent on
+                // Output::Sent, so there is nothing to repair here.
+                let Some((record_json,)) = row else {
+                    return Ok(());
+                };
+
+                let mut record: HistoryRecord = serde_json::from_value(record_json)
+                    .map_err(|e| PayError::internal_error(format!("postgres parse record: {e}")))?;
+                record.reservation_ids = reservation_ids;
+                let updated_json = serde_json::to_value(&record).map_err(|e| {
+                    PayError::internal_error(format!("serialize updated record: {e}"))
+                })?;
+
+                sqlx::query("UPDATE transactions SET record = $1 WHERE transaction_id = $2")
+                    .bind(&updated_json)
+                    .bind(&tx_id)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| {
+                        PayError::internal_error(format!(
+                            "postgres update transaction reservation_ids: {e}"
+                        ))
                     })?;
                 Ok(())
             })

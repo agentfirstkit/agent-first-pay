@@ -1,4 +1,4 @@
-use super::config::{ConfigPatch, RuntimeConfig};
+use super::config::RuntimeConfig;
 use super::domain::*;
 use super::limits::*;
 use crate::store::wallet::WalletMetadata;
@@ -8,6 +8,31 @@ use std::collections::BTreeMap;
 use super::domain::deserialize_local_memo;
 
 pub const JSON_PROTOCOL_VERSION: u32 = 1;
+
+/// Wire-level wrapper for every Input. Carries cross-cutting flags (dry_run,
+/// future: request_metadata) so handlers don't have to thread them through
+/// each variant. JSON layout: `{"dry_run": true, "code": "send", ...input fields}`.
+/// Plain Input JSON (no dry_run field) still deserializes via #[serde(default)].
+/// Note: idempotency_key lives on the individual Send/CashuSend variants (not
+/// here) because it only applies to value-moving operations.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Request {
+    /// When true, every handler validates the request and emits Output::DryRun
+    /// instead of executing. Works across cli/pipe/rpc/rest modes uniformly.
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(flatten)]
+    pub input: Input,
+}
+
+impl Request {
+    pub fn from_input(input: Input) -> Self {
+        Self {
+            dry_run: false,
+            input,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct Trace {
@@ -74,6 +99,12 @@ pub enum Input {
         /// Electrum server URL (btc electrum only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         btc_electrum_url: Option<String>,
+        /// Solana cluster tag: `"mainnet-beta"`, `"devnet"`, or `"testnet"`.
+        /// When set, the daemon stores it on the wallet and refuses sends if
+        /// the active RPC endpoint heuristically belongs to a different
+        /// cluster. Omit on non-sol wallets.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sol_cluster: Option<String>,
     },
     #[serde(rename = "ln_wallet_create")]
     LnWalletCreate {
@@ -150,6 +181,11 @@ pub enum Input {
         /// Restrict to wallets on these mints (tried in order).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mints: Option<Vec<String>>,
+        /// Agent-supplied opaque key (≤128 chars). Two CashuSend calls with the
+        /// same key replay the first terminal output instead of re-minting.
+        /// Mismatched body returns `idempotency_conflict`. Persisted for 24h.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     #[serde(rename = "cashu_receive")]
     CashuReceive {
@@ -166,6 +202,11 @@ pub enum Input {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         network: Option<Network>,
         to: String,
+        /// Amount in the network's base unit (sats / lamports / wei). Required for
+        /// EVM/SOL/BTC. Optional for Lightning when `to` is an amount-bearing
+        /// invoice. Cashu sends go through CashuSend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amount: Option<Amount>,
         #[serde(default)]
         onchain_memo: Option<String>,
         #[serde(default, deserialize_with = "deserialize_local_memo")]
@@ -173,6 +214,18 @@ pub enum Input {
         /// Restrict to wallets on these mints (cashu only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mints: Option<Vec<String>>,
+        /// EVM-only: if set, the daemon verifies that the wallet's chain_id
+        /// matches this value before broadcasting. Mismatch returns
+        /// `wrong_chain` so an agent that thinks it is talking to Base does
+        /// not accidentally broadcast on Arbitrum / Optimism / Mainnet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain_id: Option<u64>,
+        /// Agent-supplied opaque key (≤128 chars). Two Send calls with the
+        /// same key replay the first terminal output (Sent / AccountingInconsistent)
+        /// instead of re-broadcasting. Mismatched body returns
+        /// `idempotency_conflict`. Persisted for 24h.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
 
     #[serde(rename = "restore")]
@@ -222,6 +275,16 @@ pub enum Input {
     #[serde(rename = "limit_set")]
     LimitSet { id: String, limits: Vec<SpendLimit> },
 
+    #[serde(rename = "reconcile_reservation")]
+    ReconcileReservation {
+        id: String,
+        reservation_id: u64,
+        action: ReconcileAction,
+        /// Operator-supplied free-form explanation (1..=512 chars). Stored on
+        /// the reservation for audit; emitted in the daemon log.
+        reason: String,
+    },
+
     #[serde(rename = "wallet_config_show")]
     WalletConfigShow { id: String, wallet: String },
     #[serde(rename = "wallet_config_set")]
@@ -250,14 +313,48 @@ pub enum Input {
         symbol: String,
     },
 
-    #[serde(rename = "config")]
-    Config(ConfigPatch),
-    #[serde(rename = "config_show")]
-    ConfigShow { id: String },
+    /// Get a config key (omit key to show all).
+    #[serde(rename = "config_get")]
+    ConfigGet { id: String, key: Option<String> },
+    /// Set a config key.
+    #[serde(rename = "config_set")]
+    ConfigSet {
+        id: String,
+        key: String,
+        #[serde(default)]
+        values: Vec<String>,
+    },
     #[serde(rename = "version")]
     Version,
     #[serde(rename = "close")]
     Close,
+    /// Return the self-describing wire schema. Available in every mode so an
+    /// agent can discover the operation set, field shapes, error codes, and
+    /// local-only flags without scraping `--help` or the source tree.
+    #[serde(rename = "schema")]
+    Schema,
+}
+
+/// Operator action when calling `Input::ReconcileReservation` to repair a spend
+/// reservation the daemon cannot resolve on its own. `Confirm` is for the case
+/// where the network operation actually succeeded but the daemon never observed
+/// (or could not record) the confirmation — the operator vouches that the money
+/// did leave and the ledger should reflect it. `Cancel` is the converse: the
+/// operator knows the payment never happened and wants to release the budget.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileAction {
+    Confirm,
+    Cancel,
+}
+
+impl ReconcileAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReconcileAction::Confirm => "confirm",
+            ReconcileAction::Cancel => "cancel",
+        }
+    }
 }
 
 impl Input {
@@ -273,12 +370,13 @@ impl Input {
                 | Input::LimitAdd { .. }
                 | Input::LimitRemove { .. }
                 | Input::LimitSet { .. }
+                | Input::ReconcileReservation { .. }
                 | Input::WalletConfigSet { .. }
                 | Input::WalletConfigTokenAdd { .. }
                 | Input::WalletConfigTokenRemove { .. }
                 | Input::Restore { .. }
-                | Input::Config(_)
-                | Input::ConfigShow { .. }
+                | Input::ConfigGet { .. }
+                | Input::ConfigSet { .. }
         )
     }
 }
@@ -344,6 +442,11 @@ pub enum Output {
         #[serde(skip_serializing_if = "Option::is_none")]
         fee: Option<Amount>,
         token: String,
+        /// Spend-ledger reservation ids the daemon successfully confirmed for
+        /// this payment. An agent can use these to drive future reconciliation
+        /// or cancel flows. Empty when no spend limits were enforced.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reservation_ids: Vec<u64>,
         trace: Trace,
     },
 
@@ -382,6 +485,18 @@ pub enum Output {
         rule_id: String,
         trace: Trace,
     },
+    #[serde(rename = "reconciled")]
+    Reconciled {
+        id: String,
+        reservation_id: u64,
+        action: ReconcileAction,
+        /// One of `pending` / `expired` / `confirmed` / `cancelled` — the status
+        /// the reservation held before this reconcile call. Lets an audit log
+        /// reconstruct what the operator was looking at when they acted.
+        previous_status: String,
+        new_status: String,
+        trace: Trace,
+    },
     #[serde(rename = "limit_removed")]
     LimitRemoved {
         id: String,
@@ -410,6 +525,25 @@ pub enum Output {
         remaining_s: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        trace: Trace,
+    },
+
+    /// Emitted when a payment was broadcast to the network successfully but the
+    /// local spend-ledger failed to record its confirmation (e.g. storage I/O
+    /// error mid-flight). The funds left the wallet; the ledger does NOT reflect
+    /// them, so future limit checks under-count the spend. An operator must
+    /// reconcile manually. Agents should treat this as a hard failure and never
+    /// retry the original request — the side-effect already happened.
+    #[serde(rename = "accounting_inconsistent")]
+    AccountingInconsistent {
+        id: String,
+        /// The network transaction that succeeded.
+        transaction_id: String,
+        /// IDs of the ledger reservations that could not be confirmed.
+        reservation_ids: Vec<u64>,
+        /// Concatenated error messages from confirm attempts (last error per id).
+        confirm_errors: Vec<String>,
+        hint: String,
         trace: Trace,
     },
 
@@ -450,6 +584,11 @@ pub enum Output {
         fee: Option<Amount>,
         #[serde(skip_serializing_if = "Option::is_none")]
         preimage: Option<String>,
+        /// Spend-ledger reservation ids the daemon successfully confirmed for
+        /// this payment. An agent can use these to drive future reconciliation
+        /// or cancel flows. Empty when no spend limits were enforced.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reservation_ids: Vec<u64>,
         trace: Trace,
     },
 
@@ -526,6 +665,11 @@ pub enum Output {
         #[serde(skip_serializing_if = "Option::is_none")]
         hint: Option<String>,
         retryable: bool,
+        /// Suggested minimum delay before the agent retries, in milliseconds.
+        /// Set on `busy` / `rate_limited` / `temporary_network_error` so an
+        /// agent can pace retries without re-implementing daemon backoff.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
         trace: Trace,
     },
 
@@ -540,6 +684,13 @@ pub enum Output {
 
     #[serde(rename = "config")]
     Config(RuntimeConfig),
+    /// Single config key result from config_get.
+    #[serde(rename = "config_value")]
+    ConfigValue {
+        key: String,
+        value: serde_json::Value,
+        trace: Trace,
+    },
     #[serde(rename = "version")]
     Version {
         version: String,
@@ -548,6 +699,11 @@ pub enum Output {
     },
     #[serde(rename = "close")]
     Close { message: String, trace: CloseTrace },
+    #[serde(rename = "schema")]
+    Schema {
+        schema: serde_json::Value,
+        trace: Trace,
+    },
     #[serde(rename = "log")]
     Log {
         event: String,
@@ -622,95 +778,128 @@ mod tests {
     #[test]
     fn local_only_checks() {
         // Already local-only
-        assert!(Input::WalletShowSeed {
-            id: "t".into(),
-            wallet: "w".into(),
-        }
-        .is_local_only());
+        assert!(
+            Input::WalletShowSeed {
+                id: "t".into(),
+                wallet: "w".into(),
+            }
+            .is_local_only()
+        );
 
-        assert!(Input::WalletClose {
-            id: "t".into(),
-            wallet: "w".into(),
-            dangerously_skip_balance_check_and_may_lose_money: true,
-        }
-        .is_local_only());
+        assert!(
+            Input::WalletClose {
+                id: "t".into(),
+                wallet: "w".into(),
+                dangerously_skip_balance_check_and_may_lose_money: true,
+            }
+            .is_local_only()
+        );
 
-        assert!(!Input::WalletClose {
-            id: "t".into(),
-            wallet: "w".into(),
-            dangerously_skip_balance_check_and_may_lose_money: false,
-        }
-        .is_local_only());
+        assert!(
+            !Input::WalletClose {
+                id: "t".into(),
+                wallet: "w".into(),
+                dangerously_skip_balance_check_and_may_lose_money: false,
+            }
+            .is_local_only()
+        );
 
         // Limit write ops
-        assert!(Input::LimitAdd {
-            id: "t".into(),
-            limit: SpendLimit {
-                rule_id: None,
-                scope: SpendScope::GlobalUsdCents,
-                network: None,
-                wallet: None,
-                window_s: 3600,
-                max_spend: 1000,
-                token: None,
-            },
-        }
-        .is_local_only());
+        assert!(
+            Input::LimitAdd {
+                id: "t".into(),
+                limit: SpendLimit {
+                    rule_id: None,
+                    scope: SpendScope::GlobalUsdCents,
+                    network: None,
+                    wallet: None,
+                    window_s: 3600,
+                    max_spend: 1000,
+                    token: None,
+                },
+            }
+            .is_local_only()
+        );
 
-        assert!(Input::LimitRemove {
-            id: "t".into(),
-            rule_id: "r_1".into(),
-        }
-        .is_local_only());
+        assert!(
+            Input::LimitRemove {
+                id: "t".into(),
+                rule_id: "r_1".into(),
+            }
+            .is_local_only()
+        );
 
-        assert!(Input::LimitSet {
-            id: "t".into(),
-            limits: vec![],
-        }
-        .is_local_only());
+        assert!(
+            Input::LimitSet {
+                id: "t".into(),
+                limits: vec![],
+            }
+            .is_local_only()
+        );
 
         // Limit read is NOT local-only
         assert!(!Input::LimitList { id: "t".into() }.is_local_only());
 
         // Wallet config write ops
-        assert!(Input::WalletConfigSet {
-            id: "t".into(),
-            wallet: "w".into(),
-            label: None,
-            rpc_endpoints: vec![],
-            chain_id: None,
-        }
-        .is_local_only());
+        assert!(
+            Input::WalletConfigSet {
+                id: "t".into(),
+                wallet: "w".into(),
+                label: None,
+                rpc_endpoints: vec![],
+                chain_id: None,
+            }
+            .is_local_only()
+        );
 
-        assert!(Input::WalletConfigTokenAdd {
-            id: "t".into(),
-            wallet: "w".into(),
-            symbol: "dai".into(),
-            address: "0x".into(),
-            decimals: 18,
-        }
-        .is_local_only());
+        assert!(
+            Input::WalletConfigTokenAdd {
+                id: "t".into(),
+                wallet: "w".into(),
+                symbol: "dai".into(),
+                address: "0x".into(),
+                decimals: 18,
+            }
+            .is_local_only()
+        );
 
-        assert!(Input::WalletConfigTokenRemove {
-            id: "t".into(),
-            wallet: "w".into(),
-            symbol: "dai".into(),
-        }
-        .is_local_only());
+        assert!(
+            Input::WalletConfigTokenRemove {
+                id: "t".into(),
+                wallet: "w".into(),
+                symbol: "dai".into(),
+            }
+            .is_local_only()
+        );
 
         // Wallet config read is NOT local-only
-        assert!(!Input::WalletConfigShow {
-            id: "t".into(),
-            wallet: "w".into(),
-        }
-        .is_local_only());
+        assert!(
+            !Input::WalletConfigShow {
+                id: "t".into(),
+                wallet: "w".into(),
+            }
+            .is_local_only()
+        );
 
         // Restore (seed over RPC)
-        assert!(Input::Restore {
-            id: "t".into(),
-            wallet: "w".into(),
-        }
-        .is_local_only());
+        assert!(
+            Input::Restore {
+                id: "t".into(),
+                wallet: "w".into(),
+            }
+            .is_local_only()
+        );
+
+        // Reconcile reservation — operator action, never via RPC
+        assert!(
+            Input::ReconcileReservation {
+                id: "t".into(),
+                reservation_id: 1,
+                action: ReconcileAction::Confirm,
+                reason: "manual override".into(),
+            }
+            .is_local_only()
+        );
     }
 
     #[test]
@@ -796,6 +985,7 @@ mod tests {
             btc_core_url: None,
             btc_core_auth_secret: Some("btc-core-secret".to_string()),
             btc_electrum_url: None,
+            sol_cluster: None,
         };
         let ln_request = LnWalletCreateRequest {
             backend: LnWalletBackend::Nwc,
@@ -906,6 +1096,62 @@ mod tests {
                 assert_eq!(limit, None);
             }
             other => panic!("expected HistoryUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_accepts_plain_input_json_without_dry_run_field() {
+        let json = r#"{"code":"version"}"#;
+        let request: Request = serde_json::from_str(json).expect("plain input parses as Request");
+        assert!(!request.dry_run);
+        assert!(matches!(request.input, Input::Version));
+    }
+
+    #[test]
+    fn request_parses_dry_run_alongside_flattened_input() {
+        let json = r#"{
+            "dry_run": true,
+            "code": "send",
+            "id": "t",
+            "to": "0xabc",
+            "amount": {"value": 1000, "token": "eth"}
+        }"#;
+        let request: Request = serde_json::from_str(json).expect("dry_run request parses");
+        assert!(request.dry_run);
+        match request.input {
+            Input::Send { amount, to, .. } => {
+                assert_eq!(to, "0xabc");
+                let amount = amount.expect("amount field deserialized");
+                assert_eq!(amount.value, 1000);
+                assert_eq!(amount.token, "eth");
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_chain_id_parses_and_defaults_to_none() {
+        let with_chain = r#"{"code":"send","id":"t","to":"0xabc","chain_id":42161}"#;
+        let input: Input = serde_json::from_str(with_chain).expect("with chain_id parses");
+        match input {
+            Input::Send { chain_id, .. } => assert_eq!(chain_id, Some(42161)),
+            other => panic!("expected Send, got {other:?}"),
+        }
+        let without = r#"{"code":"send","id":"t","to":"0xabc"}"#;
+        let input: Input = serde_json::from_str(without).expect("without chain_id parses");
+        match input {
+            Input::Send { chain_id, .. } => assert_eq!(chain_id, None),
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_amount_field_is_optional() {
+        let json = r#"{"code":"send","id":"t","to":"bitcoin:bc1q?amount=100"}"#;
+        let input: Input = serde_json::from_str(json).expect("send without amount parses");
+        match input {
+            Input::Send { amount, .. } => assert!(amount.is_none()),
+            other => panic!("expected Send, got {other:?}"),
         }
     }
 }

@@ -3,21 +3,30 @@ use crate::store::PayStore;
 use crate::types::*;
 use std::time::Instant;
 
-use super::helpers::*;
 use super::App;
+use super::helpers::*;
+
+/// Pick a daemon endpoint to suggest in `ConfigureOnDaemon` hints. Returns the
+/// first configured `afpay_rpc` endpoint, since limit-bearing daemons are typically
+/// the user's primary RPC backend.
+async fn primary_daemon_endpoint(app: &App) -> Option<String> {
+    let cfg = app.config.read().await;
+    cfg.afpay_rpc.values().next().map(|c| c.endpoint.clone())
+}
 
 pub(crate) async fn dispatch_limit(app: &App, input: Input) {
     match input {
         Input::LimitAdd { id, mut limit } => {
             let start = Instant::now();
             if !app.enforce_limits {
+                let daemon_endpoint = primary_daemon_endpoint(app).await;
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented(
-                        "limit_add is unavailable when limits are not enforced locally; configure limits on the RPC daemon"
-                            .to_string(),
-                    ),
+                    &PayError::ConfigureOnDaemon {
+                        operation: "limit_add".to_string(),
+                        daemon_endpoint,
+                    },
                     start,
                 )
                 .await;
@@ -25,16 +34,17 @@ pub(crate) async fn dispatch_limit(app: &App, input: Input) {
             }
 
             // Auto-fill provider for wallet-scope rules that don't have one
-            if limit.scope == SpendScope::Wallet && limit.network.is_none() {
-                if let Some(wallet_id) = limit.wallet.as_deref() {
-                    match require_store(app).and_then(|s| s.load_wallet_metadata(wallet_id)) {
-                        Ok(meta) => {
-                            limit.network = Some(meta.network.to_string());
-                        }
-                        Err(e) => {
-                            emit_error(&app.writer, Some(id), &e, start).await;
-                            return;
-                        }
+            if limit.scope == SpendScope::Wallet
+                && limit.network.is_none()
+                && let Some(wallet_id) = limit.wallet.as_deref()
+            {
+                match require_store(app).and_then(|s| s.load_wallet_metadata(wallet_id)) {
+                    Ok(meta) => {
+                        limit.network = Some(meta.network.to_string());
+                    }
+                    Err(e) => {
+                        emit_error(&app.writer, Some(id), &e, start).await;
+                        return;
                     }
                 }
             }
@@ -57,13 +67,14 @@ pub(crate) async fn dispatch_limit(app: &App, input: Input) {
         Input::LimitRemove { id, rule_id } => {
             let start = Instant::now();
             if !app.enforce_limits {
+                let daemon_endpoint = primary_daemon_endpoint(app).await;
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented(
-                        "limit_remove is unavailable when limits are not enforced locally; configure limits on the RPC daemon"
-                            .to_string(),
-                    ),
+                    &PayError::ConfigureOnDaemon {
+                        operation: "limit_remove".to_string(),
+                        daemon_endpoint,
+                    },
                     start,
                 )
                 .await;
@@ -117,13 +128,14 @@ pub(crate) async fn dispatch_limit(app: &App, input: Input) {
         Input::LimitSet { id, mut limits } => {
             let start = Instant::now();
             if !app.enforce_limits {
+                let daemon_endpoint = primary_daemon_endpoint(app).await;
                 emit_error(
                     &app.writer,
                     Some(id),
-                    &PayError::NotImplemented(
-                        "limit_set is unavailable when limits are not enforced locally; configure limits on the RPC daemon"
-                            .to_string(),
-                    ),
+                    &PayError::ConfigureOnDaemon {
+                        operation: "limit_set".to_string(),
+                        daemon_endpoint,
+                    },
                     start,
                 )
                 .await;
@@ -132,16 +144,17 @@ pub(crate) async fn dispatch_limit(app: &App, input: Input) {
 
             // Auto-fill provider for wallet-scope rules that don't have one
             for rule in &mut limits {
-                if rule.scope == SpendScope::Wallet && rule.network.is_none() {
-                    if let Some(wallet_id) = rule.wallet.as_deref() {
-                        match require_store(app).and_then(|s| s.load_wallet_metadata(wallet_id)) {
-                            Ok(meta) => {
-                                rule.network = Some(meta.network.to_string());
-                            }
-                            Err(e) => {
-                                emit_error(&app.writer, Some(id), &e, start).await;
-                                return;
-                            }
+                if rule.scope == SpendScope::Wallet
+                    && rule.network.is_none()
+                    && let Some(wallet_id) = rule.wallet.as_deref()
+                {
+                    match require_store(app).and_then(|s| s.load_wallet_metadata(wallet_id)) {
+                        Ok(meta) => {
+                            rule.network = Some(meta.network.to_string());
+                        }
+                        Err(e) => {
+                            emit_error(&app.writer, Some(id), &e, start).await;
+                            return;
                         }
                     }
                 }

@@ -28,7 +28,7 @@ fn push_migration_log(entry: MigrationLog) {
 pub fn open_database(path: &Path) -> Result<Database, PayError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| PayError::InternalError(format!("mkdir {}: {e}", parent.display())))?;
+            .map_err(|e| PayError::internal_error(format!("mkdir {}: {e}", parent.display())))?;
         set_private_dir_permissions(parent)?;
     }
     let db = if path.exists() {
@@ -36,7 +36,7 @@ pub fn open_database(path: &Path) -> Result<Database, PayError> {
     } else {
         Database::create(path)
     }
-    .map_err(|e| PayError::InternalError(format!("open {}: {e}", path.display())))?;
+    .map_err(|e| PayError::internal_error(format!("open {}: {e}", path.display())))?;
     set_private_file_permissions(path)?;
     Ok(db)
 }
@@ -46,7 +46,7 @@ fn set_private_dir_permissions(path: &Path) -> Result<(), PayError> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| PayError::InternalError(format!("chmod 700 {}: {e}", path.display())))
+        .map_err(|e| PayError::internal_error(format!("chmod 700 {}: {e}", path.display())))
 }
 
 #[cfg(not(unix))]
@@ -59,7 +59,7 @@ fn set_private_file_permissions(path: &Path) -> Result<(), PayError> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| PayError::InternalError(format!("chmod 600 {}: {e}", path.display())))
+        .map_err(|e| PayError::internal_error(format!("chmod 600 {}: {e}", path.display())))
 }
 
 #[cfg(not(unix))]
@@ -77,7 +77,7 @@ pub fn open_and_migrate(
 
     if current < target_version {
         if migrations.len() < target_version as usize {
-            return Err(PayError::InternalError(format!(
+            return Err(PayError::internal_error(format!(
                 "schema: need {} migrations but only {} provided for {}",
                 target_version,
                 migrations.len(),
@@ -105,13 +105,13 @@ pub fn open_and_migrate(
 fn read_schema_version(db: &Database) -> Result<u64, PayError> {
     let read_txn = db
         .begin_read()
-        .map_err(|e| PayError::InternalError(format!("schema begin_read: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("schema begin_read: {e}")))?;
     let Ok(table) = read_txn.open_table(SCHEMA_TABLE) else {
         return Ok(0);
     };
     match table
         .get(VERSION_KEY)
-        .map_err(|e| PayError::InternalError(format!("schema read version: {e}")))?
+        .map_err(|e| PayError::internal_error(format!("schema read version: {e}")))?
     {
         Some(v) => Ok(v.value()),
         None => Ok(0),
@@ -121,18 +121,18 @@ fn read_schema_version(db: &Database) -> Result<u64, PayError> {
 fn write_schema_version(db: &Database, version: u64) -> Result<(), PayError> {
     let write_txn = db
         .begin_write()
-        .map_err(|e| PayError::InternalError(format!("schema begin_write: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("schema begin_write: {e}")))?;
     {
         let mut table = write_txn
             .open_table(SCHEMA_TABLE)
-            .map_err(|e| PayError::InternalError(format!("schema open _schema: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("schema open _schema: {e}")))?;
         table
             .insert(VERSION_KEY, version)
-            .map_err(|e| PayError::InternalError(format!("schema write version: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("schema write version: {e}")))?;
     }
     write_txn
         .commit()
-        .map_err(|e| PayError::InternalError(format!("schema commit: {e}")))?;
+        .map_err(|e| PayError::internal_error(format!("schema commit: {e}")))?;
     Ok(())
 }
 
@@ -140,6 +140,17 @@ fn write_schema_version(db: &Database, version: u64) -> Result<(), PayError> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// `drain_migration_log()` clears the *entire* process-global log, so tests
+    /// that drain it must not run concurrently — one test's drain would race
+    /// another's push under cargo's parallel runner. Every draining test locks
+    /// this guard for its whole body to serialize them. Recovers from poison so
+    /// a failing test surfaces its own assertion rather than a poison panic.
+    static LOG_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    fn lock_log() -> std::sync::MutexGuard<'static, ()> {
+        LOG_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn new_database_has_version_zero() {
@@ -151,6 +162,7 @@ mod tests {
 
     #[test]
     fn open_and_migrate_stamps_version() {
+        let _guard = lock_log();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("stamps.redb");
         let _ = drain_migration_log();
@@ -165,6 +177,7 @@ mod tests {
 
     #[test]
     fn open_and_migrate_skips_when_current() {
+        let _guard = lock_log();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("skip.redb");
 
@@ -194,31 +207,31 @@ mod tests {
                 &|db| {
                     let w = db
                         .begin_write()
-                        .map_err(|e| PayError::InternalError(e.to_string()))?;
+                        .map_err(|e| PayError::internal_error(e.to_string()))?;
                     {
                         let mut t = w
                             .open_table(TableDefinition::<&str, u64>::new("_test_marker"))
-                            .map_err(|e| PayError::InternalError(e.to_string()))?;
+                            .map_err(|e| PayError::internal_error(e.to_string()))?;
                         t.insert("v0_to_v1", 1u64)
-                            .map_err(|e| PayError::InternalError(e.to_string()))?;
+                            .map_err(|e| PayError::internal_error(e.to_string()))?;
                     }
                     w.commit()
-                        .map_err(|e| PayError::InternalError(e.to_string()))?;
+                        .map_err(|e| PayError::internal_error(e.to_string()))?;
                     Ok(())
                 },
                 &|db| {
                     let w = db
                         .begin_write()
-                        .map_err(|e| PayError::InternalError(e.to_string()))?;
+                        .map_err(|e| PayError::internal_error(e.to_string()))?;
                     {
                         let mut t = w
                             .open_table(TableDefinition::<&str, u64>::new("_test_marker"))
-                            .map_err(|e| PayError::InternalError(e.to_string()))?;
+                            .map_err(|e| PayError::internal_error(e.to_string()))?;
                         t.insert("v1_to_v2", 2u64)
-                            .map_err(|e| PayError::InternalError(e.to_string()))?;
+                            .map_err(|e| PayError::internal_error(e.to_string()))?;
                     }
                     w.commit()
-                        .map_err(|e| PayError::InternalError(e.to_string()))?;
+                        .map_err(|e| PayError::internal_error(e.to_string()))?;
                     Ok(())
                 },
             ],

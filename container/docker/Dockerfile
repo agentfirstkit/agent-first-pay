@@ -1,5 +1,24 @@
-# ── Build stage ──
-FROM rust:1.94-bookworm AS builder
+# Runtime image for the afpay daemon (supervisord runs afpay + optional bitcoind
+# + phoenixd). See docs and container/README.md.
+#
+# The afpay binary comes from ONE of two source stages, picked by the
+# AFPAY_BIN_FROM build-arg:
+#   builder    — compile from a source checkout (default; dev / `--from-source`).
+#                Build context is the spore root:
+#                  docker build -t afpay -f container/docker/Dockerfile .
+#   downloader — download the matching prebuilt release; what `afpay container
+#                install` uses. Needs --build-arg AFPAY_VERSION + AFPAY_TARGET.
+# BuildKit only builds the selected stage, so the download path pulls no Rust
+# toolchain and needs no source tree, while the from-source path makes no network
+# call for a release. (The prebuilt release ships afpay's default feature set — a
+# superset of the from-source FEATURES below — so it is at least as capable.)
+
+# Selects which source stage below provides the binary. Global (before the first
+# FROM) so it is usable on a FROM line.
+ARG AFPAY_BIN_FROM=builder
+
+# ── Source stage A: compile from a checkout (default) ──
+FROM rust:1-bookworm AS builder
 
 ARG FEATURES="btc-esplora,cashu,ln-phoenixd,redb,rest,exchange-rate,backup"
 
@@ -8,13 +27,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+# NOT .cargo/ (its dev path override to ../agent-first-data is absent here,
+# so agent-first-data resolves from crates.io per Cargo.lock).
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ proto/
 COPY src/ src/
 COPY tests/ tests/
+# Embedded at compile time via include_str!: the skill (skill_admin.rs) and the
+# container build recipe + scripts (container.rs). Only container/docker/ — not
+# all of container/ (apple-container/ holds local wallet state).
+COPY skills/ skills/
+COPY container/docker/ container/docker/
 
 RUN cargo build --release --no-default-features --features "${FEATURES}" \
     && cp target/release/afpay /usr/local/bin/afpay
+
+# ── Source stage B: download the matching prebuilt release ──
+FROM debian:bookworm-slim AS downloader
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+# Hard-pinned by the driver: its own version + the linux triple for the image
+# arch. A 404 here means no release asset exists for this version/arch — the
+# driver surfaces that and points at the from-source path.
+ARG AFPAY_VERSION
+ARG AFPAY_TARGET
+RUN set -eu; \
+    base="https://github.com/agentfirstkit/agent-first-pay/releases/download/v${AFPAY_VERSION}"; \
+    archive="afpay-v${AFPAY_VERSION}-${AFPAY_TARGET}.tar.gz"; \
+    cd /tmp; \
+    curl -fsSL -o "$archive" "${base}/${archive}"; \
+    curl -fsSL -o "${archive}.sha256" "${base}/${archive}.sha256"; \
+    sha256sum -c "${archive}.sha256"; \
+    tar -xzf "$archive" -C /usr/local/bin afpay; \
+    chmod +x /usr/local/bin/afpay
+
+# ── Pick the source stage that provides /usr/local/bin/afpay ──
+FROM ${AFPAY_BIN_FROM} AS afpay_bin
 
 # ── Runtime stage ──
 FROM debian:bookworm-slim
@@ -27,7 +75,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         supervisor ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local/bin/afpay /usr/local/bin/afpay
+COPY --from=afpay_bin /usr/local/bin/afpay /usr/local/bin/afpay
 
 # Install phoenixd if requested
 RUN if [ "$INSTALL_PHOENIXD" = "true" ]; then \

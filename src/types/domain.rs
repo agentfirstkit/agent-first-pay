@@ -72,6 +72,9 @@ pub struct WalletCreateRequest {
     /// Electrum server URL (btc electrum backend only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub btc_electrum_url: Option<String>,
+    /// Solana cluster tag (sol only): "mainnet-beta", "devnet", "testnet".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sol_cluster: Option<String>,
 }
 
 impl std::fmt::Debug for WalletCreateRequest {
@@ -95,6 +98,7 @@ impl std::fmt::Debug for WalletCreateRequest {
                 &self.btc_core_auth_secret.as_ref().map(|_| "***"),
             )
             .field("btc_electrum_url", &self.btc_electrum_url)
+            .field("sol_cluster", &self.sol_cluster)
             .finish()
     }
 }
@@ -385,6 +389,12 @@ pub struct HistoryRecord {
     /// Reference keys found in the transaction (sol only, per strain-payment-method-solana).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_keys: Option<Vec<String>>,
+    /// Spend-ledger reservation ids debited for this payment. Cross-link so
+    /// `history list` / `history status` can show which spend-limit budgets
+    /// this transaction consumed, and so an operator reconciling
+    /// `AccountingInconsistent` can trace either way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reservation_ids: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

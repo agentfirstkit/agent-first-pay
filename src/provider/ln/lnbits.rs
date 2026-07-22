@@ -1,6 +1,6 @@
 use super::{
-    parse_bolt11_amount_sats, LnBackend, LnInvoiceResult, LnInvoiceStatus, LnPayResult,
-    LnPaymentInfo, LnPaymentStatus,
+    LnBackend, LnInvoiceResult, LnInvoiceStatus, LnPayResult, LnPaymentInfo, LnPaymentStatus,
+    parse_bolt11_amount_sats,
 };
 use crate::provider::PayError;
 use crate::types::BalanceInfo;
@@ -87,7 +87,7 @@ struct LnbitsPaymentRecord {
 }
 
 fn map_reqwest_err(e: reqwest::Error) -> PayError {
-    PayError::NetworkError(format!("lnbits: {e}"))
+    PayError::network_error(format!("lnbits: {e}"))
 }
 
 fn msats_to_sats_ceil(msats: u64) -> u64 {
@@ -159,7 +159,7 @@ impl LnBackend for LnbitsBackend {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "lnbits pay {status}: {text}"
             )));
         }
@@ -211,7 +211,7 @@ impl LnBackend for LnbitsBackend {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "lnbits invoice {status}: {text}"
             )));
         }
@@ -236,7 +236,7 @@ impl LnBackend for LnbitsBackend {
         }
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "lnbits check {status}: {text}"
             )));
         }
@@ -244,7 +244,7 @@ impl LnBackend for LnbitsBackend {
         let paid = data.get("paid").and_then(Value::as_bool).unwrap_or(false);
         if paid {
             let amount_msats = payment_amount_msats(&data).ok_or_else(|| {
-                PayError::NetworkError("lnbits paid invoice missing amount".to_string())
+                PayError::network_error("lnbits paid invoice missing amount".to_string())
             })?;
             Ok(LnInvoiceStatus::Paid {
                 confirmed_amount_sats: msats_to_sats_ceil(amount_msats),
@@ -265,7 +265,7 @@ impl LnBackend for LnbitsBackend {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "lnbits wallet {status}: {text}"
             )));
         }
@@ -294,7 +294,7 @@ impl LnBackend for LnbitsBackend {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "lnbits payments {status}: {text}"
             )));
         }

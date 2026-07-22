@@ -22,8 +22,8 @@
 
 use agent_first_pay::provider::evm::EvmProvider;
 use agent_first_pay::provider::{PayError, PayProvider};
-use agent_first_pay::store::redb_store::RedbStore;
 use agent_first_pay::store::StorageBackend;
+use agent_first_pay::store::redb_store::RedbStore;
 use agent_first_pay::types::{Network, WalletCreateRequest};
 use std::sync::Arc;
 
@@ -57,6 +57,7 @@ async fn evm_live_create_and_list() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -99,6 +100,7 @@ async fn evm_live_balance_new_wallet() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -134,6 +136,7 @@ async fn evm_live_balance_all() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -169,6 +172,7 @@ async fn evm_live_receive_info() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -190,7 +194,7 @@ async fn evm_live_wallet_not_found() {
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
-        matches!(err, PayError::WalletNotFound(_)),
+        matches!(err, PayError::WalletNotFound { .. }),
         "expected WalletNotFound, got: {err}"
     );
 }
@@ -219,6 +223,7 @@ async fn evm_live_close_empty_wallet() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -256,6 +261,7 @@ async fn evm_live_history_empty() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -306,6 +312,7 @@ async fn evm_live_send_native() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -366,6 +373,7 @@ async fn evm_live_send_usdc_token() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();

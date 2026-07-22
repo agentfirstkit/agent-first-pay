@@ -5,8 +5,8 @@ use crate::provider::remote;
 use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use agent_first_data::OutputFormat;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -40,7 +40,7 @@ impl SessionState {
     pub(super) fn new(
         data_dir: String,
         output_format: OutputFormat,
-        log_filters: Vec<String>,
+        log_filters: agent_first_data::LogFilters,
         store: Option<Arc<StorageBackend>>,
     ) -> Self {
         Self {
@@ -50,7 +50,7 @@ impl SessionState {
             request_counter: 0,
             data_dir,
             output_format,
-            log_filters,
+            log_filters: log_filters.as_slice().to_vec(),
             store,
         }
     }
@@ -90,13 +90,13 @@ impl CommandCompleter {
 
     fn wallet_candidates(&self) -> Vec<String> {
         let mut names = Vec::new();
-        if let Some(store) = &self.store {
-            if let Ok(wallets) = store.list_wallet_metadata(None) {
-                for w in wallets {
-                    names.push(w.id.clone());
-                    if let Some(label) = &w.label {
-                        names.push(label.clone());
-                    }
+        if let Some(store) = &self.store
+            && let Ok(wallets) = store.list_wallet_metadata(None)
+        {
+            for w in wallets {
+                names.push(w.id.clone());
+                if let Some(label) = &w.label {
+                    names.push(label.clone());
                 }
             }
         }
@@ -876,8 +876,8 @@ fn inject_wallet(argv: &mut Vec<String>, state: &SessionState) {
 
 #[cfg(feature = "interactive")]
 fn render_qr_svg(data: &str) -> Result<String, String> {
-    use qrcode::render::svg;
     use qrcode::QrCode;
+    use qrcode::render::svg;
 
     let code = QrCode::new(data.as_bytes()).map_err(|e| format!("QR encode error: {e}"))?;
     let rendered = code
@@ -918,16 +918,6 @@ pub(super) fn render_output(output: &Output, format: OutputFormat) -> String {
 
 fn render_value(value: &serde_json::Value, format: OutputFormat) -> String {
     crate::output_fmt::render_value_with_policy(value, format)
-}
-
-fn log_matches(filters: &[String], event: &str) -> bool {
-    if filters.is_empty() {
-        return false;
-    }
-    let ev = event.to_ascii_lowercase();
-    filters
-        .iter()
-        .any(|f| f == "*" || f == "all" || ev.starts_with(f.as_str()))
 }
 
 #[derive(Clone, Copy)]
@@ -999,7 +989,7 @@ impl SessionBackend {
     ) -> Vec<serde_json::Value> {
         match self {
             Self::Local { app, rx } => {
-                handler::dispatch(app, input).await;
+                handler::dispatch(app, Request::from_input(input)).await;
                 tokio::task::yield_now().await;
                 let mut results = Vec::new();
                 while let Ok(output) = rx.try_recv() {
@@ -1025,7 +1015,7 @@ impl SessionBackend {
         };
         let app = app.clone();
         tokio::spawn(async move {
-            handler::dispatch(&app, input).await;
+            handler::dispatch(&app, Request::from_input(input)).await;
         })
     }
 
@@ -1161,23 +1151,22 @@ async fn execute_local_command<H: InteractionHost>(
                 _ => (None, false),
             };
 
-            handler::dispatch(app, input).await;
+            handler::dispatch(app, Request::from_input(input)).await;
             tokio::task::yield_now().await;
 
             let mut deposit_quote_id = None;
             while let Ok(output) = rx.try_recv() {
-                if let Output::Log { ref event, .. } = output {
-                    if !log_matches(&state.log_filters, event) {
-                        continue;
-                    }
+                if let Output::Log { ref event, .. } = output
+                    && !agent_first_data::LogFilters::new(state.log_filters.clone()).enabled(event)
+                {
+                    continue;
                 }
                 if let Output::ReceiveInfo {
                     ref receive_info, ..
                 } = output
+                    && let Some(qid) = &receive_info.quote_id
                 {
-                    if let Some(qid) = &receive_info.quote_id {
-                        deposit_quote_id = Some(qid.clone());
-                    }
+                    deposit_quote_id = Some(qid.clone());
                 }
                 host.emit(
                     HostMessageKind::Output,
@@ -1192,33 +1181,33 @@ async fn execute_local_command<H: InteractionHost>(
                 );
             }
 
-            if do_follow_up {
-                if let (Some(wallet), Some(quote_id)) = (deposit_wallet, deposit_quote_id) {
-                    if host.prompt_deposit_claim(&wallet, &quote_id) {
-                        let claim_id = state.next_id();
-                        let input = Input::ReceiveClaim {
-                            id: claim_id,
-                            wallet,
-                            quote_id,
-                        };
-                        handler::dispatch(app, input).await;
-                        tokio::task::yield_now().await;
-                        collect_and_emit(
-                            host,
-                            rx,
-                            state.output_format,
-                            &state.log_filters,
-                            &state.data_dir,
-                            false,
-                        );
-                    } else {
-                        host.emit(
+            if do_follow_up
+                && let (Some(wallet), Some(quote_id)) = (deposit_wallet, deposit_quote_id)
+            {
+                if host.prompt_deposit_claim(&wallet, &quote_id) {
+                    let claim_id = state.next_id();
+                    let input = Input::ReceiveClaim {
+                        id: claim_id,
+                        wallet,
+                        quote_id,
+                    };
+                    handler::dispatch(app, Request::from_input(input)).await;
+                    tokio::task::yield_now().await;
+                    collect_and_emit(
+                        host,
+                        rx,
+                        state.output_format,
+                        &agent_first_data::LogFilters::new(state.log_filters.clone()),
+                        &state.data_dir,
+                        false,
+                    );
+                } else {
+                    host.emit(
                             HostMessageKind::Notice,
                             format!(
                                 "Skipped. To claim later: receive --network cashu --wallet {wallet} --ln-quote-id {quote_id}"
                             ),
                         );
-                    }
                 }
             }
         }
@@ -1257,7 +1246,7 @@ async fn execute_remote_command<H: InteractionHost>(
                 &outputs,
                 &state.data_dir,
                 state.output_format,
-                &state.log_filters,
+                &agent_first_data::LogFilters::new(state.log_filters.clone()),
                 write_qr_svg_file_request,
             );
         }
@@ -1316,7 +1305,9 @@ fn handle_session_command<H: InteractionHost>(
             } else {
                 let joined: Vec<&str> = args.iter().flat_map(|a| a.split(',')).collect();
                 let as_strings: Vec<String> = joined.iter().map(|s| s.to_string()).collect();
-                state.log_filters = agent_first_data::cli_parse_log_filters(&as_strings);
+                state.log_filters = agent_first_data::cli_parse_log_filters(&as_strings)
+                    .as_slice()
+                    .to_vec();
                 host.emit(
                     HostMessageKind::Notice,
                     format!("Log: {}", state.log_filters.join(",")),
@@ -1431,7 +1422,7 @@ async fn resolve_use_remote<H: InteractionHost>(
                 &outputs,
                 &state.data_dir,
                 state.output_format,
-                &state.log_filters,
+                &agent_first_data::LogFilters::new(state.log_filters.clone()),
                 false,
             );
             return;
@@ -1489,15 +1480,15 @@ fn collect_and_emit<H: InteractionHost>(
     host: &mut H,
     rx: &mut mpsc::Receiver<Output>,
     format: OutputFormat,
-    log_filters: &[String],
+    log_filters: &agent_first_data::LogFilters,
     data_dir: &str,
     should_write_qr_svg_file: bool,
 ) {
     while let Ok(output) = rx.try_recv() {
-        if let Output::Log { ref event, .. } = output {
-            if !log_matches(log_filters, event) {
-                continue;
-            }
+        if let Output::Log { ref event, .. } = output
+            && !log_filters.enabled(event)
+        {
+            continue;
         }
         host.emit(HostMessageKind::Output, render_output(&output, format));
         maybe_save_qr_svg_from_output(host, &output, data_dir, format, should_write_qr_svg_file);
@@ -1576,22 +1567,25 @@ fn emit_qr_saved_message<H: InteractionHost>(
     output_format: OutputFormat,
 ) {
     let value = match file_result {
-        Ok(path) => serde_json::json!({
-            "code": "log",
-            "event": "qr",
-            "args": {
+        Ok(path) => serde_json::Value::from(
+            agent_first_data::json_log(serde_json::json!({
+                "level": "info",
+                "message": "QR saved",
+                "event": "qr",
                 "kind": kind,
                 "svg_file": path,
-            },
-            "trace": {"duration_ms": 0},
-        }),
-        Err(error) => serde_json::json!({
-            "code": "error",
-            "error_code": "internal_error",
-            "error": format!("qr svg generation failed: {error}"),
-            "retryable": false,
-            "trace": {"duration_ms": 0},
-        }),
+            }))
+            .trace(serde_json::json!({"duration_ms": 0}))
+            .build(),
+        ),
+        Err(error) => agent_first_data::json_error(
+            "internal_error",
+            &format!("qr svg generation failed: {error}"),
+        )
+        .trace(serde_json::json!({"duration_ms": 0}))
+        .build()
+        .map(Into::into)
+        .unwrap_or(serde_json::Value::Null),
     };
 
     host.emit(HostMessageKind::Output, render_value(&value, output_format));
@@ -1602,16 +1596,17 @@ fn emit_remote_outputs_with_qr<H: InteractionHost>(
     outputs: &[serde_json::Value],
     data_dir: &str,
     format: OutputFormat,
-    log_filters: &[String],
+    log_filters: &agent_first_data::LogFilters,
     should_write_qr_svg_file: bool,
 ) {
     for value in outputs {
-        if let Some("log") = value.get("code").and_then(|v| v.as_str()) {
-            if let Some(event) = value.get("event").and_then(|v| v.as_str()) {
-                if !log_matches(log_filters, event) {
-                    continue;
-                }
-            }
+        let kind = value.get("kind").and_then(|v| v.as_str());
+        let payload = kind.and_then(|kind| value.get(kind)).unwrap_or(value);
+        if (kind == Some("log") || payload.get("code").and_then(|v| v.as_str()) == Some("log"))
+            && let Some(event) = payload.get("event").and_then(|v| v.as_str())
+            && !log_filters.enabled(event)
+        {
+            continue;
         }
         host.emit(HostMessageKind::Output, render_value(value, format));
         maybe_save_qr_svg_from_remote_value(

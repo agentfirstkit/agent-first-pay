@@ -226,7 +226,7 @@ Same as RPC mode:
 
 ### Container Deployment
 
-The `container/docker/` directory provides the canonical single-container deployment using supervisord. The `container/apple-container/` directory adds a macOS-specific Apple Container CLI launcher that reuses the same Dockerfile and runtime defaults. The `AFPAY_MODE` environment variable selects the afpay run mode (`rest` or `rpc`):
+The `container/docker/` directory provides the canonical single-container deployment using supervisord (one merged `Dockerfile` whose `AFPAY_BIN_FROM` build-arg selects a `downloader` or `builder` source stage). The `afpay container` command builds and runs it under Docker, Podman, or Apple `container`. The `AFPAY_MODE` environment variable selects the afpay run mode (`rest` or `rpc`):
 
 ```
 supervisord

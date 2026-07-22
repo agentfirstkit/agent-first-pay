@@ -2,10 +2,31 @@ use crate::provider::PayError;
 use crate::spend::SpendContext;
 use crate::types::Output;
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use super::helpers::{emit_error, emit_log, trace_from};
 use super::App;
+use super::helpers::{emit_error, emit_log, trace_from};
+
+/// Outcome of `with_spend_reserves`.
+///
+/// * `result` — what the underlying send/cashu_send returned. `Some(Ok(_))` means
+///   the network operation succeeded; `Some(Err(_))` means it failed (and any
+///   reservations were cancelled cleanly).
+/// * `confirmed_reservation_ids` — populated on success with the reservation
+///   ids that the ledger acknowledged. Surface these in `Output::Sent` /
+///   `Output::CashuSent` so an agent can drive future reconciliation /
+///   cancel flows against the exact debits its payment consumed.
+/// * `unconfirmed_reservations` — populated ONLY when the network operation
+///   succeeded but one or more `confirm` attempts on the ledger failed even
+///   after a retry. Each entry is `(reservation_id, last_error)`. When this is
+///   non-empty, the caller MUST surface `Output::AccountingInconsistent` to the
+///   agent before emitting any "success" output: the money left the wallet but
+///   the ledger does not reflect it, so retrying would double-spend the budget.
+pub(super) struct SpendOutcome<T> {
+    pub result: Result<T, PayError>,
+    pub confirmed_reservation_ids: Vec<u64>,
+    pub unconfirmed_reservations: Vec<(u64, String)>,
+}
 
 /// Reserve spend budget, execute an async operation, then confirm or cancel.
 pub(super) async fn with_spend_reserve<F, Fut, T>(
@@ -15,7 +36,7 @@ pub(super) async fn with_spend_reserve<F, Fut, T>(
     spend_ctx: SpendContext,
     start: Instant,
     send_fn: F,
-) -> Option<Result<T, PayError>>
+) -> Option<SpendOutcome<T>>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, PayError>>,
@@ -31,7 +52,7 @@ pub(super) async fn with_spend_reserves<F, Fut, T>(
     spend_contexts: Vec<SpendContext>,
     start: Instant,
     send_fn: F,
-) -> Option<Result<T, PayError>>
+) -> Option<SpendOutcome<T>>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, PayError>>,
@@ -73,21 +94,54 @@ where
 
     let result = send_fn().await;
 
+    let mut unconfirmed_reservations: Vec<(u64, String)> = Vec::new();
+    let mut confirmed_reservation_ids: Vec<u64> = Vec::new();
     if !reservation_ids.is_empty() {
         match &result {
             Ok(_) => {
                 for rid in &reservation_ids {
-                    if let Err(e) = app.spend_ledger.confirm(*rid).await {
-                        emit_log(
-                            app,
-                            "spend_confirm_failed",
-                            Some(id.to_string()),
-                            serde_json::json!({
-                                "reservation_id": rid,
-                                "error": e.to_string(),
-                            }),
-                        )
-                        .await;
+                    // One short-backoff retry: spend_ledger writes can fail on
+                    // transient lock contention or storage hiccups; a second
+                    // attempt usually clears them. If both fail the money has
+                    // left the wallet AND the ledger lost the debit — the caller
+                    // surfaces AccountingInconsistent so an operator can fix it.
+                    let first = app.spend_ledger.confirm(*rid).await;
+                    match first {
+                        Ok(()) => {
+                            confirmed_reservation_ids.push(*rid);
+                        }
+                        Err(first_err) => {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            match app.spend_ledger.confirm(*rid).await {
+                                Ok(()) => {
+                                    confirmed_reservation_ids.push(*rid);
+                                    emit_log(
+                                        app,
+                                        "spend_confirm_retry_succeeded",
+                                        Some(id.to_string()),
+                                        serde_json::json!({
+                                            "reservation_id": rid,
+                                            "first_error": first_err.to_string(),
+                                        }),
+                                    )
+                                    .await;
+                                }
+                                Err(second_err) => {
+                                    emit_log(
+                                        app,
+                                        "spend_confirm_failed",
+                                        Some(id.to_string()),
+                                        serde_json::json!({
+                                            "reservation_id": rid,
+                                            "first_error": first_err.to_string(),
+                                            "second_error": second_err.to_string(),
+                                        }),
+                                    )
+                                    .await;
+                                    unconfirmed_reservations.push((*rid, second_err.to_string()));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -97,7 +151,39 @@ where
         }
     }
 
-    Some(result)
+    Some(SpendOutcome {
+        result,
+        confirmed_reservation_ids,
+        unconfirmed_reservations,
+    })
+}
+
+/// Emit `Output::AccountingInconsistent` when the spend ledger could not confirm
+/// reservations after a successful send. Call this from the success branch of
+/// every `with_spend_reserves` caller BEFORE the normal success output, so an
+/// agent sees the inconsistency first and never retries the request.
+pub(super) async fn emit_accounting_inconsistent(
+    app: &App,
+    id: &str,
+    transaction_id: &str,
+    unconfirmed: Vec<(u64, String)>,
+    start: Instant,
+) {
+    if unconfirmed.is_empty() {
+        return;
+    }
+    let (reservation_ids, confirm_errors): (Vec<_>, Vec<_>) = unconfirmed.into_iter().unzip();
+    let _ = app
+        .writer
+        .send(Output::AccountingInconsistent {
+            id: id.to_string(),
+            transaction_id: transaction_id.to_string(),
+            reservation_ids,
+            confirm_errors,
+            hint: "money left the wallet but the spend ledger could not record one or more debits; reconcile manually before issuing further sends to avoid double-spending the budget".to_string(),
+            trace: trace_from(start),
+        })
+        .await;
 }
 
 async fn emit_reservation_error(app: &App, id: &str, e: &PayError, start: Instant) {
@@ -110,6 +196,7 @@ async fn emit_reservation_error(app: &App, id: &str, e: &PayError, start: Instan
         token,
         remaining_s,
         origin,
+        ..
     } = e
     {
         let _ = app
@@ -134,20 +221,20 @@ async fn emit_reservation_error(app: &App, id: &str, e: &PayError, start: Instan
 
 async fn cancel_reservations(app: &App, id: &str, reservation_ids: &[u64]) {
     for rid in reservation_ids {
-        if let Err(first_err) = app.spend_ledger.cancel(*rid).await {
-            if let Err(retry_err) = app.spend_ledger.cancel(*rid).await {
-                emit_log(
-                    app,
-                    "spend_cancel_failed",
-                    Some(id.to_string()),
-                    serde_json::json!({
-                        "reservation_id": rid,
-                        "first_error": first_err.to_string(),
-                        "retry_error": retry_err.to_string(),
-                    }),
-                )
-                .await;
-            }
+        if let Err(first_err) = app.spend_ledger.cancel(*rid).await
+            && let Err(retry_err) = app.spend_ledger.cancel(*rid).await
+        {
+            emit_log(
+                app,
+                "spend_cancel_failed",
+                Some(id.to_string()),
+                serde_json::json!({
+                    "reservation_id": rid,
+                    "first_error": first_err.to_string(),
+                    "retry_error": retry_err.to_string(),
+                }),
+            )
+            .await;
         }
     }
 }

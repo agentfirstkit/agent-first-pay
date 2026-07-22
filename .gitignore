@@ -5,3 +5,6 @@
 
 # hypha spawn working directory
 .cmn
+
+# Python venv (auto-provisioned by test.sh when system python lacks deps)
+.venv

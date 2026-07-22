@@ -35,8 +35,8 @@ mod tui;
 
 #[cfg(feature = "interactive")]
 use session::{
-    banner_hint, mode_name, render_output, CommandCompleter, SessionBackend, SessionState,
-    OUTPUT_CHANNEL_CAPACITY,
+    CommandCompleter, OUTPUT_CHANNEL_CAPACITY, SessionBackend, SessionState, banner_hint,
+    mode_name, render_output,
 };
 
 #[cfg(feature = "interactive")]
@@ -100,6 +100,8 @@ pub async fn run(mode: Mode) {
         }
         #[cfg(feature = "rest")]
         Mode::Rest(init) => rest::run_rest(init).await,
+        Mode::SkillAdmin(req) => std::process::exit(crate::skill_admin::run(req)),
+        Mode::Container(req) => std::process::exit(crate::container::run(req)),
         Mode::Data(_op) => {
             #[cfg(feature = "backup")]
             {
@@ -134,7 +136,7 @@ async fn run_interactive(init: InteractiveInit) {
             bootstrap_remote_session(
                 frontend,
                 output,
-                &log,
+                log.as_slice(),
                 data_dir.as_deref(),
                 &endpoint,
                 rpc_secret.as_deref(),
@@ -151,7 +153,7 @@ async fn run_interactive(init: InteractiveInit) {
             return;
         }
     } else {
-        bootstrap_local_session(frontend, output, &log, data_dir).await
+        bootstrap_local_session(frontend, output, log.as_slice(), data_dir).await
     };
 
     let Some(runtime) = runtime else {
@@ -181,9 +183,9 @@ async fn bootstrap_local_session(
     };
 
     let data_dir_owned = config.data_dir.clone();
-    let log_filters = agent_first_data::cli_parse_log_filters(log);
-    config.log = log_filters.clone();
+    config.log = log.to_vec();
 
+    let log_filters = agent_first_data::LogFilters::new(log.to_vec());
     let mut intro_messages = Vec::new();
     if let Some(startup) = crate::config::maybe_startup_log(
         &log_filters,
@@ -245,7 +247,6 @@ async fn bootstrap_remote_session(
     rpc_secret: Option<&str>,
 ) -> Option<InteractiveSessionRuntime> {
     let (endpoint, secret) = remote::require_remote_args(Some(endpoint), rpc_secret, output);
-    let log_filters = agent_first_data::cli_parse_log_filters(log);
     let resolved_dir = data_dir
         .map(ToString::to_string)
         .unwrap_or_else(|| RuntimeConfig::default().data_dir);
@@ -256,8 +257,9 @@ async fn bootstrap_remote_session(
             return None;
         }
     };
-    local_config.log = log_filters.clone();
+    local_config.log = log.to_vec();
 
+    let log_filters = agent_first_data::LogFilters::new(log.to_vec());
     let mut intro_messages = Vec::new();
     if let Some(startup) = crate::config::maybe_startup_log(
         &log_filters,
@@ -292,6 +294,7 @@ async fn bootstrap_remote_session(
                     .and_then(|v| v.as_str())
                     .map(|value| value.to_string()),
                 retryable: true,
+                retry_after_ms: None,
                 trace: Trace::from_duration(0),
             };
             let _ = writeln!(std::io::stdout(), "{}", render_output(&error, output));
@@ -309,6 +312,7 @@ async fn bootstrap_remote_session(
                     error: format!("version mismatch: local v{VERSION}, remote v{remote_version}"),
                     hint: Some("upgrade both client and server to the same version".to_string()),
                     retryable: false,
+                    retry_after_ms: None,
                     trace: Trace::from_duration(0),
                 };
                 let _ = writeln!(std::io::stdout(), "{}", render_output(&error, output));

@@ -1,6 +1,6 @@
 use super::{
-    parse_bolt11_amount_sats, LnBackend, LnInvoiceResult, LnInvoiceStatus, LnPayResult,
-    LnPaymentInfo, LnPaymentStatus,
+    LnBackend, LnInvoiceResult, LnInvoiceStatus, LnPayResult, LnPaymentInfo, LnPaymentStatus,
+    parse_bolt11_amount_sats,
 };
 use crate::provider::PayError;
 use crate::types::BalanceInfo;
@@ -107,7 +107,7 @@ struct PhoenixOfferResponse {
 }
 
 fn map_reqwest_err(e: reqwest::Error) -> PayError {
-    PayError::NetworkError(format!("phoenixd: {e}"))
+    PayError::network_error(format!("phoenixd: {e}"))
 }
 
 #[async_trait]
@@ -129,7 +129,7 @@ impl LnBackend for PhoenixdBackend {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "phoenixd payinvoice {status}: {body}"
             )));
         }
@@ -186,7 +186,7 @@ impl LnBackend for PhoenixdBackend {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "phoenixd createinvoice {status}: {body}"
             )));
         }
@@ -211,7 +211,7 @@ impl LnBackend for PhoenixdBackend {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "phoenixd check {status}: {body}"
             )));
         }
@@ -236,7 +236,7 @@ impl LnBackend for PhoenixdBackend {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "phoenixd getbalance {status}: {body}"
             )));
         }
@@ -256,13 +256,13 @@ impl LnBackend for PhoenixdBackend {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "phoenixd getoffer {status}: {body}"
             )));
         }
         let data: PhoenixOfferResponse = resp.json().await.map_err(map_reqwest_err)?;
         if data.offer.is_empty() {
-            return Err(PayError::NetworkError(
+            return Err(PayError::network_error(
                 "phoenixd returned empty offer".to_string(),
             ));
         }
@@ -293,7 +293,7 @@ impl LnBackend for PhoenixdBackend {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "phoenixd payoffer {status}: {body}"
             )));
         }

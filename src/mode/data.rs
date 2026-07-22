@@ -138,10 +138,10 @@ pub(crate) fn do_global_backup(
     let pg_dump_bytes = try_pg_dump(data_dir)?;
 
     let archive_p = Path::new(archive_path);
-    if let Some(parent) = archive_p.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create output directory: {e}"))?;
-        }
+    if let Some(parent) = archive_p.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create output directory: {e}"))?;
     }
 
     let file =
@@ -323,10 +323,10 @@ fn do_network_backup(
     let pg_dump_bytes = try_pg_dump(data_dir)?;
 
     let archive_p = Path::new(archive_path);
-    if let Some(parent) = archive_p.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create output directory: {e}"))?;
-        }
+    if let Some(parent) = archive_p.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create output directory: {e}"))?;
     }
 
     let file =
@@ -534,7 +534,7 @@ fn try_pg_dump(data_dir: &str) -> Result<Option<Vec<u8>>, String> {
     let url = match config.postgres_url_secret {
         Some(u) => u,
         None => {
-            return Err("storage_backend=postgres but postgres_url_secret is not set".to_string())
+            return Err("storage_backend=postgres but postgres_url_secret is not set".to_string());
         }
     };
     run_pg_dump(&url).map(Some)
@@ -690,13 +690,13 @@ fn safe_unpack_entry<R: std::io::Read>(
         ));
     }
     ensure_safe_parent(root, dest)?;
-    if let Ok(meta) = std::fs::symlink_metadata(dest) {
-        if meta.file_type().is_symlink() {
-            return Err(format!(
-                "refusing to overwrite symlink '{}'",
-                dest.display()
-            ));
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(dest)
+        && meta.file_type().is_symlink()
+    {
+        return Err(format!(
+            "refusing to overwrite symlink '{}'",
+            dest.display()
+        ));
     }
     entry
         .unpack(dest)
@@ -810,14 +810,13 @@ fn validate_extra_label(label: &str) -> Result<(), String> {
 }
 
 fn emit_output(out: &Output, fmt: OutputFormat) {
-    let value = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
-    let rendered = output_fmt::render_value_with_policy(&value, fmt);
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+    let _ = output_fmt::emit_output(std::io::stdout().lock(), out, fmt);
 }
 
 fn emit_cli_error(msg: &str, fmt: OutputFormat) {
-    let value = agent_first_data::build_cli_error(msg, None);
-    let rendered = agent_first_data::cli_output(&value, fmt);
+    let value = output_fmt::cli_error_event(msg, None);
+    let rendered =
+        agent_first_data::render(&value, fmt, &agent_first_data::OutputOptions::default());
     let _ = writeln!(std::io::stdout(), "{rendered}");
 }
 

@@ -1,8 +1,8 @@
-use super::session::{
-    char_to_byte_index, mode_name, network_from_str, parse_session_command, save_history_entries,
-    HostMessageKind, InteractionHost, SessionBackend, SessionState, TuiTerminal,
-};
 use super::InteractiveSessionRuntime;
+use super::session::{
+    HostMessageKind, InteractionHost, SessionBackend, SessionState, TuiTerminal,
+    char_to_byte_index, mode_name, network_from_str, parse_session_command, save_history_entries,
+};
 use crate::args::InteractiveFrontend;
 use crate::config::VERSION;
 #[cfg(feature = "rpc")]
@@ -12,7 +12,7 @@ use crate::types::{Input, Network};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -123,10 +123,10 @@ fn build_wallet_groups(wallets: Vec<TuiWalletEntry>) -> Vec<WalletGroup> {
         .collect();
 
     for wallet in wallets {
-        if let Some(network) = wallet.network {
-            if let Some(group) = groups.iter_mut().find(|g| g.network == network) {
-                group.wallets.push(wallet);
-            }
+        if let Some(network) = wallet.network
+            && let Some(group) = groups.iter_mut().find(|g| g.network == network)
+        {
+            group.wallets.push(wallet);
         }
     }
 
@@ -535,10 +535,10 @@ fn args_to_form_fields(
                 return Some(f);
             }
             // Filter by keep_fields if specified
-            if let Some(keep) = keep_fields {
-                if !keep.contains(&a.long.as_str()) {
-                    return None;
-                }
+            if let Some(keep) = keep_fields
+                && !keep.contains(&a.long.as_str())
+            {
+                return None;
             }
             let label: &'static str = Box::leak(a.long.replace('-', " ").into_boxed_str());
             let help: &'static str = Box::leak(a.help.clone().into_boxed_str());
@@ -1354,10 +1354,10 @@ impl TuiApp {
             if gi >= self.wallet_groups.len() {
                 self.sidebar_cursor = SidebarItem::Group(0);
             }
-        } else if let SidebarItem::Wallet(gi, _) = self.sidebar_cursor {
-            if gi >= self.wallet_groups.len() {
-                self.sidebar_cursor = SidebarItem::Group(0);
-            }
+        } else if let SidebarItem::Wallet(gi, _) = self.sidebar_cursor
+            && gi >= self.wallet_groups.len()
+        {
+            self.sidebar_cursor = SidebarItem::Group(0);
         }
     }
 
@@ -1450,10 +1450,10 @@ impl TuiApp {
 
     /// Enter key on sidebar: toggle group expand/collapse, or no-op for others.
     fn sidebar_enter(&mut self) {
-        if let SidebarItem::Group(gi) = self.sidebar_cursor {
-            if let Some(group) = self.wallet_groups.get_mut(gi) {
-                group.expanded = !group.expanded;
-            }
+        if let SidebarItem::Group(gi) = self.sidebar_cursor
+            && let Some(group) = self.wallet_groups.get_mut(gi)
+        {
+            group.expanded = !group.expanded;
         }
     }
 
@@ -1547,12 +1547,12 @@ impl TuiApp {
             return;
         }
         let cursor = self.field_cursor_chars;
-        if let Some(field) = self.current_field_mut() {
-            if let Some(text) = field.value.as_text_mut() {
-                let byte_index = char_to_byte_index(text, cursor);
-                text.insert(byte_index, ch);
-                self.field_cursor_chars = cursor + 1;
-            }
+        if let Some(field) = self.current_field_mut()
+            && let Some(text) = field.value.as_text_mut()
+        {
+            let byte_index = char_to_byte_index(text, cursor);
+            text.insert(byte_index, ch);
+            self.field_cursor_chars = cursor + 1;
         }
     }
 
@@ -1561,13 +1561,13 @@ impl TuiApp {
             return;
         }
         let cursor = self.field_cursor_chars;
-        if let Some(field) = self.current_field_mut() {
-            if let Some(text) = field.value.as_text_mut() {
-                let end = char_to_byte_index(text, cursor);
-                let start = char_to_byte_index(text, cursor - 1);
-                text.replace_range(start..end, "");
-                self.field_cursor_chars = cursor - 1;
-            }
+        if let Some(field) = self.current_field_mut()
+            && let Some(text) = field.value.as_text_mut()
+        {
+            let end = char_to_byte_index(text, cursor);
+            let start = char_to_byte_index(text, cursor - 1);
+            text.replace_range(start..end, "");
+            self.field_cursor_chars = cursor - 1;
         }
     }
 
@@ -1576,15 +1576,15 @@ impl TuiApp {
             return;
         }
         let cursor = self.field_cursor_chars;
-        if let Some(field) = self.current_field_mut() {
-            if let Some(text) = field.value.as_text_mut() {
-                if cursor >= text.chars().count() {
-                    return;
-                }
-                let start = char_to_byte_index(text, cursor);
-                let end = char_to_byte_index(text, cursor + 1);
-                text.replace_range(start..end, "");
+        if let Some(field) = self.current_field_mut()
+            && let Some(text) = field.value.as_text_mut()
+        {
+            if cursor >= text.chars().count() {
+                return;
             }
+            let start = char_to_byte_index(text, cursor);
+            let end = char_to_byte_index(text, cursor + 1);
+            text.replace_range(start..end, "");
         }
     }
 
@@ -1712,73 +1712,70 @@ impl TuiApp {
                     .map(|s| s.to_string());
                 continue;
             }
-            if code == "wallet_balances" {
-                if let Some(items) = value.get("wallets").and_then(|v| v.as_array()) {
-                    for item in items {
-                        let wid = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if wid != wallet_id {
-                            continue;
-                        }
-                        // Pick up metadata from balance response
-                        if self.wallet_data.address.is_none() {
-                            self.wallet_data.address = item
-                                .get("address")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                        }
-                        if self.wallet_data.mint_url.is_none() {
-                            self.wallet_data.mint_url = item
-                                .get("mint_url")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                        }
-                        if self.wallet_data.backend.is_none() {
-                            self.wallet_data.backend = item
-                                .get("backend")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                        }
-                        if self.wallet_data.created_at.is_none() {
-                            if let Some(ts) =
-                                item.get("created_at_epoch_s").and_then(|v| v.as_u64())
-                            {
-                                self.wallet_data.created_at = Some(format_epoch(ts));
-                            }
+            if code == "wallet_balances"
+                && let Some(items) = value.get("wallets").and_then(|v| v.as_array())
+            {
+                for item in items {
+                    let wid = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if wid != wallet_id {
+                        continue;
+                    }
+                    // Pick up metadata from balance response
+                    if self.wallet_data.address.is_none() {
+                        self.wallet_data.address = item
+                            .get("address")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if self.wallet_data.mint_url.is_none() {
+                        self.wallet_data.mint_url = item
+                            .get("mint_url")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if self.wallet_data.backend.is_none() {
+                        self.wallet_data.backend = item
+                            .get("backend")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if self.wallet_data.created_at.is_none()
+                        && let Some(ts) = item.get("created_at_epoch_s").and_then(|v| v.as_u64())
+                    {
+                        self.wallet_data.created_at = Some(format_epoch(ts));
+                    }
+
+                    if let Some(err) = item.get("error").and_then(|v| v.as_str()) {
+                        self.wallet_data.balance_error = Some(err.to_string());
+                        continue;
+                    }
+
+                    if let Some(bal) = item.get("balance") {
+                        let confirmed = bal.get("confirmed").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let pending = bal.get("pending").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let unit = bal.get("unit").and_then(|v| v.as_str()).unwrap_or("sat");
+
+                        let mut lines = vec![format!("{confirmed} {unit}")];
+                        if pending > 0 {
+                            lines.push(format!("{pending} {unit} (pending)"));
                         }
 
-                        if let Some(err) = item.get("error").and_then(|v| v.as_str()) {
-                            self.wallet_data.balance_error = Some(err.to_string());
-                            continue;
-                        }
-
-                        if let Some(bal) = item.get("balance") {
-                            let confirmed =
-                                bal.get("confirmed").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let pending = bal.get("pending").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let unit = bal.get("unit").and_then(|v| v.as_str()).unwrap_or("sat");
-
-                            let mut lines = vec![format!("{confirmed} {unit}")];
-                            if pending > 0 {
-                                lines.push(format!("{pending} {unit} (pending)"));
-                            }
-
-                            // Show additional fields (e.g. fee_credit_sats for phoenixd)
-                            if let Some(obj) = bal.as_object() {
-                                for (key, val) in obj {
-                                    if matches!(key.as_str(), "confirmed" | "pending" | "unit") {
-                                        continue;
-                                    }
-                                    if let Some(v) = val.as_u64() {
-                                        if v > 0 {
-                                            let display_key = key.replace('_', " ");
-                                            lines.push(format!("{v} ({display_key})"));
-                                        }
-                                    }
+                        // Show additional fields (e.g. fee_credit_sats for phoenixd)
+                        if let Some(obj) = bal.as_object() {
+                            for (key, val) in obj {
+                                if matches!(key.as_str(), "confirmed" | "pending" | "unit") {
+                                    continue;
+                                }
+                                if let Some(v) = val.as_u64()
+                                    && v > 0
+                                {
+                                    let display_key = key.replace('_', " ");
+                                    lines.push(format!("{v} ({display_key})"));
                                 }
                             }
-
-                            self.wallet_data.balance_text = Some(lines.join("\n"));
                         }
+
+                        self.wallet_data.balance_text = Some(lines.join("\n"));
                     }
                 }
             }
@@ -1792,75 +1789,75 @@ impl TuiApp {
         self.selected_history = 0;
         for value in outputs {
             let code = value.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            if code == "history" {
-                if let Some(items) = value.get("items").and_then(|v| v.as_array()) {
-                    for item in items {
-                        let dir = item
-                            .get("direction")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        let arrow = if dir == "send" {
-                            "\u{2193}"
-                        } else {
-                            "\u{2191}"
-                        };
-                        let amount_val = item
-                            .get("amount")
-                            .and_then(|v| v.get("value"))
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let token = item
-                            .get("amount")
-                            .and_then(|v| v.get("token"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("sat");
-                        let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                        let ts = item
-                            .get("created_at_epoch_s")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let memo = item
-                            .get("onchain_memo")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        let local_memo = item.get("local_memo").and_then(|v| {
-                            if let Some(obj) = v.as_object() {
-                                let parts: Vec<String> = obj
-                                    .iter()
-                                    .map(|(k, v)| {
-                                        let val = v.as_str().unwrap_or("");
-                                        format!("{k}: {val}")
-                                    })
-                                    .collect();
-                                if parts.is_empty() {
-                                    None
-                                } else {
-                                    Some(parts.join(", "))
-                                }
+            if code == "history"
+                && let Some(items) = value.get("items").and_then(|v| v.as_array())
+            {
+                for item in items {
+                    let dir = item
+                        .get("direction")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    let arrow = if dir == "send" {
+                        "\u{2193}"
+                    } else {
+                        "\u{2191}"
+                    };
+                    let amount_val = item
+                        .get("amount")
+                        .and_then(|v| v.get("value"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let token = item
+                        .get("amount")
+                        .and_then(|v| v.get("token"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("sat");
+                    let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                    let ts = item
+                        .get("created_at_epoch_s")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let memo = item
+                        .get("onchain_memo")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let local_memo = item.get("local_memo").and_then(|v| {
+                        if let Some(obj) = v.as_object() {
+                            let parts: Vec<String> = obj
+                                .iter()
+                                .map(|(k, v)| {
+                                    let val = v.as_str().unwrap_or("");
+                                    format!("{k}: {val}")
+                                })
+                                .collect();
+                            if parts.is_empty() {
+                                None
                             } else {
-                                v.as_str().map(|s| s.to_string())
+                                Some(parts.join(", "))
                             }
-                        });
-                        let wallet = item
-                            .get("wallet")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        let transaction_id = item
-                            .get("transaction_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        self.history_records.push(HistoryDisplayRecord {
-                            transaction_id,
-                            wallet,
-                            direction: arrow.to_string(),
-                            amount: format!("{amount_val} {token}"),
-                            status: status.to_string(),
-                            date: format_epoch(ts),
-                            memo,
-                            local_memo,
-                        });
-                    }
+                        } else {
+                            v.as_str().map(|s| s.to_string())
+                        }
+                    });
+                    let wallet = item
+                        .get("wallet")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let transaction_id = item
+                        .get("transaction_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    self.history_records.push(HistoryDisplayRecord {
+                        transaction_id,
+                        wallet,
+                        direction: arrow.to_string(),
+                        amount: format!("{amount_val} {token}"),
+                        status: status.to_string(),
+                        date: format_epoch(ts),
+                        memo,
+                        local_memo,
+                    });
                 }
             }
             if code == "error" {
@@ -1880,39 +1877,39 @@ impl TuiApp {
         self.selected_limit = 0;
         for value in outputs {
             let code = value.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            if code == "limit_status" {
-                if let Some(limits) = value.get("limits").and_then(|v| v.as_array()) {
-                    for lim in limits {
-                        let rule_id = lim
-                            .get("rule_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let scope = lim
-                            .get("scope")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?")
-                            .to_string();
-                        let max_spend = lim.get("max_spend").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let spent = lim.get("spent").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let remaining = lim.get("remaining").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let window_s = lim.get("window_s").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let token = lim.get("token").and_then(|v| v.as_str()).unwrap_or("sat");
-                        let network = lim.get("network").and_then(|v| v.as_str()).unwrap_or("");
-                        let scope_label = if !network.is_empty() {
-                            format!("{scope}/{network}")
-                        } else {
-                            scope
-                        };
-                        self.limit_records.push(LimitDisplayRecord {
-                            rule_id,
-                            scope: scope_label,
-                            max_spend: format!("{max_spend} {token}"),
-                            spent: format!("{spent}"),
-                            remaining: format!("{remaining}"),
-                            window: format_duration(window_s),
-                        });
-                    }
+            if code == "limit_status"
+                && let Some(limits) = value.get("limits").and_then(|v| v.as_array())
+            {
+                for lim in limits {
+                    let rule_id = lim
+                        .get("rule_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let scope = lim
+                        .get("scope")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let max_spend = lim.get("max_spend").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let spent = lim.get("spent").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let remaining = lim.get("remaining").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let window_s = lim.get("window_s").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let token = lim.get("token").and_then(|v| v.as_str()).unwrap_or("sat");
+                    let network = lim.get("network").and_then(|v| v.as_str()).unwrap_or("");
+                    let scope_label = if !network.is_empty() {
+                        format!("{scope}/{network}")
+                    } else {
+                        scope
+                    };
+                    self.limit_records.push(LimitDisplayRecord {
+                        rule_id,
+                        scope: scope_label,
+                        max_spend: format!("{max_spend} {token}"),
+                        spent: format!("{spent}"),
+                        remaining: format!("{remaining}"),
+                        window: format_duration(window_s),
+                    });
                 }
             }
         }
@@ -2314,18 +2311,18 @@ impl TuiApp {
                 ]));
             }
             // Show address only if it differs from mint_url (cashu uses mint URL as address)
-            if let Some(addr) = &d.address {
-                if d.mint_url.as_deref() != Some(addr) {
-                    let short = if addr.len() > 30 {
-                        format!("{}...", &addr[..30])
-                    } else {
-                        addr.clone()
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled("  Address     ", dim),
-                        Span::styled(short, normal),
-                    ]));
-                }
+            if let Some(addr) = &d.address
+                && d.mint_url.as_deref() != Some(addr)
+            {
+                let short = if addr.len() > 30 {
+                    format!("{}...", &addr[..30])
+                } else {
+                    addr.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  Address     ", dim),
+                    Span::styled(short, normal),
+                ]));
             }
             if let Some(mint) = &d.mint_url {
                 lines.push(Line::from(vec![
@@ -2578,27 +2575,27 @@ impl TuiApp {
                         Style::default()
                     },
                 )];
-                if self.history_is_network {
-                    if let Some(w) = &rec.wallet {
-                        // Resolve wallet label from sidebar groups
-                        let label = self
-                            .wallet_groups
-                            .iter()
-                            .flat_map(|g| &g.wallets)
-                            .find(|e| e.id == *w)
-                            .map(|e| e.display_short())
-                            .unwrap_or_else(|| {
-                                if w.len() > 10 {
-                                    format!("{}...", &w[..10])
-                                } else {
-                                    w.clone()
-                                }
-                            });
-                        spans.push(Span::styled(
-                            format!("{label:<12} "),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
+                if self.history_is_network
+                    && let Some(w) = &rec.wallet
+                {
+                    // Resolve wallet label from sidebar groups
+                    let label = self
+                        .wallet_groups
+                        .iter()
+                        .flat_map(|g| &g.wallets)
+                        .find(|e| e.id == *w)
+                        .map(|e| e.display_short())
+                        .unwrap_or_else(|| {
+                            if w.len() > 10 {
+                                format!("{}...", &w[..10])
+                            } else {
+                                w.clone()
+                            }
+                        });
+                    spans.push(Span::styled(
+                        format!("{label:<12} "),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
                 spans.extend([
                     Span::styled(rec.direction.clone(), dir_style),
@@ -3088,30 +3085,28 @@ impl TuiApp {
 
     fn position_cursor(&self, frame: &mut Frame, main_area: Rect, _status_area: Rect) {
         if self.focus == TuiFocus::Main && self.current_form().is_some() {
-            if let Some(form) = self.current_form() {
-                if let Some(field) = form.fields.get(form.selected_field) {
-                    if let Some(text) = field.value.as_text() {
-                        let max_label = form
-                            .fields
-                            .iter()
-                            .map(|f| f.label.chars().count())
-                            .max()
-                            .unwrap_or(0);
-                        let label_width = max_label as u16 + 4; // "  label  "
-                        let cursor_offset =
-                            min(self.field_cursor_chars, text.chars().count()) as u16;
-                        let inner_x = main_area.x.saturating_add(1);
-                        let inner_y = main_area.y.saturating_add(1);
-                        let line_offset = form.selected_field as u16;
-                        let max_x = main_area
-                            .x
-                            .saturating_add(main_area.width.saturating_sub(2))
-                            .saturating_sub(1);
-                        let cx = min(inner_x.saturating_add(label_width + cursor_offset), max_x);
-                        let cy = inner_y.saturating_add(line_offset);
-                        frame.set_cursor_position((cx, cy));
-                    }
-                }
+            if let Some(form) = self.current_form()
+                && let Some(field) = form.fields.get(form.selected_field)
+                && let Some(text) = field.value.as_text()
+            {
+                let max_label = form
+                    .fields
+                    .iter()
+                    .map(|f| f.label.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                let label_width = max_label as u16 + 4; // "  label  "
+                let cursor_offset = min(self.field_cursor_chars, text.chars().count()) as u16;
+                let inner_x = main_area.x.saturating_add(1);
+                let inner_y = main_area.y.saturating_add(1);
+                let line_offset = form.selected_field as u16;
+                let max_x = main_area
+                    .x
+                    .saturating_add(main_area.width.saturating_sub(2))
+                    .saturating_sub(1);
+                let cx = min(inner_x.saturating_add(label_width + cursor_offset), max_x);
+                let cy = inner_y.saturating_add(line_offset);
+                frame.set_cursor_position((cx, cy));
             }
         } else if self.view == TuiView::DataView
             && self.focus == TuiFocus::Main
@@ -3199,7 +3194,7 @@ impl TuiApp {
                 Ok(Event::Key(key)) => match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => break true,
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
-                        break false
+                        break false;
                     }
                     _ => {}
                 },
@@ -3257,10 +3252,9 @@ fn try_copy_to_clipboard(text: &str) -> bool {
         .arg(text)
         .stdin(Stdio::null())
         .spawn()
+        && child.wait().map(|s| s.success()).unwrap_or(false)
     {
-        if child.wait().map(|s| s.success()).unwrap_or(false) {
-            return true;
-        }
+        return true;
     }
     // X11
     if let Ok(mut child) = Command::new("xclip")
@@ -3379,19 +3373,19 @@ impl InteractionHost for TuiHost<'_> {
             HostMessageKind::Notice => TuiMessageKind::Notice,
         };
         // Extract long copyable values (token, bolt11 invoice, address, seed phrase)
-        if matches!(kind, HostMessageKind::Output) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                let copyable = v
-                    .get("token")
-                    .or_else(|| v.get("bolt11"))
-                    .or_else(|| v.get("invoice"))
-                    .or_else(|| v.get("address"))
-                    .and_then(|val| val.as_str())
-                    .filter(|s| s.len() > 20)
-                    .map(ToString::to_string);
-                if let Some(val) = copyable {
-                    self.app.last_copyable = Some(val);
-                }
+        if matches!(kind, HostMessageKind::Output)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            let copyable = v
+                .get("token")
+                .or_else(|| v.get("bolt11"))
+                .or_else(|| v.get("invoice"))
+                .or_else(|| v.get("address"))
+                .and_then(|val| val.as_str())
+                .filter(|s| s.len() > 20)
+                .map(ToString::to_string);
+            if let Some(val) = copyable {
+                self.app.last_copyable = Some(val);
             }
         }
         self.app.push_message(message_kind, text);
@@ -3509,10 +3503,10 @@ fn handle_tui_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
     }
 
     // 4. Hotkeys (when not editing text)
-    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let Some(action) = handle_hotkey(app, key.code) {
-            return action;
-        }
+    if !key.modifiers.contains(KeyModifiers::CONTROL)
+        && let Some(action) = handle_hotkey(app, key.code)
+    {
+        return action;
     }
 
     // 5. Focus-specific
@@ -3623,11 +3617,11 @@ fn handle_hotkey(app: &mut TuiApp, code: KeyCode) -> Option<TuiAction> {
             Some(TuiAction::None)
         }
         KeyCode::Char('d') if matches!(app.sidebar_cursor, SidebarItem::Limit(_)) => {
-            if let SidebarItem::Limit(li) = app.sidebar_cursor {
-                if let Some(lim) = app.limit_records.get(li) {
-                    let cmd = format!("limit remove --rule-id {}", shell_quote(&lim.rule_id));
-                    return Some(TuiAction::Submit(cmd));
-                }
+            if let SidebarItem::Limit(li) = app.sidebar_cursor
+                && let Some(lim) = app.limit_records.get(li)
+            {
+                let cmd = format!("limit remove --rule-id {}", shell_quote(&lim.rule_id));
+                return Some(TuiAction::Submit(cmd));
             }
             None
         }
@@ -3667,11 +3661,11 @@ fn handle_sidebar_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
 fn handle_main_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
     match key.code {
         KeyCode::Enter if app.view == TuiView::History => {
-            if let Some(rec) = app.history_records.get(app.selected_history) {
-                if !rec.transaction_id.is_empty() {
-                    let tid = rec.transaction_id.clone();
-                    return TuiAction::FetchHistoryDetail(tid);
-                }
+            if let Some(rec) = app.history_records.get(app.selected_history)
+                && !rec.transaction_id.is_empty()
+            {
+                let tid = rec.transaction_id.clone();
+                return TuiAction::FetchHistoryDetail(tid);
             }
             TuiAction::None
         }
@@ -3742,11 +3736,7 @@ fn handle_main_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
 // ── Data view form helpers ──────────────────────────────────────────────────
 
 fn data_max_field(app: &TuiApp) -> usize {
-    if app.data_cursor == 0 {
-        1
-    } else {
-        3
-    }
+    if app.data_cursor == 0 { 1 } else { 3 }
 }
 
 fn data_current_field_is_text(app: &TuiApp) -> bool {
@@ -3991,11 +3981,11 @@ fn handle_form_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
             }
             KeyCode::Right => {
                 if is_text {
-                    if let Some(field) = app.current_field() {
-                        if let Some(text) = field.value.as_text() {
-                            app.field_cursor_chars =
-                                min(app.field_cursor_chars + 1, text.chars().count());
-                        }
+                    if let Some(field) = app.current_field()
+                        && let Some(text) = field.value.as_text()
+                    {
+                        app.field_cursor_chars =
+                            min(app.field_cursor_chars + 1, text.chars().count());
                     }
                 } else {
                     app.cycle_current_field(1);
@@ -4007,10 +3997,10 @@ fn handle_form_key(app: &mut TuiApp, key: KeyEvent) -> TuiAction {
                 TuiAction::None
             }
             KeyCode::End => {
-                if let Some(field) = app.current_field() {
-                    if let Some(text) = field.value.as_text() {
-                        app.field_cursor_chars = text.chars().count();
-                    }
+                if let Some(field) = app.current_field()
+                    && let Some(text) = field.value.as_text()
+                {
+                    app.field_cursor_chars = text.chars().count();
                 }
                 TuiAction::None
             }
@@ -4381,26 +4371,26 @@ pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
         }
 
         // Check pending data operation (backup / restore)
-        if let Some(dp) = &app.data_pending {
-            if dp.handle.is_finished() {
-                let Some(dp) = app.data_pending.take() else {
-                    unreachable!()
+        if let Some(dp) = &app.data_pending
+            && dp.handle.is_finished()
+        {
+            let Some(dp) = app.data_pending.take() else {
+                unreachable!()
+            };
+            let result = dp
+                .handle
+                .await
+                .unwrap_or_else(|e| Err(format!("task panicked: {e}")));
+            if dp.is_backup {
+                app.data_backup_status = match result {
+                    Ok(path) => DataOpStatus::Done(path),
+                    Err(e) => DataOpStatus::Error(e),
                 };
-                let result = dp
-                    .handle
-                    .await
-                    .unwrap_or_else(|e| Err(format!("task panicked: {e}")));
-                if dp.is_backup {
-                    app.data_backup_status = match result {
-                        Ok(path) => DataOpStatus::Done(path),
-                        Err(e) => DataOpStatus::Error(e),
-                    };
-                } else {
-                    app.data_restore_status = match result {
-                        Ok(_) => DataOpStatus::Done("restored".to_string()),
-                        Err(e) => DataOpStatus::Error(e),
-                    };
-                }
+            } else {
+                app.data_restore_status = match result {
+                    Ok(_) => DataOpStatus::Done("restored".to_string()),
+                    Err(e) => DataOpStatus::Error(e),
+                };
             }
         }
 
@@ -5038,7 +5028,7 @@ mod tests {
     fn esc_from_wallet_create_returns_to_group() {
         let mut app = test_app();
         app.sidebar_cursor = SidebarItem::Group(1); // ln group
-                                                    // Open wallet create
+        // Open wallet create
         handle_tui_key(&mut app, key(KeyCode::Char('c')));
         assert!(matches!(app.view, TuiView::WalletCreate));
         // Esc should return to group summary
@@ -5053,7 +5043,7 @@ mod tests {
     fn esc_from_send_returns_to_wallet() {
         let mut app = test_app();
         app.sidebar_cursor = SidebarItem::Wallet(0, 0); // cashu wallet
-                                                        // Open send form
+        // Open send form
         handle_tui_key(&mut app, key(KeyCode::Char('s')));
         assert!(matches!(app.view, TuiView::Send));
         // Esc should return to wallet

@@ -1,7 +1,18 @@
+# Canonical Clippy config for every Rust spore in this repository.
+#
+# Default policy mirrored into each Rust project's clippy.toml. Repository
+# tooling may select a project-specific full replacement.
+
+# Production code uses the matching `deny` lint levels in each Cargo.toml.
+# Tests may use these failure helpers when they make assertions clearer.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
 disallowed-macros = [
-  { path = "std::eprintln", reason = "AFDATA protocol/log events must use stdout only; stderr is not a protocol channel." },
+  { path = "std::eprintln", reason = "Agent-First Data convention requires structured events on stdout only; stderr is not a protocol channel." },
 ]
 
 disallowed-methods = [
-  { path = "std::io::stderr", reason = "AFDATA protocol/log events must use stdout only; stderr is not a protocol channel." },
+  { path = "std::io::stderr", reason = "Agent-First Data convention requires structured events on stdout only; stderr is not a protocol channel." },
 ]

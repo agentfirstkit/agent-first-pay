@@ -6,7 +6,7 @@ use crate::types::*;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::local::{coins_bip39::English, MnemonicBuilder, PrivateKeySigner};
+use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use async_trait::async_trait;
 use bip39::Mnemonic;
 use std::collections::{HashMap, HashSet};
@@ -66,7 +66,7 @@ impl EvmProvider {
     fn normalize_rpc_endpoint(raw: &str) -> Result<String, PayError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "evm wallet requires --evm-rpc-endpoint".to_string(),
             ));
         }
@@ -76,7 +76,7 @@ impl EvmProvider {
             format!("https://{trimmed}")
         };
         reqwest::Url::parse(&endpoint)
-            .map_err(|e| PayError::InvalidAmount(format!("invalid --evm-rpc-endpoint: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("invalid --evm-rpc-endpoint: {e}")))?;
         Ok(endpoint)
     }
 
@@ -85,14 +85,14 @@ impl EvmProvider {
         MnemonicBuilder::<English>::default()
             .phrase(mnemonic_str)
             .index(0u32)
-            .map_err(|e| PayError::InternalError(format!("evm derivation index: {e}")))?
+            .map_err(|e| PayError::internal_error(format!("evm derivation index: {e}")))?
             .build()
-            .map_err(|e| PayError::InternalError(format!("build evm signer from mnemonic: {e}")))
+            .map_err(|e| PayError::internal_error(format!("build evm signer from mnemonic: {e}")))
     }
 
     fn wallet_signer(meta: &WalletMetadata) -> Result<PrivateKeySigner, PayError> {
         let seed_secret = meta.seed_secret.as_deref().ok_or_else(|| {
-            PayError::InternalError(format!("wallet {} missing evm secret", meta.id))
+            PayError::internal_error(format!("wallet {} missing evm secret", meta.id))
         })?;
         Self::signer_from_mnemonic(seed_secret)
     }
@@ -107,7 +107,7 @@ impl EvmProvider {
             .filter(|v| !v.is_empty())
             .cloned()
             .ok_or_else(|| {
-                PayError::InternalError(format!(
+                PayError::internal_error(format!(
                     "wallet {} missing evm rpc endpoints; re-create with --evm-rpc-endpoint",
                     meta.id
                 ))
@@ -121,7 +121,7 @@ impl EvmProvider {
     fn load_evm_wallet(&self, wallet_id: &str) -> Result<WalletMetadata, PayError> {
         let meta = self.store.load_wallet_metadata(wallet_id)?;
         if meta.network != Network::Evm {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "wallet {wallet_id} is not an evm wallet"
             )));
         }
@@ -134,7 +134,7 @@ impl EvmProvider {
             if wallets.len() == 1 {
                 return Ok(wallets[0].id.clone());
             }
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "multiple evm wallets exist; specify --wallet".to_string(),
             ));
         }
@@ -144,7 +144,7 @@ impl EvmProvider {
     fn parse_transfer_target(to: &str, chain_id: u64) -> Result<EvmTransferTarget, PayError> {
         let trimmed = to.trim();
         if trimmed.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "evm send target is empty".to_string(),
             ));
         }
@@ -159,7 +159,7 @@ impl EvmProvider {
         let recipient_address: Address = recipient_str
             .trim()
             .parse()
-            .map_err(|e| PayError::InvalidAmount(format!("invalid evm recipient address: {e}")))?;
+            .map_err(|e| PayError::invalid_amount(format!("invalid evm recipient address: {e}")))?;
 
         let mut amount_wei: Option<U256> = None;
         let mut token_label = "native".to_string();
@@ -171,17 +171,17 @@ impl EvmProvider {
             }
             let (key, value) = pair
                 .split_once('=')
-                .ok_or_else(|| PayError::InvalidAmount(format!("invalid query pair: {pair}")))?;
+                .ok_or_else(|| PayError::invalid_amount(format!("invalid query pair: {pair}")))?;
             match key {
                 "amount" | "amount-wei" => {
                     amount_wei =
                         Some(value.parse::<U256>().map_err(|e| {
-                            PayError::InvalidAmount(format!("invalid amount: {e}"))
+                            PayError::invalid_amount(format!("invalid amount: {e}"))
                         })?);
                 }
                 "amount-gwei" => {
                     let gwei: u64 = value.parse().map_err(|e| {
-                        PayError::InvalidAmount(format!("invalid amount-gwei: {e}"))
+                        PayError::invalid_amount(format!("invalid amount-gwei: {e}"))
                     })?;
                     amount_wei = Some(U256::from(gwei) * U256::from(1_000_000_000u64));
                 }
@@ -193,17 +193,17 @@ impl EvmProvider {
                         token_label = value.to_ascii_lowercase();
                         token_contract = known.address.parse().ok();
                         if token_contract.is_none() {
-                            return Err(PayError::InvalidAmount(format!(
+                            return Err(PayError::invalid_amount(format!(
                                 "failed to parse known token address for {value}"
                             )));
                         }
                     } else if value.starts_with("0x") || value.starts_with("0X") {
                         token_label = value.to_ascii_lowercase();
                         token_contract = Some(value.parse().map_err(|e| {
-                            PayError::InvalidAmount(format!("invalid token contract address: {e}"))
+                            PayError::invalid_amount(format!("invalid token contract address: {e}"))
                         })?);
                     } else {
-                        return Err(PayError::InvalidAmount(format!(
+                        return Err(PayError::invalid_amount(format!(
                             "unknown token '{value}' on chain_id {chain_id}; use a known symbol (native, usdc, usdt) or contract address"
                         )));
                     }
@@ -215,7 +215,7 @@ impl EvmProvider {
         }
 
         let amount_wei = amount_wei.ok_or_else(|| {
-            PayError::InvalidAmount(
+            PayError::invalid_amount(
                 "evm send target missing amount; use ethereum:<address>?amount=<u64>&token=native"
                     .to_string(),
             )
@@ -229,10 +229,19 @@ impl EvmProvider {
         })
     }
 
-    fn spend_debits_for_target(target: &EvmTransferTarget, fee_gwei: u64) -> Vec<SpendDebit> {
-        let fee_wei = gwei_to_wei_saturating(fee_gwei);
-        let amount_wei = u256_to_u64_saturating(target.amount_wei);
-        if target.token_contract.is_some() {
+    fn spend_debits_for_target(
+        target: &EvmTransferTarget,
+        fee_gwei: u64,
+    ) -> Result<Vec<SpendDebit>, PayError> {
+        let fee_wei = gwei_to_wei_checked(fee_gwei).ok_or_else(|| PayError::InvalidAmount {
+            message: format!("fee_gwei {fee_gwei} overflows u64 wei (>18.4 ETH); refusing send"),
+            hint: Some(
+                "rpc returned an unreasonable fee estimate; retry against another endpoint or pass an explicit cap"
+                    .to_string(),
+            ),
+        })?;
+        let amount_wei = u256_to_u64_checked(target.amount_wei, "amount_wei")?;
+        Ok(if target.token_contract.is_some() {
             vec![
                 SpendDebit {
                     amount_native: amount_wei,
@@ -248,7 +257,7 @@ impl EvmProvider {
                 amount_native: amount_wei.saturating_add(fee_wei),
                 token: Some("native".to_string()),
             }]
-        }
+        })
     }
 
     // Provider is built inline in withdraw() to avoid complex generic return types.
@@ -273,7 +282,7 @@ impl EvmProvider {
                         continue;
                     }
                     let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-                        PayError::NetworkError(format!("endpoint={endpoint} invalid json: {e}"))
+                        PayError::network_error(format!("endpoint={endpoint} invalid json: {e}"))
                     })?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
@@ -284,7 +293,7 @@ impl EvmProvider {
                             .get("result")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                PayError::NetworkError(format!(
+                                PayError::network_error(format!(
                                     "endpoint={endpoint} missing result in response"
                                 ))
                             })?;
@@ -293,7 +302,7 @@ impl EvmProvider {
                         16,
                     )
                     .map_err(|e| {
-                        PayError::NetworkError(format!(
+                        PayError::network_error(format!(
                             "endpoint={endpoint} invalid balance hex: {e}"
                         ))
                     })?;
@@ -304,7 +313,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "all evm rpc endpoints failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -341,7 +350,7 @@ impl EvmProvider {
                         continue;
                     }
                     let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-                        PayError::NetworkError(format!("endpoint={endpoint} invalid json: {e}"))
+                        PayError::network_error(format!("endpoint={endpoint} invalid json: {e}"))
                     })?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
@@ -356,7 +365,7 @@ impl EvmProvider {
                         16,
                     )
                     .map_err(|e| {
-                        PayError::NetworkError(format!(
+                        PayError::network_error(format!(
                             "endpoint={endpoint} invalid balanceOf hex: {e}"
                         ))
                     })?;
@@ -367,7 +376,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "all evm rpc endpoints failed for balanceOf: {}",
             last_error.unwrap_or_default()
         )))
@@ -489,10 +498,25 @@ impl EvmProvider {
             let price =
                 u128::from_str_radix(price_hex.strip_prefix("0x").unwrap_or(&price_hex), 16)
                     .unwrap_or(0);
-            let fee_wei = gas.saturating_mul(price);
-            return Ok((fee_wei / 1_000_000_000) as u64);
+            let fee_wei = gas
+                .checked_mul(price)
+                .ok_or_else(|| PayError::InvalidAmount {
+                    message: format!("gas_used*price overflow: {gas} * {price}"),
+                    hint: Some(
+                        "endpoint returned unreasonable gas estimate; try another rpc endpoint"
+                            .to_string(),
+                    ),
+                })?;
+            let fee_gwei =
+                u64::try_from(fee_wei / 1_000_000_000).map_err(|_| PayError::InvalidAmount {
+                    message: format!("fee_wei exceeds u64 gwei representable range: {fee_wei}"),
+                    hint: Some(
+                        "estimated fee is impossibly large; verify rpc endpoint".to_string(),
+                    ),
+                })?;
+            return Ok(fee_gwei);
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "estimate_fee failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -512,7 +536,7 @@ impl EvmProvider {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                        .map_err(|e| PayError::network_error(format!("invalid json: {e}")))?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
                         continue;
@@ -530,7 +554,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "eth_blockNumber failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -554,7 +578,7 @@ impl EvmProvider {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                        .map_err(|e| PayError::network_error(format!("invalid json: {e}")))?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
                         continue;
@@ -565,7 +589,7 @@ impl EvmProvider {
                     }
                     let receipt: EvmTxReceipt =
                         serde_json::from_value(result.cloned().unwrap_or_default())
-                            .map_err(|e| PayError::NetworkError(format!("parse receipt: {e}")))?;
+                            .map_err(|e| PayError::network_error(format!("parse receipt: {e}")))?;
                     return Ok(Some(receipt));
                 }
                 Err(e) => {
@@ -573,7 +597,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "eth_getTransactionReceipt failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -596,7 +620,7 @@ impl EvmProvider {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                        .map_err(|e| PayError::network_error(format!("invalid json: {e}")))?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
                         continue;
@@ -608,7 +632,7 @@ impl EvmProvider {
                     let tx: EvmTxByHash = serde_json::from_value(
                         result.cloned().unwrap_or_default(),
                     )
-                    .map_err(|e| PayError::NetworkError(format!("parse transaction: {e}")))?;
+                    .map_err(|e| PayError::network_error(format!("parse transaction: {e}")))?;
                     let input = tx.input.as_deref().unwrap_or("0x");
                     return Ok(Some(decode_hex_data_bytes(input)?));
                 }
@@ -617,7 +641,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "eth_getTransactionByHash failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -641,7 +665,7 @@ impl EvmProvider {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                        .map_err(|e| PayError::network_error(format!("invalid json: {e}")))?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
                         continue;
@@ -652,7 +676,7 @@ impl EvmProvider {
                     }
                     let block: EvmBlockByNumber =
                         serde_json::from_value(result.cloned().unwrap_or_default())
-                            .map_err(|e| PayError::NetworkError(format!("parse block: {e}")))?;
+                            .map_err(|e| PayError::network_error(format!("parse block: {e}")))?;
                     return Ok(Some(block));
                 }
                 Err(e) => {
@@ -660,7 +684,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "eth_getBlockByNumber failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -684,7 +708,7 @@ impl EvmProvider {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                        .map_err(|e| PayError::network_error(format!("invalid json: {e}")))?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
                         continue;
@@ -696,7 +720,7 @@ impl EvmProvider {
                     let header: EvmBlockHeader = serde_json::from_value(
                         result.cloned().unwrap_or_default(),
                     )
-                    .map_err(|e| PayError::NetworkError(format!("parse block header: {e}")))?;
+                    .map_err(|e| PayError::network_error(format!("parse block header: {e}")))?;
                     return Ok(header.timestamp.as_deref().and_then(parse_hex_u64));
                 }
                 Err(e) => {
@@ -704,7 +728,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "eth_getBlockByNumber(timestamp) failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -722,7 +746,7 @@ impl EvmProvider {
             return Ok(vec![]);
         }
         let recipient_topic = address_topic(recipient)
-            .ok_or_else(|| PayError::InvalidAmount("invalid evm recipient address".to_string()))?;
+            .ok_or_else(|| PayError::invalid_amount("invalid evm recipient address".to_string()))?;
         let from_hex = format!("0x{from_block:x}");
         let to_hex = format!("0x{to_block:x}");
 
@@ -747,14 +771,14 @@ impl EvmProvider {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|e| PayError::NetworkError(format!("invalid json: {e}")))?;
+                        .map_err(|e| PayError::network_error(format!("invalid json: {e}")))?;
                     if let Some(err) = parsed.get("error") {
                         last_error = Some(format!("endpoint={endpoint} rpc error: {err}"));
                         continue;
                     }
                     let result = parsed.get("result").cloned().unwrap_or_default();
                     let logs: Vec<EvmLogEntry> = serde_json::from_value(result)
-                        .map_err(|e| PayError::NetworkError(format!("parse logs: {e}")))?;
+                        .map_err(|e| PayError::network_error(format!("parse logs: {e}")))?;
                     return Ok(logs);
                 }
                 Err(e) => {
@@ -762,7 +786,7 @@ impl EvmProvider {
                 }
             }
         }
-        Err(PayError::NetworkError(format!(
+        Err(PayError::network_error(format!(
             "eth_getLogs failed: {}",
             last_error.unwrap_or_default()
         )))
@@ -780,7 +804,7 @@ impl EvmProvider {
         let start_block = latest_block.saturating_sub(lookback_blocks.saturating_sub(1));
         let now = wallet::now_epoch_seconds();
         let normalized_wallet = normalize_address(ctx.wallet_address)
-            .ok_or_else(|| PayError::InvalidAmount("invalid evm wallet address".to_string()))?;
+            .ok_or_else(|| PayError::invalid_amount("invalid evm wallet address".to_string()))?;
         let mut memo_cache: HashMap<String, Option<String>> = HashMap::new();
         let mut block_ts_cache: HashMap<u64, u64> = HashMap::new();
 
@@ -853,6 +877,7 @@ impl EvmProvider {
                     confirmed_at_epoch_s: Some(block_timestamp),
                     fee: None,
                     reference_keys: None,
+                    reservation_ids: Vec::new(),
                 };
                 let _ = self.store.append_transaction_record(&record);
                 known_txids.insert(tx_hash);
@@ -954,6 +979,7 @@ impl EvmProvider {
                     confirmed_at_epoch_s: Some(block_timestamp),
                     fee: None,
                     reference_keys: None,
+                    reservation_ids: Vec::new(),
                 };
                 let _ = self.store.append_transaction_record(&record);
                 known_txids.insert(tx_hash);
@@ -1045,9 +1071,11 @@ impl EvmTxReceipt {
             16,
         )
         .ok()?;
-        // fee_wei = gasUsed * effectiveGasPrice; convert to gwei
+        // fee_wei = gasUsed * effectiveGasPrice; convert to gwei. Truncating to u64
+        // can lose precision for absurd values — return None so the caller can
+        // surface a missing-fee Output rather than emit a misleading capped number.
         let fee_wei = gas_used.checked_mul(gas_price)?;
-        Some((fee_wei / 1_000_000_000) as u64)
+        u64::try_from(fee_wei / 1_000_000_000).ok()
     }
 }
 
@@ -1073,7 +1101,7 @@ fn normalize_onchain_memo(onchain_memo: Option<&str>) -> Result<Option<Vec<u8>>,
     };
     let memo_bytes = memo.as_bytes();
     if memo_bytes.len() > 256 {
-        return Err(PayError::InvalidAmount(
+        return Err(PayError::invalid_amount(
             "evm onchain-memo must be <= 256 bytes".to_string(),
         ));
     }
@@ -1109,11 +1137,11 @@ fn decode_hex_data_bytes(raw: &str) -> Result<Vec<u8>, PayError> {
         return Ok(Vec::new());
     }
     if !hex_data.len().is_multiple_of(2) {
-        return Err(PayError::NetworkError(
+        return Err(PayError::network_error(
             "invalid tx input hex length".to_string(),
         ));
     }
-    hex::decode(hex_data).map_err(|e| PayError::NetworkError(format!("invalid tx input hex: {e}")))
+    hex::decode(hex_data).map_err(|e| PayError::network_error(format!("invalid tx input hex: {e}")))
 }
 
 fn parse_hex_u64(raw: &str) -> Option<u64> {
@@ -1126,12 +1154,28 @@ fn parse_hex_u256(raw: &str) -> Option<U256> {
     U256::from_str_radix(hex, 16).ok()
 }
 
-fn u256_to_u64_saturating(value: U256) -> u64 {
-    value.try_into().unwrap_or(u64::MAX)
+/// Convert a `U256` amount to `u64`. Returns `PayError::InvalidAmount` when
+/// the value exceeds `u64::MAX` (~18.4 ETH worth of wei) instead of silently
+/// saturating, so an upstream RPC bug or oversized request fails loudly.
+fn u256_to_u64_checked(value: U256, field: &str) -> Result<u64, PayError> {
+    value
+        .try_into()
+        .map_err(|_| PayError::InvalidAmount {
+            message: format!(
+                "{field} value {value} exceeds u64::MAX (>18.4 ETH worth of base units); refusing send"
+            ),
+            hint: Some(
+                "if this is intentional, split into multiple sends; otherwise the upstream rpc may have returned a corrupted value"
+                    .to_string(),
+            ),
+        })
 }
 
-fn gwei_to_wei_saturating(value: u64) -> u64 {
-    value.saturating_mul(1_000_000_000)
+/// Convert gwei to wei. Returns `None` when the input would overflow u64 wei
+/// (>18.4 ETH worth of fee) so callers can fail loudly rather than silently
+/// transforming a corrupted upstream estimate into u64::MAX.
+fn gwei_to_wei_checked(value: u64) -> Option<u64> {
+    value.checked_mul(1_000_000_000)
 }
 
 fn normalize_address(raw: &str) -> Option<String> {
@@ -1192,7 +1236,7 @@ impl PayProvider for EvmProvider {
 
     async fn create_wallet(&self, request: &WalletCreateRequest) -> Result<WalletInfo, PayError> {
         if request.rpc_endpoints.is_empty() {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "evm wallet requires --evm-rpc-endpoint (or rpc_endpoints in JSON)".to_string(),
             ));
         }
@@ -1207,7 +1251,7 @@ impl PayProvider for EvmProvider {
 
         let mnemonic_str = if let Some(raw) = request.mnemonic_secret.as_deref() {
             let mnemonic: Mnemonic = raw.parse().map_err(|_| {
-                PayError::InvalidAmount(
+                PayError::invalid_amount(
                     "invalid mnemonic-secret for evm wallet: expected BIP39 words".to_string(),
                 )
             })?;
@@ -1215,16 +1259,23 @@ impl PayProvider for EvmProvider {
         } else {
             let mut entropy = [0u8; 16];
             getrandom::fill(&mut entropy)
-                .map_err(|e| PayError::InternalError(format!("rng failed: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("rng failed: {e}")))?;
             let mnemonic = Mnemonic::from_entropy(&entropy)
-                .map_err(|e| PayError::InternalError(format!("mnemonic gen: {e}")))?;
+                .map_err(|e| PayError::internal_error(format!("mnemonic gen: {e}")))?;
             mnemonic.words().collect::<Vec<_>>().join(" ")
         };
 
         let signer = Self::signer_from_mnemonic(&mnemonic_str)?;
         let address = format!("{:?}", signer.address());
 
-        let wallet_id = wallet::generate_wallet_identifier()?;
+        // Derive a stable wallet_id from (network, chain_id, mnemonic). Same
+        // mnemonic on a different chain (Base vs Arbitrum) yields a different
+        // id, but same mnemonic+chain always yields the same id.
+        let wallet_id = wallet::derive_wallet_identifier(&[
+            b"evm",
+            &chain_id.to_le_bytes(),
+            mnemonic_str.trim().as_bytes(),
+        ]);
         let normalized_label = {
             let trimmed = request.label.trim();
             if trimmed.is_empty() || trimmed == "default" {
@@ -1242,6 +1293,7 @@ impl PayProvider for EvmProvider {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: Some(endpoints),
             evm_chain_id: Some(chain_id),
+            sol_cluster: None,
             seed_secret: Some(mnemonic_str.clone()),
             backend: None,
             btc_esplora_url: None,
@@ -1274,7 +1326,7 @@ impl PayProvider for EvmProvider {
                 .map(|(name, value)| format!("{name}={value}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(PayError::InvalidAmount(format!(
+            return Err(PayError::invalid_amount(format!(
                 "wallet {wallet_id} has non-zero balance components ({component_list}); transfer funds first"
             )));
         }
@@ -1377,7 +1429,7 @@ impl PayProvider for EvmProvider {
     }
 
     async fn receive_claim(&self, _wallet: &str, _quote_id: &str) -> Result<u64, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "evm receive has no claim step".to_string(),
         ))
     }
@@ -1389,7 +1441,7 @@ impl PayProvider for EvmProvider {
         _onchain_memo: Option<&str>,
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "evm does not use cashu send".to_string(),
         ))
     }
@@ -1399,7 +1451,7 @@ impl PayProvider for EvmProvider {
         _wallet: &str,
         _token: &str,
     ) -> Result<CashuReceiveResult, PayError> {
-        Err(PayError::NotImplemented(
+        Err(PayError::not_implemented(
             "evm does not use cashu receive".to_string(),
         ))
     }
@@ -1472,7 +1524,7 @@ impl PayProvider for EvmProvider {
         }
 
         let transaction_id = transaction_id.ok_or_else(|| {
-            PayError::NetworkError(format!(
+            PayError::network_error(format!(
                 "all evm rpc endpoints failed for withdraw: {}",
                 last_error.unwrap_or_default()
             ))
@@ -1533,6 +1585,7 @@ impl PayProvider for EvmProvider {
             confirmed_at_epoch_s: None,
             fee: fee_amount.clone(),
             reference_keys: None,
+            reservation_ids: Vec::new(),
         };
         let _ = self.store.append_transaction_record(&history);
 
@@ -1584,15 +1637,16 @@ impl PayProvider for EvmProvider {
             .await
             .unwrap_or(0);
 
-        let amount_wei_u64 = u256_to_u64_saturating(transfer_target.amount_wei);
-        let spend_debits = Self::spend_debits_for_target(&transfer_target, fee_gwei);
+        let amount_wei_u64 = u256_to_u64_checked(transfer_target.amount_wei, "amount_wei")?;
+        let spend_debits = Self::spend_debits_for_target(&transfer_target, fee_gwei)?;
 
-        // amount_native in the same unit as the transfer
+        // amount_native in the same unit as the transfer. Native ETH sends report
+        // gwei (checked), ERC20 sends report raw token base units.
         let amount_native = if transfer_target.token_contract.is_some() {
             amount_wei_u64
         } else {
             let gwei = transfer_target.amount_wei / U256::from(1_000_000_000u64);
-            gwei.try_into().unwrap_or(u64::MAX)
+            u256_to_u64_checked(gwei, "amount_gwei")?
         };
 
         Ok(SendQuoteInfo {
@@ -1625,76 +1679,73 @@ impl PayProvider for EvmProvider {
     async fn history_status(&self, transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
         let mut record = self.store.find_transaction_record_by_id(transaction_id)?;
         let Some(existing) = record.as_ref() else {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "transaction {transaction_id} not found"
             )));
         };
         if existing.network != Network::Evm {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "transaction {transaction_id} not found"
             )));
         }
 
         let mut confirmations: Option<u32> = None;
-        if let Ok(meta) = self.load_evm_wallet(&existing.wallet) {
-            if let Ok(endpoints) = Self::rpc_endpoints_for_wallet(&meta) {
-                if let Ok(Some(receipt)) = self
-                    .get_transaction_receipt_raw(&endpoints, transaction_id)
-                    .await
-                {
-                    let status = receipt_status(&receipt);
-                    let current_block = if receipt.block_number.is_some() {
-                        self.get_block_number_raw(&endpoints).await.unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    confirmations = receipt_confirmations(&receipt, current_block);
+        if let Ok(meta) = self.load_evm_wallet(&existing.wallet)
+            && let Ok(endpoints) = Self::rpc_endpoints_for_wallet(&meta)
+            && let Ok(Some(receipt)) = self
+                .get_transaction_receipt_raw(&endpoints, transaction_id)
+                .await
+        {
+            let status = receipt_status(&receipt);
+            let current_block = if receipt.block_number.is_some() {
+                self.get_block_number_raw(&endpoints).await.unwrap_or(0)
+            } else {
+                0
+            };
+            confirmations = receipt_confirmations(&receipt, current_block);
 
-                    if let Some(rec) = record.as_mut() {
-                        let confirmed_at_epoch_s = if status == TxStatus::Confirmed {
-                            Some(
-                                rec.confirmed_at_epoch_s
-                                    .unwrap_or_else(wallet::now_epoch_seconds),
-                            )
-                        } else {
-                            None
-                        };
-                        if rec.status != status || rec.confirmed_at_epoch_s != confirmed_at_epoch_s
-                        {
-                            let _ = self.store.update_transaction_record_status(
-                                transaction_id,
-                                status,
-                                confirmed_at_epoch_s,
-                            );
-                            rec.status = status;
-                            rec.confirmed_at_epoch_s = confirmed_at_epoch_s;
-                        }
+            if let Some(rec) = record.as_mut() {
+                let confirmed_at_epoch_s = if status == TxStatus::Confirmed {
+                    Some(
+                        rec.confirmed_at_epoch_s
+                            .unwrap_or_else(wallet::now_epoch_seconds),
+                    )
+                } else {
+                    None
+                };
+                if rec.status != status || rec.confirmed_at_epoch_s != confirmed_at_epoch_s {
+                    let _ = self.store.update_transaction_record_status(
+                        transaction_id,
+                        status,
+                        confirmed_at_epoch_s,
+                    );
+                    rec.status = status;
+                    rec.confirmed_at_epoch_s = confirmed_at_epoch_s;
+                }
 
-                        if let Some(fee_gwei) = receipt.fee_gwei() {
-                            let update_fee = rec
-                                .fee
-                                .as_ref()
-                                .map(|f| f.token != "gwei" || f.value != fee_gwei)
-                                .unwrap_or(true);
-                            if update_fee {
-                                let _ = self.store.update_transaction_record_fee(
-                                    transaction_id,
-                                    fee_gwei,
-                                    "gwei",
-                                );
-                                rec.fee = Some(Amount {
-                                    value: fee_gwei,
-                                    token: "gwei".to_string(),
-                                });
-                            }
-                        }
+                if let Some(fee_gwei) = receipt.fee_gwei() {
+                    let update_fee = rec
+                        .fee
+                        .as_ref()
+                        .map(|f| f.token != "gwei" || f.value != fee_gwei)
+                        .unwrap_or(true);
+                    if update_fee {
+                        let _ = self.store.update_transaction_record_fee(
+                            transaction_id,
+                            fee_gwei,
+                            "gwei",
+                        );
+                        rec.fee = Some(Amount {
+                            value: fee_gwei,
+                            token: "gwei".to_string(),
+                        });
                     }
                 }
             }
         }
 
         let record = record.ok_or_else(|| {
-            PayError::WalletNotFound(format!("transaction {transaction_id} not found"))
+            PayError::wallet_not_found(format!("transaction {transaction_id} not found"))
         })?;
         Ok(HistoryStatusInfo {
             transaction_id: transaction_id.to_string(),
@@ -1797,6 +1848,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gwei_to_wei_checked_rejects_overflow() {
+        // 18_446_744_073 gwei * 1e9 just fits u64 (= u64::MAX - 1_551_915_519).
+        assert!(gwei_to_wei_checked(18_446_744_073).is_some());
+        // Adding 1 pushes over u64::MAX.
+        assert!(gwei_to_wei_checked(18_446_744_074).is_none());
+        // u64::MAX is comfortably over the overflow threshold.
+        assert!(gwei_to_wei_checked(u64::MAX).is_none());
+    }
+
+    #[test]
+    fn spend_debits_fail_on_amount_wei_overflow() {
+        // Amount wei beyond u64::MAX (~18.4 ETH) must error out rather than
+        // silently sending u64::MAX wei. Without the checked conversion the
+        // ledger would record a saturated amount while the wallet broadcast
+        // the full U256 value.
+        let target = EvmTransferTarget {
+            recipient_address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                .parse()
+                .unwrap(),
+            amount_wei: U256::from(u64::MAX) + U256::from(1u64),
+            token_label: "eth".to_string(),
+            token_contract: None,
+        };
+        let err = EvmProvider::spend_debits_for_target(&target, 21)
+            .expect_err("amount_wei overflow must be a hard error");
+        assert!(matches!(err, PayError::InvalidAmount { .. }));
+        assert!(err.to_string().contains("amount_wei"));
+    }
+
+    #[test]
+    fn spend_debits_fail_on_unreasonable_fee() {
+        let target = EvmTransferTarget {
+            recipient_address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+                .parse()
+                .unwrap(),
+            amount_wei: U256::from(1u64),
+            token_label: "eth".to_string(),
+            token_contract: None,
+        };
+        // 19e9 gwei * 1e9 = 1.9e19 wei > u64::MAX → caller must surface error rather
+        // than silently send with a capped fee.
+        let result = EvmProvider::spend_debits_for_target(&target, 19_000_000_000);
+        assert!(matches!(result, Err(PayError::InvalidAmount { .. })));
+    }
+
+    #[test]
     fn parse_native_eth_transfer() {
         let target = EvmProvider::parse_transfer_target(
             "ethereum:0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045?amount-wei=1000000000000000",
@@ -1844,7 +1941,7 @@ mod tests {
             CHAIN_ID_BASE,
         )
         .expect("parse usdc transfer");
-        let debits = EvmProvider::spend_debits_for_target(&target, 21);
+        let debits = EvmProvider::spend_debits_for_target(&target, 21).expect("debits");
         assert_eq!(debits.len(), 2);
         assert_eq!(debits[0].amount_native, 1_000_000);
         assert_eq!(debits[0].token.as_deref(), Some("usdc"));
@@ -1859,7 +1956,7 @@ mod tests {
             CHAIN_ID_BASE,
         )
         .expect("parse native eth transfer");
-        let debits = EvmProvider::spend_debits_for_target(&target, 21);
+        let debits = EvmProvider::spend_debits_for_target(&target, 21).expect("debits");
         assert_eq!(debits.len(), 1);
         assert_eq!(debits[0].amount_native, 1_000_021_000_000_000);
         assert_eq!(debits[0].token.as_deref(), Some("native"));
@@ -1872,11 +1969,13 @@ mod tests {
 
     #[test]
     fn parse_missing_amount_fails() {
-        assert!(EvmProvider::parse_transfer_target(
-            "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            CHAIN_ID_BASE,
-        )
-        .is_err());
+        assert!(
+            EvmProvider::parse_transfer_target(
+                "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                CHAIN_ID_BASE,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2027,6 +2126,7 @@ mod tests {
             sol_rpc_endpoints: None,
             evm_rpc_endpoints: Some(vec!["https://rpc.example".to_string()]),
             evm_chain_id: None,
+            sol_cluster: None,
             seed_secret: None,
             backend: None,
             btc_esplora_url: None,

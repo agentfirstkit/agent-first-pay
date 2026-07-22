@@ -1,45 +1,172 @@
 use crate::mode::rpc::crypto::Cipher;
 use crate::mode::rpc::proto::af_pay_client::AfPayClient;
-use crate::mode::rpc::proto::EncryptedRequest;
+use crate::mode::rpc::proto::{EncryptedRequest, HandshakeRequest};
 use agent_first_data::OutputFormat;
+use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Mutex;
+use std::time::Instant;
+use tonic::transport::Channel;
+
+/// Process-wide cache of negotiated RPC sessions, keyed by (endpoint, secret).
+/// The first call to a given endpoint runs Handshake; subsequent calls reuse the
+/// cached `session_id + Cipher` until the server reports `session_expired`, at
+/// which point we re-handshake transparently and retry once.
+static SESSION_CACHE: std::sync::OnceLock<Mutex<HashMap<(String, String), CachedSession>>> =
+    std::sync::OnceLock::new();
+
+#[derive(Clone)]
+struct CachedSession {
+    session_id: u64,
+    cipher: Cipher,
+    #[allow(dead_code)]
+    opened_at: Instant,
+}
+
+fn session_cache() -> &'static Mutex<HashMap<(String, String), CachedSession>> {
+    SESSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_key(endpoint: &str, secret: &str) -> (String, String) {
+    (endpoint.to_string(), secret.to_string())
+}
+
+fn get_cached_session(endpoint: &str, secret: &str) -> Option<CachedSession> {
+    session_cache()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&cache_key(endpoint, secret)).cloned())
+}
+
+fn store_session(endpoint: &str, secret: &str, session: CachedSession) {
+    if let Ok(mut g) = session_cache().lock() {
+        g.insert(cache_key(endpoint, secret), session);
+    }
+}
+
+fn drop_session(endpoint: &str, secret: &str) {
+    if let Ok(mut g) = session_cache().lock() {
+        g.remove(&cache_key(endpoint, secret));
+    }
+}
+
+fn endpoint_url(endpoint: &str) -> String {
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    }
+}
+
+async fn connect(endpoint: &str) -> Result<AfPayClient<Channel>, String> {
+    AfPayClient::connect(endpoint_url(endpoint))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Negotiate a fresh session with the daemon: Handshake → derive Cipher from
+/// (PSK, server-issued salt) → cache the result. Returns the cached session that
+/// was just inserted so the caller can use it without re-reading the cache.
+async fn handshake(endpoint: &str, secret: &str) -> Result<CachedSession, String> {
+    let mut client = connect(endpoint).await?;
+    let resp = client
+        .handshake(HandshakeRequest {
+            // Client nonce currently unused by the server (see proto note); we
+            // still send 16 zero bytes so the field is present for future use.
+            client_nonce: vec![0u8; 16],
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .into_inner();
+    let session = CachedSession {
+        session_id: resp.session_id,
+        cipher: Cipher::from_secret_with_salt(secret, &resp.salt),
+        opened_at: Instant::now(),
+    };
+    store_session(endpoint, secret, session.clone());
+    Ok(session)
+}
+
+async fn session_for(endpoint: &str, secret: &str) -> Result<CachedSession, String> {
+    if let Some(cached) = get_cached_session(endpoint, secret) {
+        return Ok(cached);
+    }
+    handshake(endpoint, secret).await
+}
 
 /// Send an Input to a remote RPC server, return the decrypted Output array.
+///
+/// First-call cost is one Handshake + one Call (≈ 2 round-trips). Cached
+/// sessions reduce subsequent calls to a single round-trip. If the daemon
+/// rejects the cached session as expired, the client re-handshakes once and
+/// retries the request transparently.
 pub async fn rpc_call(
     endpoint: &str,
     secret: &str,
     input: &impl serde::Serialize,
 ) -> Vec<serde_json::Value> {
-    let cipher = Cipher::from_secret(secret);
-
-    // Serialize input to JSON
     let input_json = match serde_json::to_vec(input) {
         Ok(v) => v,
         Err(e) => return vec![rpc_error_output("serialize_error", &format!("{e}"))],
     };
 
-    // Encrypt
-    let (nonce, ciphertext) = match cipher.encrypt(&input_json) {
+    // First attempt with cached session (or fresh handshake if none).
+    match attempt_call(endpoint, secret, &input_json).await {
+        AttemptOutcome::Success(outputs) => outputs,
+        AttemptOutcome::SessionExpired => {
+            drop_session(endpoint, secret);
+            match attempt_call(endpoint, secret, &input_json).await {
+                AttemptOutcome::Success(outputs) => outputs,
+                AttemptOutcome::SessionExpired => vec![rpc_error_output(
+                    "session_expired",
+                    "daemon kept rejecting session after re-handshake",
+                )],
+                AttemptOutcome::Error(out) => vec![out],
+            }
+        }
+        AttemptOutcome::Error(out) => vec![out],
+    }
+}
+
+enum AttemptOutcome {
+    Success(Vec<serde_json::Value>),
+    /// Server returned Unauthenticated with `session_expired`; caller should
+    /// drop the cached session and re-handshake.
+    SessionExpired,
+    Error(serde_json::Value),
+}
+
+async fn attempt_call(endpoint: &str, secret: &str, input_json: &[u8]) -> AttemptOutcome {
+    let session = match session_for(endpoint, secret).await {
+        Ok(s) => s,
+        Err(e) => return AttemptOutcome::Error(rpc_error_output("connect_error", &e)),
+    };
+
+    let (nonce, ciphertext) = match session.cipher.encrypt(input_json) {
         Ok(v) => v,
-        Err(e) => return vec![rpc_error_output("encrypt_error", &e)],
+        Err(e) => return AttemptOutcome::Error(rpc_error_output("encrypt_error", &e)),
     };
 
-    // Build endpoint URL (tonic needs http:// prefix)
-    let url = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        endpoint.to_string()
-    } else {
-        format!("http://{endpoint}")
-    };
-
-    // Connect and call
-    let mut client = match AfPayClient::connect(url).await {
+    let mut client = match connect(endpoint).await {
         Ok(c) => c,
-        Err(e) => return vec![rpc_error_output("connect_error", &format!("{e}"))],
+        Err(e) => return AttemptOutcome::Error(rpc_error_output("connect_error", &e)),
     };
 
-    let response = match client.call(EncryptedRequest { nonce, ciphertext }).await {
+    let response = match client
+        .call(EncryptedRequest {
+            session_id: session.session_id,
+            nonce,
+            ciphertext,
+        })
+        .await
+    {
         Ok(r) => r,
         Err(status) => {
+            if status.code() == tonic::Code::Unauthenticated
+                && status.message().contains("session_expired")
+            {
+                return AttemptOutcome::SessionExpired;
+            }
             let error_code = match status.code() {
                 tonic::Code::PermissionDenied => "permission_denied",
                 tonic::Code::Unauthenticated => "unauthenticated",
@@ -47,25 +174,81 @@ pub async fn rpc_call(
                 tonic::Code::InvalidArgument => "invalid_argument",
                 _ => "rpc_error",
             };
-            return vec![rpc_error_output(error_code, status.message())];
+            return AttemptOutcome::Error(rpc_error_output(error_code, status.message()));
         }
     };
 
     let resp = response.into_inner();
-
-    // Decrypt response
-    let plaintext = match cipher.decrypt(&resp.nonce, &resp.ciphertext) {
+    let plaintext = match session.cipher.decrypt(&resp.nonce, &resp.ciphertext) {
         Ok(v) => v,
-        Err(e) => return vec![rpc_error_output("decrypt_error", &e)],
+        Err(e) => return AttemptOutcome::Error(rpc_error_output("decrypt_error", &e)),
     };
 
-    // Parse as JSON array of Outputs
-    match serde_json::from_slice(&plaintext) {
-        Ok(v) => v,
-        Err(e) => vec![rpc_error_output("parse_error", &format!("{e}"))],
+    match serde_json::from_slice::<Vec<serde_json::Value>>(plaintext.as_slice()) {
+        Ok(events) => match decode_protocol_events(events) {
+            Ok(outputs) => AttemptOutcome::Success(outputs),
+            Err(error) => AttemptOutcome::Error(rpc_error_output("remote_protocol_error", &error)),
+        },
+        Err(e) => AttemptOutcome::Error(rpc_error_output("parse_error", &format!("{e}"))),
     }
 }
 
+fn decode_protocol_events(
+    events: Vec<serde_json::Value>,
+) -> Result<Vec<serde_json::Value>, String> {
+    events
+        .into_iter()
+        .map(|event| {
+            agent_first_data::validate_protocol_event(&event, true)
+                .map_err(|violation| violation.to_string())?;
+            let kind = event
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "protocol event kind is missing".to_string())?;
+            let mut payload = event
+                .get(kind)
+                .cloned()
+                .ok_or_else(|| format!("protocol event payload {kind:?} is missing"))?;
+            if kind == "error" {
+                let fields = payload
+                    .as_object_mut()
+                    .ok_or_else(|| "error payload must be an object".to_string())?;
+                let code = fields
+                    .remove("code")
+                    .unwrap_or_else(|| serde_json::Value::String("remote_error".to_string()));
+                let message = fields
+                    .remove("message")
+                    .unwrap_or_else(|| serde_json::Value::String("remote error".to_string()));
+                fields.insert(
+                    "code".to_string(),
+                    serde_json::Value::String("error".to_string()),
+                );
+                fields.insert("error_code".to_string(), code);
+                fields.insert("error".to_string(), message);
+            }
+            // Re-attach the envelope's `trace` alongside the rest of the flat
+            // fields: afpay's own `Output` shape always carries `trace` at the
+            // same level as `code` (never nested), matching what local
+            // (non-RPC) dispatch produces, and every AFDATA builder pulls
+            // `trace` out to the envelope's top level before this point.
+            if let Some(fields) = payload.as_object_mut()
+                && let Some(trace) = event.get("trace")
+            {
+                fields.insert("trace".to_string(), trace.clone());
+            }
+            Ok(payload)
+        })
+        .collect()
+}
+
+/// Build a flat `Output::Error`-shaped value for a client-side failure that
+/// never reached the daemon (connect/decrypt/parse/session errors). This is
+/// deliberately the same un-enveloped `code:"error"` shape [`decode_protocol_events`]
+/// produces when it unwraps a real daemon error, not an AFDATA protocol
+/// envelope — every consumer of this crate's `outputs: Vec<Value>` (
+/// [`RemoteProvider::map_remote_error`], the CLI's `emit_remote_outputs`, and
+/// [`crate::output_fmt::render_value_with_policy`]'s own envelope-wrapping
+/// fallback) keys off this flat shape.
 fn rpc_error_output(error_code: &str, error: &str) -> serde_json::Value {
     let hint = match error_code {
         "connect_error" => Some("check --rpc-endpoint address and that the daemon is running"),
@@ -73,16 +256,16 @@ fn rpc_error_output(error_code: &str, error: &str) -> serde_json::Value {
         "permission_denied" => Some("this operation can only be run on the daemon directly"),
         _ => None,
     };
-    let mut v = serde_json::json!({
+    let mut value = serde_json::json!({
         "code": "error",
         "error_code": error_code,
         "error": error,
         "retryable": matches!(error_code, "connect_error" | "unavailable"),
     });
     if let Some(h) = hint {
-        v["hint"] = serde_json::Value::String(h.to_string());
+        value["hint"] = serde_json::Value::String(h.to_string());
     }
-    v
+    value
 }
 
 /// Validate rpc_endpoint + rpc_secret pair. Returns (endpoint, secret) or prints error and exits.
@@ -98,7 +281,11 @@ pub fn require_remote_args<'a>(
                 "--rpc-endpoint is required",
                 Some("pass the address of the afpay daemon"),
             );
-            let rendered = agent_first_data::cli_output(&value, format);
+            let rendered = agent_first_data::render(
+                value.as_value(),
+                format,
+                &agent_first_data::OutputOptions::default(),
+            );
             let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
@@ -110,7 +297,11 @@ pub fn require_remote_args<'a>(
                 "--rpc-secret is required with --rpc-endpoint",
                 Some("must match the --rpc-secret used by the daemon"),
             );
-            let rendered = agent_first_data::cli_output(&value, format);
+            let rendered = agent_first_data::render(
+                value.as_value(),
+                format,
+                &agent_first_data::OutputOptions::default(),
+            );
             let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
@@ -122,19 +313,20 @@ pub fn require_remote_args<'a>(
 pub fn emit_remote_outputs(
     outputs: &[serde_json::Value],
     format: OutputFormat,
-    log_filters: &[String],
+    log_filters: &agent_first_data::LogFilters,
 ) -> bool {
     let mut had_error = false;
     for value in outputs {
-        if value.get("code").and_then(|v| v.as_str()) == Some("error") {
+        let kind = value.get("kind").and_then(|v| v.as_str());
+        let payload = kind.and_then(|kind| value.get(kind)).unwrap_or(value);
+        if kind == Some("error") || payload.get("code").and_then(|v| v.as_str()) == Some("error") {
             had_error = true;
         }
-        if let Some("log") = value.get("code").and_then(|v| v.as_str()) {
-            if let Some(event) = value.get("event").and_then(|v| v.as_str()) {
-                if !log_event_enabled(log_filters, event) {
-                    continue;
-                }
-            }
+        if (kind == Some("log") || payload.get("code").and_then(|v| v.as_str()) == Some("log"))
+            && let Some(event) = payload.get("event").and_then(|v| v.as_str())
+            && !log_filters.enabled(event)
+        {
+            continue;
         }
         let rendered = crate::output_fmt::render_value_with_policy(value, format);
         let _ = writeln!(std::io::stdout(), "{rendered}");
@@ -180,15 +372,6 @@ pub fn wrap_remote_limit_topology(outputs: &mut [serde_json::Value], endpoint: &
     }
 }
 
-fn log_event_enabled(log: &[String], event: &str) -> bool {
-    if log.is_empty() {
-        return false;
-    }
-    let ev = event.to_ascii_lowercase();
-    log.iter()
-        .any(|f| f == "*" || f == "all" || ev.starts_with(f.as_str()))
-}
-
 // ═══════════════════════════════════════════
 // RemoteProvider — PayProvider over RPC
 // ═══════════════════════════════════════════
@@ -196,8 +379,8 @@ fn log_event_enabled(log: &[String], event: &str) -> bool {
 use crate::provider::{HistorySyncStats, PayError, PayProvider};
 use crate::types::*;
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static REMOTE_REQUEST_FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -325,6 +508,98 @@ impl RemoteProvider {
         rpc_call(&self.endpoint, &self.secret, input).await
     }
 
+    /// Extract a structured `LimitExceeded` from a remote response, or report
+    /// `RemoteProtocolError` if any required field is missing or has the wrong
+    /// type. This refuses to fabricate a partial LimitExceeded with zeros and
+    /// empty strings — silently dropping fields had previously let bad upstream
+    /// JSON look like a legitimate limit hit, which then surprised callers.
+    fn parse_limit_exceeded(&self, value: &serde_json::Value) -> PayError {
+        // rule_id, scope_key, scope, spent, max_spend, remaining_s — all required.
+        let required_str = |field: &str| -> Result<String, String> {
+            value
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| format!("limit_exceeded missing required string field `{field}`"))
+        };
+        let required_u64 = |field: &str| -> Result<u64, String> {
+            value
+                .get(field)
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| format!("limit_exceeded missing required u64 field `{field}`"))
+        };
+
+        let rule_id = match required_str("rule_id") {
+            Ok(v) => v,
+            Err(detail) => return self.protocol_error(detail),
+        };
+        let scope_key = match required_str("scope_key") {
+            Ok(v) => v,
+            Err(detail) => return self.protocol_error(detail),
+        };
+        let scope = match value.get("scope").cloned() {
+            Some(raw) => match serde_json::from_value::<SpendScope>(raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    return self.protocol_error(format!(
+                        "limit_exceeded scope is not a known variant: {e}"
+                    ));
+                }
+            },
+            None => {
+                return self
+                    .protocol_error("limit_exceeded missing required field `scope`".to_string());
+            }
+        };
+        let spent = match required_u64("spent") {
+            Ok(v) => v,
+            Err(detail) => return self.protocol_error(detail),
+        };
+        let max_spend = match required_u64("max_spend") {
+            Ok(v) => v,
+            Err(detail) => return self.protocol_error(detail),
+        };
+        let remaining_s = match required_u64("remaining_s") {
+            Ok(v) => v,
+            Err(detail) => return self.protocol_error(detail),
+        };
+
+        PayError::LimitExceeded {
+            rule_id,
+            scope,
+            scope_key,
+            spent,
+            max_spend,
+            token: value
+                .get("token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            remaining_s,
+            origin: Some(
+                value
+                    .get("origin")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| self.endpoint.clone()),
+            ),
+            hint: value
+                .get("hint")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        }
+    }
+
+    fn protocol_error(&self, detail: String) -> PayError {
+        PayError::RemoteProtocolError {
+            endpoint: self.endpoint.clone(),
+            detail,
+            hint: Some(
+                "the remote daemon returned a malformed limit_exceeded payload; verify it is running a compatible afpay version"
+                    .to_string(),
+            ),
+        }
+    }
+
     fn map_remote_error(&self, value: &serde_json::Value) -> Option<PayError> {
         let code = value
             .get("code")
@@ -332,6 +607,10 @@ impl RemoteProvider {
             .unwrap_or_default();
         match code {
             "error" => {
+                // For non-LimitExceeded errors the daemon's `error` string is
+                // authoritative; surface it verbatim under the variant the
+                // error_code maps to so the agent sees the same retryable flag
+                // and hint it would see for a local error.
                 let msg = value
                     .get("error")
                     .and_then(|v| v.as_str())
@@ -341,84 +620,14 @@ impl RemoteProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("remote_error");
                 Some(match error_code {
-                    "wallet_not_found" => PayError::WalletNotFound(msg.to_string()),
-                    "invalid_amount" => PayError::InvalidAmount(msg.to_string()),
-                    "not_implemented" => PayError::NotImplemented(msg.to_string()),
-                    "limit_exceeded" => PayError::LimitExceeded {
-                        rule_id: value
-                            .get("rule_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        scope: serde_json::from_value(
-                            value
-                                .get("scope")
-                                .cloned()
-                                .unwrap_or_else(|| serde_json::json!("network")),
-                        )
-                        .unwrap_or(SpendScope::Network),
-                        scope_key: value
-                            .get("scope_key")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        spent: value.get("spent").and_then(|v| v.as_u64()).unwrap_or(0),
-                        max_spend: value.get("max_spend").and_then(|v| v.as_u64()).unwrap_or(0),
-                        token: value
-                            .get("token")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
-                        remaining_s: value
-                            .get("remaining_s")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        origin: Some(
-                            value
-                                .get("origin")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| self.endpoint.clone()),
-                        ),
-                    },
-                    _ => PayError::NetworkError(msg.to_string()),
+                    "wallet_not_found" => PayError::wallet_not_found(msg.to_string()),
+                    "invalid_amount" => PayError::invalid_amount(msg.to_string()),
+                    "not_implemented" => PayError::not_implemented(msg.to_string()),
+                    "limit_exceeded" => self.parse_limit_exceeded(value),
+                    _ => PayError::network_error(msg.to_string()),
                 })
             }
-            "limit_exceeded" => Some(PayError::LimitExceeded {
-                rule_id: value
-                    .get("rule_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                scope: serde_json::from_value(
-                    value
-                        .get("scope")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!("network")),
-                )
-                .unwrap_or(SpendScope::Network),
-                scope_key: value
-                    .get("scope_key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                spent: value.get("spent").and_then(|v| v.as_u64()).unwrap_or(0),
-                max_spend: value.get("max_spend").and_then(|v| v.as_u64()).unwrap_or(0),
-                token: value
-                    .get("token")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                remaining_s: value
-                    .get("remaining_s")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0),
-                origin: Some(
-                    value
-                        .get("origin")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| self.endpoint.clone()),
-                ),
-            }),
+            "limit_exceeded" => Some(self.parse_limit_exceeded(value)),
             _ => None,
         }
     }
@@ -443,11 +652,11 @@ impl RemoteProvider {
             if expected_codes.contains(&code) {
                 return Ok(value);
             }
-            return Err(PayError::NetworkError(format!(
+            return Err(PayError::network_error(format!(
                 "unexpected remote output code '{code}'"
             )));
         }
-        Err(PayError::NetworkError(
+        Err(PayError::network_error(
             "empty or log-only response from remote".to_string(),
         ))
     }
@@ -458,7 +667,7 @@ impl RemoteProvider {
         label: &str,
     ) -> Result<T, PayError> {
         serde_json::from_value(value)
-            .map_err(|e| PayError::NetworkError(format!("parse {label}: {e}")))
+            .map_err(|e| PayError::network_error(format!("parse {label}: {e}")))
     }
 
     fn balance_from_output(
@@ -485,12 +694,12 @@ impl RemoteProvider {
                 (wallets.len() == 1).then(|| wallets.remove(0))
             });
         let Some(item) = item else {
-            return Err(PayError::WalletNotFound(format!(
+            return Err(PayError::wallet_not_found(format!(
                 "wallet {wallet} not found in remote balance response"
             )));
         };
         item.balance.ok_or_else(|| {
-            PayError::NetworkError(
+            PayError::network_error(
                 item.error
                     .unwrap_or_else(|| "remote balance response has no balance".to_string()),
             )
@@ -528,7 +737,7 @@ impl PayProvider for RemoteProvider {
                     .unwrap_or("unknown");
                 let local = crate::config::VERSION;
                 if remote_version != local {
-                    return Err(PayError::NetworkError(format!(
+                    return Err(PayError::network_error(format!(
                         "version mismatch: local v{local}, remote v{remote_version}"
                     )));
                 }
@@ -554,6 +763,7 @@ impl PayProvider for RemoteProvider {
                 btc_core_url: request.btc_core_url.clone(),
                 btc_core_auth_secret: request.btc_core_auth_secret.clone(),
                 btc_electrum_url: request.btc_electrum_url.clone(),
+                sol_cluster: None,
             })
             .await,
             &["wallet_created"],
@@ -573,7 +783,7 @@ impl PayProvider for RemoteProvider {
         request: LnWalletCreateRequest,
     ) -> Result<WalletInfo, PayError> {
         if self.network != Network::Ln {
-            return Err(PayError::InvalidAmount(
+            return Err(PayError::invalid_amount(
                 "ln_wallet_create can only be used with ln provider".to_string(),
             ));
         }
@@ -742,6 +952,10 @@ impl PayProvider for RemoteProvider {
                 onchain_memo: onchain_memo.map(|s| s.to_string()),
                 local_memo: None,
                 mints: mints.map(|m| m.to_vec()),
+                // Remote-provider hop is the upstream daemon's view; idempotency
+                // is enforced at the agent-facing boundary, not on inter-daemon
+                // proxy calls.
+                idempotency_key: None,
             })
             .await,
             &["cashu_sent"],
@@ -791,9 +1005,13 @@ impl PayProvider for RemoteProvider {
                 wallet: Some(wallet.to_string()),
                 network: Some(self.network),
                 to: to.to_string(),
+                amount: None,
                 onchain_memo: onchain_memo.map(|s| s.to_string()),
                 local_memo: None,
                 mints: mints.map(|m| m.to_vec()),
+                chain_id: None,
+                // See cashu_send above — idempotency enforced at the agent boundary.
+                idempotency_key: None,
             })
             .await,
             &["sent"],
@@ -922,7 +1140,7 @@ mod tests {
                 &["wallet_list"],
             )
             .expect_err("error output should be mapped");
-        assert!(matches!(err, PayError::WalletNotFound(_)));
+        assert!(matches!(err, PayError::WalletNotFound { .. }));
     }
 
     #[test]
@@ -933,6 +1151,8 @@ mod tests {
                 vec![serde_json::json!({
                     "code": "limit_exceeded",
                     "rule_id": "r_abc123",
+                    "scope": "network",
+                    "scope_key": "cashu",
                     "spent": 1500,
                     "max_spend": 1000,
                     "remaining_s": 42
@@ -954,6 +1174,37 @@ mod tests {
                 assert_eq!(remaining_s, 42);
             }
             other => panic!("expected LimitExceeded, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_limit_exceeded_yields_remote_protocol_error() {
+        // Missing required scope_key — strict parser must refuse rather than
+        // fabricate a LimitExceeded with empty strings/zeros, which would have
+        // looked like a legitimate cap hit to the agent.
+        let provider = RemoteProvider::new("http://127.0.0.1:1", "secret", Network::Cashu);
+        let err = provider
+            .first_output(
+                vec![serde_json::json!({
+                    "code": "limit_exceeded",
+                    "rule_id": "r_abc123",
+                    "scope": "network",
+                    // scope_key omitted intentionally
+                    "spent": 1500,
+                    "max_spend": 1000,
+                    "remaining_s": 42
+                })],
+                &["sent"],
+            )
+            .expect_err("malformed limit_exceeded should be mapped to a protocol error");
+        match err {
+            PayError::RemoteProtocolError { detail, .. } => {
+                assert!(
+                    detail.contains("scope_key"),
+                    "detail should name the missing field, got: {detail}"
+                );
+            }
+            other => panic!("expected RemoteProtocolError, got: {other:?}"),
         }
     }
 

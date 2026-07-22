@@ -65,6 +65,7 @@ async fn cashu_full_flow(provider: &CashuProvider) {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -208,6 +209,7 @@ async fn cashu_live_cdk_redb() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -239,7 +241,7 @@ async fn balance_wallet_not_found() {
 
     let err = provider.balance("w_nonexist").await.unwrap_err();
     assert!(
-        matches!(err, PayError::WalletNotFound(_)),
+        matches!(err, PayError::WalletNotFound { .. }),
         "expected WalletNotFound, got: {err}"
     );
 }
@@ -256,7 +258,7 @@ async fn receive_claim_wallet_not_found() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, PayError::WalletNotFound(_)),
+        matches!(err, PayError::WalletNotFound { .. }),
         "expected WalletNotFound, got: {err}"
     );
 }
@@ -282,6 +284,7 @@ async fn cashu_send_insufficient_balance() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();
@@ -293,7 +296,7 @@ async fn cashu_send_insufficient_balance() {
         .unwrap_err();
     // CDK returns a NetworkError (from prepare_send) when there are insufficient funds
     assert!(
-        matches!(err, PayError::NetworkError(_)),
+        matches!(err, PayError::NetworkError { .. }),
         "expected error for insufficient balance, got: {err}"
     );
 }
@@ -336,6 +339,7 @@ async fn cashu_live_cdk_postgres_selection() {
             btc_core_url: None,
             btc_core_auth_secret: None,
             btc_electrum_url: None,
+            sol_cluster: None,
         })
         .await
         .unwrap();

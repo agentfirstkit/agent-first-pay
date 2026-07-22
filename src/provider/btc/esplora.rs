@@ -2,10 +2,10 @@ use super::BtcChainSource;
 use crate::provider::PayError;
 use crate::store::wallet::WalletMetadata;
 use async_trait::async_trait;
-use bdk_esplora::esplora_client;
 use bdk_esplora::EsploraAsyncExt;
-use bdk_wallet::bitcoin::Transaction;
+use bdk_esplora::esplora_client;
 use bdk_wallet::Wallet;
+use bdk_wallet::bitcoin::Transaction;
 
 pub(crate) const DEFAULT_ESPLORA_MAINNET: &str = "https://mempool.space/api";
 pub(crate) const DEFAULT_ESPLORA_SIGNET: &str = "https://mempool.space/signet/api";
@@ -32,7 +32,7 @@ impl EsploraSource {
     fn make_client(&self) -> Result<esplora_client::AsyncClient, PayError> {
         esplora_client::Builder::new(&self.url)
             .build_async()
-            .map_err(|e| PayError::NetworkError(format!("esplora client: {e}")))
+            .map_err(|e| PayError::network_error(format!("esplora client: {e}")))
     }
 }
 
@@ -44,10 +44,10 @@ impl BtcChainSource for EsploraSource {
         let update = client
             .sync(request, PARALLEL_REQUESTS)
             .await
-            .map_err(|e| PayError::NetworkError(format!("esplora sync: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("esplora sync: {e}")))?;
         wallet
             .apply_update(update)
-            .map_err(|e| PayError::InternalError(format!("apply sync update: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("apply sync update: {e}")))?;
         Ok(())
     }
 
@@ -57,10 +57,10 @@ impl BtcChainSource for EsploraSource {
         let update = client
             .full_scan(request, STOP_GAP, PARALLEL_REQUESTS)
             .await
-            .map_err(|e| PayError::NetworkError(format!("esplora full_scan: {e}")))?;
+            .map_err(|e| PayError::network_error(format!("esplora full_scan: {e}")))?;
         wallet
             .apply_update(update)
-            .map_err(|e| PayError::InternalError(format!("apply full_scan update: {e}")))?;
+            .map_err(|e| PayError::internal_error(format!("apply full_scan update: {e}")))?;
         Ok(())
     }
 
@@ -69,6 +69,6 @@ impl BtcChainSource for EsploraSource {
         client
             .broadcast(tx)
             .await
-            .map_err(|e| PayError::NetworkError(format!("broadcast tx: {e}")))
+            .map_err(|e| PayError::network_error(format!("broadcast tx: {e}")))
     }
 }
