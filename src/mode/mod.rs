@@ -60,6 +60,7 @@ pub async fn run(mode: Mode) {
                 #[cfg(not(feature = "rpc"))]
                 {
                     cli::emit_cli_error(
+                        "feature_unavailable",
                         "--rpc-endpoint requires feature 'rpc'; rebuild with: cargo build --features rpc",
                         req.output,
                     );
@@ -78,6 +79,7 @@ pub async fn run(mode: Mode) {
             #[cfg(not(feature = "interactive"))]
             {
                 cli::emit_cli_error(
+                    "feature_unavailable",
                     "interactive and tui modes require feature 'interactive'; rebuild with: cargo build --features interactive",
                     OutputFormat::Json,
                 );
@@ -92,6 +94,7 @@ pub async fn run(mode: Mode) {
             #[cfg(not(feature = "rpc"))]
             {
                 cli::emit_cli_error(
+                    "feature_unavailable",
                     "rpc mode requires feature 'rpc'; rebuild with: cargo build --features rpc",
                     OutputFormat::Json,
                 );
@@ -110,6 +113,7 @@ pub async fn run(mode: Mode) {
             #[cfg(not(feature = "backup"))]
             {
                 cli::emit_cli_error(
+                    "feature_unavailable",
                     "backup/restore requires feature 'backup'; rebuild with: cargo build --features backup",
                     OutputFormat::Json,
                 );
@@ -147,6 +151,7 @@ async fn run_interactive(init: InteractiveInit) {
         {
             let _ = (endpoint, rpc_secret);
             cli::emit_cli_error(
+                "feature_unavailable",
                 "--rpc-endpoint requires feature 'rpc'; rebuild with: cargo build --features rpc",
                 output,
             );

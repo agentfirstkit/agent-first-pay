@@ -395,7 +395,7 @@ pub enum Output {
         network: Network,
         address: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        mnemonic: Option<String>,
+        mnemonic_secret: Option<String>,
         trace: Trace,
     },
     #[serde(rename = "wallet_closed")]
@@ -627,7 +627,7 @@ pub enum Output {
     DataBackedUp {
         data_dir: String,
         path: String,
-        created_at_utc: String,
+        created_rfc3339: String,
         trace: Trace,
     },
     #[serde(rename = "data_restored")]
@@ -644,7 +644,7 @@ pub enum Output {
         network: String,
         data_dir: String,
         path: String,
-        created_at_utc: String,
+        created_rfc3339: String,
         trace: Trace,
     },
     #[serde(rename = "network_data_restored")]
@@ -991,7 +991,7 @@ mod tests {
             backend: LnWalletBackend::Nwc,
             label: Some("ln".to_string()),
             nwc_uri_secret: Some("nwc-uri-secret".to_string()),
-            endpoint: None,
+            endpoint_url: None,
             password_secret: Some("password-secret".to_string()),
             admin_key_secret: Some("admin-secret".to_string()),
         };

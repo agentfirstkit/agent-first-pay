@@ -22,18 +22,24 @@ mod store;
 mod types;
 mod writer;
 
-use agent_first_data::{CliEmitter, OutputFormat};
+use agent_first_data::OutputFormat;
 
 #[tokio::main]
 async fn main() {
+    if let Err(error) = output_fmt::install_output_to(std::env::args()) {
+        let event = output_fmt::coded_error_event("output_setup_failed", &error, None);
+        if output_fmt::emit_process_event(event, OutputFormat::Json).is_err() {
+            std::process::exit(4);
+        }
+        std::process::exit(2);
+    }
     let _stream_redirect = install_stream_redirect_or_exit();
     let mode = match args::parse_args() {
         Ok(mode) => mode,
         Err(error) => {
-            let stdout = std::io::stdout();
-            let mut emitter =
-                CliEmitter::new(stdout.lock(), OutputFormat::Json).with_strict_protocol();
-            if emitter.emit_error("cli_error", &error.message).is_err() {
+            let event =
+                output_fmt::coded_error_event(error.code, &error.message, error.hint.as_deref());
+            if output_fmt::emit_process_event(event, OutputFormat::Json).is_err() {
                 std::process::exit(4);
             }
             std::process::exit(2);
@@ -48,10 +54,9 @@ fn install_stream_redirect_or_exit()
     match agent_first_data::stream_redirect::install_from_raw_args(std::env::args()) {
         Ok(redirect) => redirect,
         Err(err) => {
-            let stdout = std::io::stdout();
-            let mut emitter =
-                CliEmitter::new(stdout.lock(), OutputFormat::Json).with_strict_protocol();
-            if emitter.emit_error("cli_error", &err.to_string()).is_err() {
+            let event =
+                output_fmt::coded_error_event("output_setup_failed", &err.to_string(), None);
+            if output_fmt::emit_process_event(event, OutputFormat::Json).is_err() {
                 std::process::exit(4);
             }
             std::process::exit(2);

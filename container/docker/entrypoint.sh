@@ -33,9 +33,10 @@ chmod 700 "$AFPAY_DATA_DIR" "$BITCOIND_DATADIR" "$PHOENIXD_DATADIR" 2>/dev/null 
 # ── 0. Generate secret/key per mode, persist to file ──
 case "$AFPAY_MODE" in
     rest)
-        SECRET_FILE="${AFPAY_DATA_DIR}/rest-api-key"
-        SECRET_ENV="AFPAY_REST_API_KEY"
-        SECRET_VAL="${AFPAY_REST_API_KEY}"
+        SECRET_FILE="${AFPAY_DATA_DIR}/rest-api-key-secret"
+        LEGACY_SECRET_FILE="${AFPAY_DATA_DIR}/rest-api-key"
+        SECRET_ENV="AFPAY_REST_API_KEY_SECRET"
+        SECRET_VAL="${AFPAY_REST_API_KEY_SECRET:-${AFPAY_REST_API_KEY:-}}"
         SECRET_LABEL="REST API key"
         ;;
     rpc)
@@ -51,6 +52,9 @@ case "$AFPAY_MODE" in
 esac
 
 if [ -n "$SECRET_FILE" ]; then
+    if [ ! -f "$SECRET_FILE" ] && [ -n "${LEGACY_SECRET_FILE:-}" ] && [ -f "$LEGACY_SECRET_FILE" ]; then
+        cp "$LEGACY_SECRET_FILE" "$SECRET_FILE"
+    fi
     if [ -n "$SECRET_VAL" ]; then
         echo "$SECRET_VAL" > "$SECRET_FILE"
     elif [ -f "$SECRET_FILE" ]; then
@@ -111,12 +115,15 @@ if [ "$ENABLE_BITCOIND" = "true" ]; then
     BTC_RPC_PASS="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
     BTC_NETWORK="${BTC_NETWORK:-mainnet}"
     BTC_PRUNE_MB="${BTC_PRUNE_MB:-550}"
+    BTC_RPC_PORT="${BTC_RPC_PORT:-8332}"
     case "$BTC_NETWORK" in
         mainnet)
             BTC_NETWORK_CONFIG=""
+            BTC_NETWORK_SECTION="main"
             ;;
         signet)
             BTC_NETWORK_CONFIG="signet=1"
+            BTC_NETWORK_SECTION="signet"
             ;;
         *)
             echo "ERROR: unsupported BTC_NETWORK=${BTC_NETWORK} (expected: mainnet or signet)"
@@ -134,14 +141,23 @@ if [ "$ENABLE_BITCOIND" = "true" ]; then
     else
         BTC_PRUNE_CONFIG=""
     fi
+    # The RPC block is network-scoped on purpose. bitcoind treats rpcbind and
+    # rpcallowip as per-chain settings and, on any chain but mainnet, refuses to
+    # start rather than ignore them: "Config setting for -rpcbind only applied on
+    # signet network when in [signet] section." rpcport is pinned in the same
+    # section because each chain otherwise picks its own default (8332 mainnet,
+    # 38332 signet), while BTC_RPC_PORT is the single port container-setup.sh and
+    # the wallet's btc_core_url talk to.
     cat > "${BITCOIND_DATADIR}/bitcoin.conf" <<EOF
 server=1
 ${BTC_NETWORK_CONFIG}
 ${BTC_PRUNE_CONFIG}
+[${BTC_NETWORK_SECTION}]
 rpcuser=${BTC_RPC_USER}
 rpcpassword=${BTC_RPC_PASS}
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1/32
+rpcport=${BTC_RPC_PORT}
 EOF
     # bitcoin.conf carries rpcpassword; same posture as the afpay secret file.
     chmod 600 "${BITCOIND_DATADIR}/bitcoin.conf" 2>/dev/null || true
@@ -178,7 +194,7 @@ fi
 cat > /tmp/afpay-env.sh <<EOF
 AFPAY_DATA_DIR=${AFPAY_DATA_DIR}
 AFPAY_REST_PORT=${AFPAY_PORT}
-AFPAY_REST_API_KEY=${SECRET_VAL}
+AFPAY_REST_API_KEY_SECRET=${SECRET_VAL}
 EOF
 chmod 600 /tmp/afpay-env.sh 2>/dev/null || true
 
@@ -187,7 +203,7 @@ if [ "$ENABLE_BITCOIND" = "true" ]; then
 BTC_NETWORK=${BTC_NETWORK}
 BTC_RPC_USER=${BTC_RPC_USER}
 BTC_RPC_PASS=${BTC_RPC_PASS}
-BTC_RPC_PORT=${BTC_RPC_PORT:-8332}
+BTC_RPC_PORT=${BTC_RPC_PORT}
 EOF
 fi
 

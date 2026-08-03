@@ -147,7 +147,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                                 wallet: info.id,
                                 network: info.network,
                                 address: info.address,
-                                mnemonic: None,
+                                mnemonic_secret: None,
                                 trace: trace_from(start),
                             })
                             .await;
@@ -168,8 +168,9 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
 
         Input::LnWalletCreate { id, request } => {
             let start = Instant::now();
-            let mut log_args =
+            let request_value =
                 serde_json::to_value(&request).unwrap_or_else(|_| serde_json::json!({}));
+            let mut log_args = agent_first_data::redacted_value(&request_value);
             let request_for_meta = request.clone();
             if let Some(object) = log_args.as_object_mut() {
                 object.insert(
@@ -185,7 +186,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             // at an attacker-controlled NWC/phoenixd/lnbits instance and the
             // operator's mint/esplora/RPC allowlists wouldn't catch it.
             let cfg = app.config.read().await;
-            let endpoint_check = if let Some(url) = request.endpoint.as_deref() {
+            let endpoint_check = if let Some(url) = request.endpoint_url.as_deref() {
                 validate_url_in_allowlist(
                     url,
                     &cfg.allowed_ln_endpoints,
@@ -217,7 +218,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                                 wallet: info.id,
                                 network: info.network,
                                 address: info.address,
-                                mnemonic: None,
+                                mnemonic_secret: None,
                                 trace: trace_from(start),
                             })
                             .await;
@@ -931,7 +932,7 @@ fn metadata_from_ln_wallet_create(
                 .filter(|label| !label.is_empty() && *label != "default")
                 .map(str::to_string)
         }),
-        mint_url: request.endpoint.clone(),
+        mint_url: request.endpoint_url.clone(),
         sol_rpc_endpoints: None,
         evm_rpc_endpoints: None,
         evm_chain_id: None,

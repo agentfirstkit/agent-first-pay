@@ -3,7 +3,7 @@ set -e
 . /tmp/afpay-env.sh
 
 AFPAY_URL="http://127.0.0.1:${AFPAY_REST_PORT}/v1/afpay"
-AUTH_HEADER="Authorization: Bearer ${AFPAY_REST_API_KEY}"
+AUTH_HEADER="Authorization: Bearer ${AFPAY_REST_API_KEY_SECRET}"
 
 # Helper: call afpay REST API
 afpay_call() {

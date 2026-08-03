@@ -4,8 +4,7 @@ use tokio::sync::mpsc;
 
 pub async fn writer_task(mut rx: mpsc::Receiver<Output>, format: OutputFormat) {
     while let Some(output) = rx.recv().await {
-        let stdout = std::io::stdout();
-        if crate::output_fmt::emit_output(stdout.lock(), &output, format).is_err() {
+        if crate::output_fmt::emit_process_output(&output, format).is_err() {
             break;
         }
     }

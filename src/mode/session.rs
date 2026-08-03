@@ -255,7 +255,7 @@ impl CommandCompleter {
                     "wallet" => vec![
                         "--backend",
                         "--nwc-uri-secret",
-                        "--endpoint",
+                        "--endpoint-url",
                         "--password-secret",
                         "--admin-key-secret",
                         "--label",

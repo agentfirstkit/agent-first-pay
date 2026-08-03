@@ -333,7 +333,7 @@ impl PayProvider for CashuProvider {
             network: Network::Cashu,
             address: resolved_mint.to_string(),
             label: meta.label,
-            mnemonic: None,
+            mnemonic_secret: None,
         })
     }
 

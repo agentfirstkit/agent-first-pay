@@ -11,9 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agent_first_data::{OutputOptions, json_result, render};
+use agent_first_data::json_result;
 use serde_json::{Value, json};
-use std::io::Write;
 
 use crate::args::{
     ContainerCliAction, ContainerInstallArgs, ContainerLogsArgs, ContainerModeArg,
@@ -86,21 +85,54 @@ fn fail_hint(message: impl Into<String>, hint: impl Into<String>) -> Fail {
 }
 
 pub fn run(req: ContainerRequest) -> i32 {
+    let reveal_daemon_secret = match &req.action {
+        ContainerCliAction::Install(args) => args.reveal_daemon_secret,
+        ContainerCliAction::Status(args) => args.reveal_daemon_secret,
+        ContainerCliAction::Uninstall(_) | ContainerCliAction::Logs(_) => false,
+    };
+    // `logs` streams the runtime's own bytes through this process, so its
+    // output contract is raw. A protocol result appended to those bytes would
+    // contradict it; a failure still reports as an event on the error stream.
+    let raw_output = matches!(req.action, ContainerCliAction::Logs(_));
     let result = match req.action {
         ContainerCliAction::Install(a) => install(a),
         ContainerCliAction::Uninstall(a) => uninstall(a),
         ContainerCliAction::Status(a) => status(a),
         ContainerCliAction::Logs(a) => logs(a),
     };
+    if raw_output {
+        return match result {
+            Ok(_) => 0,
+            Err(f) => {
+                let _ = crate::output_fmt::emit_process_event(
+                    crate::output_fmt::coded_error_event(
+                        "container_failed",
+                        &f.message,
+                        f.hint.as_deref(),
+                    ),
+                    agent_first_data::OutputFormat::Json,
+                );
+                1
+            }
+        };
+    }
     let (code, value) = match result {
         Ok(value) => (0, Value::from(json_result(value).build())),
         Err(f) => (
             1,
-            crate::output_fmt::cli_error_event(&f.message, f.hint.as_deref()),
+            crate::output_fmt::coded_error_event("container_failed", &f.message, f.hint.as_deref()),
         ),
     };
-    let rendered = render(&value, req.output, &OutputOptions::default());
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+    let emitted = if code == 0 && reveal_daemon_secret {
+        crate::output_fmt::emit_process_event_with_redaction(
+            value,
+            req.output,
+            agent_first_data::RedactionPolicy::Off,
+        )
+    } else {
+        crate::output_fmt::emit_process_event(value, req.output)
+    };
+    let _ = emitted;
     code
 }
 
@@ -235,18 +267,20 @@ fn install(args: ContainerInstallArgs) -> Result<Value, Fail> {
     } else {
         None
     };
-    Ok(json!({
-        "code": "container_install",
-        "runtime": runtime.label(),
-        "image": image,
-        "container": name,
-        "mode": mode_str(args.mode),
-        "endpoint": endpoint_url(args.port),
-        "client_command": secret.as_deref().map(|s| client_command(args.mode, args.port, s)),
-        "secret": secret,
-        "extras": extras.iter().map(|e| e.name).collect::<Vec<_>>(),
-        "hint": hint,
-    }))
+    Ok(with_connection_fields(
+        json!({
+            "code": "container_install",
+            "runtime": runtime.label(),
+            "image": image,
+            "container": name,
+            "mode": mode_str(args.mode),
+            "extras": extras.iter().map(|e| e.name).collect::<Vec<_>>(),
+            "hint": hint,
+        }),
+        args.mode,
+        args.port,
+        secret,
+    ))
 }
 
 // ── uninstall ────────────────────────────────────────────────────────────────
@@ -291,16 +325,18 @@ fn status(args: ContainerStatusArgs) -> Result<Value, Fail> {
     } else {
         None
     };
-    Ok(json!({
-        "code": "container_status",
-        "runtime": runtime.label(),
-        "container": name,
-        "running": running,
-        "mode": mode_str(args.mode),
-        "endpoint": endpoint_url(args.port),
-        "client_command": secret.as_deref().map(|s| client_command(args.mode, args.port, s)),
-        "secret": secret,
-    }))
+    Ok(with_connection_fields(
+        json!({
+            "code": "container_status",
+            "runtime": runtime.label(),
+            "container": name,
+            "running": running,
+            "mode": mode_str(args.mode),
+        }),
+        args.mode,
+        args.port,
+        secret,
+    ))
 }
 
 // ── logs ─────────────────────────────────────────────────────────────────────
@@ -433,6 +469,26 @@ fn endpoint_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+fn with_connection_fields(
+    mut result: Value,
+    mode: ContainerModeArg,
+    port: u16,
+    daemon_secret: Option<String>,
+) -> Value {
+    if let Some(fields) = result.as_object_mut() {
+        fields.insert("endpoint_url".to_string(), endpoint_url(port).into());
+        fields.insert(
+            "client_command_secret".to_string(),
+            daemon_secret
+                .as_deref()
+                .map(|secret| client_command(mode, port, secret))
+                .into(),
+        );
+        fields.insert("daemon_secret".to_string(), daemon_secret.into());
+    }
+    result
+}
+
 fn mode_str(mode: ContainerModeArg) -> &'static str {
     match mode {
         ContainerModeArg::Rest => "rest",
@@ -448,7 +504,7 @@ fn client_command(mode: ContainerModeArg, port: u16, secret: &str) -> String {
              -H 'Content-Type: application/json' -d '{{\"code\":\"version\"}}'"
         ),
         ContainerModeArg::Rpc => {
-            format!("afpay global version --rpc-endpoint 127.0.0.1:{port} --rpc-secret {secret}")
+            format!("afpay wallet list --rpc-endpoint 127.0.0.1:{port} --rpc-secret {secret}")
         }
     }
 }
@@ -610,27 +666,39 @@ fn container_running(runtime: Runtime, name: &str) -> bool {
 
 fn secret_path(mode: ContainerModeArg) -> &'static str {
     match mode {
-        ContainerModeArg::Rest => "/data/afpay/rest-api-key",
+        ContainerModeArg::Rest => "/data/afpay/rest-api-key-secret",
         ContainerModeArg::Rpc => "/data/afpay/rpc-secret",
+    }
+}
+
+fn legacy_secret_path(mode: ContainerModeArg) -> Option<&'static str> {
+    match mode {
+        ContainerModeArg::Rest => Some("/data/afpay/rest-api-key"),
+        ContainerModeArg::Rpc => None,
     }
 }
 
 /// Read the bearer secret the entrypoint persisted to the data volume. The
 /// entrypoint writes it on first start, so retry briefly after `run`.
 fn read_secret(runtime: Runtime, name: &str, mode: ContainerModeArg) -> Option<String> {
-    let argv = vec![
-        "exec".into(),
-        name.to_string(),
-        "cat".into(),
-        secret_path(mode).to_string(),
-    ];
     for attempt in 0..10 {
-        if let Ok(out) = capture(runtime.bin(), &argv)
-            && out.status.success()
+        for path in [Some(secret_path(mode)), legacy_secret_path(mode)]
+            .into_iter()
+            .flatten()
         {
-            let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !secret.is_empty() {
-                return Some(secret);
+            let argv = vec![
+                "exec".into(),
+                name.to_string(),
+                "cat".into(),
+                path.to_string(),
+            ];
+            if let Ok(out) = capture(runtime.bin(), &argv)
+                && out.status.success()
+            {
+                let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !secret.is_empty() {
+                    return Some(secret);
+                }
             }
         }
         if attempt < 9 {
@@ -810,6 +878,7 @@ mod tests {
             rebuild: false,
             from_source: false,
             context: None,
+            reveal_daemon_secret: false,
         };
         let allowlists = resolve_allowlists(&args.allow).unwrap();
         let a = run_args("afpay", "afpay:1.2.3", &extras, &allowlists, &args);
@@ -832,6 +901,28 @@ mod tests {
         assert!(rest.contains("Bearer deadbeef"));
         let rpc = client_command(ContainerModeArg::Rpc, 9400, "cafe");
         assert!(rpc.contains("--rpc-secret cafe"));
+    }
+
+    #[test]
+    fn container_connection_fields_follow_afdata_url_and_secret_contracts() {
+        let raw = with_connection_fields(
+            json!({"code": "container_status"}),
+            ContainerModeArg::Rest,
+            9401,
+            Some("credential-canary".to_string()),
+        );
+        assert_eq!(raw["endpoint_url"], "http://127.0.0.1:9401");
+        assert!(
+            raw["client_command_secret"]
+                .as_str()
+                .is_some_and(|command| command.contains("credential-canary"))
+        );
+
+        let redacted = agent_first_data::redacted_value(&raw);
+        assert_eq!(redacted["daemon_secret"], "***");
+        assert_eq!(redacted["client_command_secret"], "***");
+        assert!(!redacted.to_string().contains("credential-canary"));
+        assert_eq!(redacted["endpoint_url"], "http://127.0.0.1:9401");
     }
 
     #[test]

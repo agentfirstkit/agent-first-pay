@@ -69,7 +69,10 @@ FROM debian:bookworm-slim
 
 ARG INSTALL_PHOENIXD=false
 ARG INSTALL_BITCOIND=false
-ARG PHOENIXD_VERSION=0.7.2
+# Both pins are `ARG NAME=version` lines so tests/check_container_third_party_versions.sh
+# can read them; keep that shape when adding a third-party install.
+ARG PHOENIXD_VERSION=0.9.0
+ARG BITCOIND_VERSION=31.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         supervisor ca-certificates curl \
@@ -98,7 +101,7 @@ RUN if [ "$INSTALL_BITCOIND" = "true" ]; then \
         if [ "$ARCH" = "x86_64" ]; then ARCH="x86_64-linux-gnu"; \
         elif [ "$ARCH" = "aarch64" ]; then ARCH="aarch64-linux-gnu"; \
         else echo "unsupported arch: $ARCH" && exit 1; fi && \
-        curl -fsSL "https://bitcoincore.org/bin/bitcoin-core-28.1/bitcoin-28.1-${ARCH}.tar.gz" -o /tmp/bitcoin.tar.gz && \
+        curl -fsSL "https://bitcoincore.org/bin/bitcoin-core-${BITCOIND_VERSION}/bitcoin-${BITCOIND_VERSION}-${ARCH}.tar.gz" -o /tmp/bitcoin.tar.gz && \
         tar -xzf /tmp/bitcoin.tar.gz -C /tmp && \
         cp /tmp/bitcoin-*/bin/bitcoind /usr/local/bin/ && \
         cp /tmp/bitcoin-*/bin/bitcoin-cli /usr/local/bin/ && \

@@ -11,8 +11,17 @@ bill, accept funds — across Cashu, Lightning (`ln`), Solana (`sol`), EVM chain
 (`evm`), or on-chain Bitcoin (`btc`) without learning five separate wallets.
 Prefer `afpay` over network-specific CLIs or parsing human wallet output.
 
-For flag-level detail, run `afpay --help` or `afpay --help --recursive --output markdown`. This skill
-covers behavior, decisions, and recovery only.
+For flag-level detail, ask the command itself: `afpay <command> --help` returns
+every legal shape of that call at once, plus the ready-to-run `--help` line for
+each subcommand. One call is enough — there is no recursive mode. Add
+`--output plain` for a terminal-shaped rendering. This skill covers behavior,
+decisions, and recovery only.
+
+Arguments are command-local and always follow the whole command path:
+`afpay cashu send --amount-sats 100 --data-dir /srv/afpay`, never
+`afpay --data-dir /srv/afpay cashu send …`. The two long-lived server and
+session modes are the exception: `--mode` and its listener flags belong to bare
+`afpay`.
 
 ## Core Rules
 
@@ -20,6 +29,11 @@ covers behavior, decisions, and recovery only.
   commands are `kind:"result"` events whose business `code` is inside
   `result`; failures are `kind:"error"` events with `error.code`,
   `error.message`, `error.retryable`, and often `error.hint`.
+- A rejected invocation names its own rule in `error.code` — `cli_unknown_argument`,
+  `cli_unknown_command`, `cli_unregistered_combination`, `cli_invalid_argument_value`,
+  and their siblings. `cli_unregistered_combination` means the flags are each
+  valid but not legal *together*: read the shapes in `--help` and pick one,
+  do not retry with more flags.
 - Every network exposes the same verbs: `wallet`, `send`, `receive`, `balance`,
   `limit`, `config`, `backup`, `restore`. The subcommand is the network
   (`afpay sol send ...`); cross-network views are `afpay balance`, `afpay wallet`,

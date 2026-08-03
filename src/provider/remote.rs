@@ -3,7 +3,6 @@ use crate::mode::rpc::proto::af_pay_client::AfPayClient;
 use crate::mode::rpc::proto::{EncryptedRequest, HandshakeRequest};
 use agent_first_data::OutputFormat;
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Mutex;
 use std::time::Instant;
 use tonic::transport::Channel;
@@ -277,32 +276,24 @@ pub fn require_remote_args<'a>(
     let ep = match endpoint {
         Some(ep) if !ep.is_empty() => ep,
         _ => {
-            let value = agent_first_data::build_cli_error(
+            let value: serde_json::Value = agent_first_data::build_cli_error(
                 "--rpc-endpoint is required",
                 Some("pass the address of the afpay daemon"),
-            );
-            let rendered = agent_first_data::render(
-                value.as_value(),
-                format,
-                &agent_first_data::OutputOptions::default(),
-            );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
+            )
+            .into();
+            let _ = crate::output_fmt::emit_process_event(value, format);
             std::process::exit(1);
         }
     };
     let sec = match secret {
         Some(s) if !s.is_empty() => s,
         _ => {
-            let value = agent_first_data::build_cli_error(
+            let value: serde_json::Value = agent_first_data::build_cli_error(
                 "--rpc-secret is required with --rpc-endpoint",
                 Some("must match the --rpc-secret used by the daemon"),
-            );
-            let rendered = agent_first_data::render(
-                value.as_value(),
-                format,
-                &agent_first_data::OutputOptions::default(),
-            );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
+            )
+            .into();
+            let _ = crate::output_fmt::emit_process_event(value, format);
             std::process::exit(1);
         }
     };
@@ -328,8 +319,7 @@ pub fn emit_remote_outputs(
         {
             continue;
         }
-        let rendered = crate::output_fmt::render_value_with_policy(value, format);
-        let _ = writeln!(std::io::stdout(), "{rendered}");
+        let _ = crate::output_fmt::emit_process_value_with_policy(value, format);
     }
     had_error
 }
@@ -392,7 +382,8 @@ struct WalletCreatedOut {
     #[serde(default)]
     label: Option<String>,
     #[serde(default)]
-    mnemonic: Option<String>,
+    #[serde(alias = "mnemonic")]
+    mnemonic_secret: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -774,7 +765,7 @@ impl PayProvider for RemoteProvider {
             network: self.network,
             address: parsed.address,
             label: parsed.label,
-            mnemonic: parsed.mnemonic,
+            mnemonic_secret: parsed.mnemonic_secret,
         })
     }
 
@@ -801,7 +792,7 @@ impl PayProvider for RemoteProvider {
             network: self.network,
             address: parsed.address,
             label: parsed.label,
-            mnemonic: parsed.mnemonic,
+            mnemonic_secret: parsed.mnemonic_secret,
         })
     }
 

@@ -14,7 +14,7 @@ pub fn wire_protocol_schema() -> serde_json::Value {
         "version": "v1",
         // Bump on every Input/Output/ErrorCode shape change so agents can pin
         // against a known set without re-fetching and diffing the whole doc.
-        "schema_version": "2026-07-12.1",
+        "schema_version": "2026-07-28.1",
         "envelope": {
             "description": "Every request is wrapped in a Request envelope. Plain Input JSON also works (dry_run defaults to false).",
             "shape": {
@@ -27,14 +27,14 @@ pub fn wire_protocol_schema() -> serde_json::Value {
             "GET /v1/schema": "This document.",
             "Input::Schema (pipe/rpc/cli)": "Same document, returned as Output::Schema."
         },
-        "auth": "x-api-key header must match the --rest-api-key the daemon was started with.",
+        "auth": "x-api-key header must match the --rest-api-key-secret the daemon was started with.",
         "inputs": [
             {"code": "version", "description": "Daemon version + uptime.", "fields": []},
             {"code": "schema", "description": "Return this self-describing wire schema.", "fields": []},
             {"code": "config_get", "description": "Get runtime config or a specific key.", "fields": ["id", "key?"]},
             {"code": "config_set", "description": "Set a runtime config key.", "fields": ["id", "key", "values?"]},
             {"code": "wallet_create", "description": "Create a wallet on the given network.", "fields": ["id", "network", "label?", "mint_url?", "rpc_endpoints?", "chain_id?", "mnemonic_secret?", "btc_esplora_url?", "btc_network?", "btc_address_type?", "btc_backend?", "btc_core_url?", "btc_core_auth_secret?", "btc_electrum_url?", "sol_cluster?"]},
-            {"code": "ln_wallet_create", "description": "Create a Lightning wallet via NWC/phoenixd/lnbits.", "fields": ["id", "backend", "endpoint?", "secret?", "label?"]},
+            {"code": "ln_wallet_create", "description": "Create a Lightning wallet via NWC/phoenixd/lnbits.", "fields": ["id", "backend", "endpoint_url?", "nwc_uri_secret?", "password_secret?", "admin_key_secret?", "label?"]},
             {"code": "wallet_close", "description": "Close a wallet (refuses with non-zero balance unless overridden).", "fields": ["id", "wallet", "dangerously_skip_balance_check_and_may_lose_money"]},
             {"code": "wallet_list", "description": "List wallets, optionally filtered by network.", "fields": ["id", "network?"]},
             {"code": "balance", "description": "Get a wallet's balance.", "fields": ["id", "wallet?", "network?", "check"]},
@@ -65,7 +65,7 @@ pub fn wire_protocol_schema() -> serde_json::Value {
             {"code": "limit_exceeded", "fields": ["id", "rule_id", "scope", "scope_key", "spent", "max_spend", "token?", "remaining_s", "origin?", "trace"]},
             {"code": "accounting_inconsistent", "fields": ["id", "transaction_id", "reservation_ids", "confirm_errors", "hint", "trace"], "description": "Money sent but ledger could not record the debit — must reconcile manually."},
             {"code": "dry_run", "fields": ["id?", "command", "params", "trace"]},
-            {"code": "wallet_created", "fields": ["id", "wallet", "network", "address", "mnemonic?", "trace"]},
+            {"code": "wallet_created", "fields": ["id", "wallet", "network", "address", "mnemonic_secret?", "trace"]},
             {"code": "wallet_closed", "fields": ["id", "wallet", "trace"]},
             {"code": "wallet_list", "fields": ["id", "wallets", "trace"]},
             {"code": "balance", "fields": ["id", "wallet", "network", "balance", "address?", "trace"]},

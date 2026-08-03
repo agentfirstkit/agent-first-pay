@@ -22,15 +22,16 @@ pub async fn run_data(op: DataOp) {
             output_path,
             extra_dirs,
         } => {
-            let stamp = utc_stamp();
-            let path = output_path.unwrap_or_else(|| format!("./afpay-global-{stamp}.tar.zst"));
+            let timestamp = utc_timestamp();
+            let path = output_path
+                .unwrap_or_else(|| format!("./afpay-global-{}.tar.zst", timestamp.archive_stamp));
             let start = Instant::now();
-            match do_global_backup(&data_dir, &path, &stamp, &extra_dirs) {
+            match do_global_backup(&data_dir, &path, &timestamp.rfc3339, &extra_dirs) {
                 Ok(()) => {
                     let out = Output::DataBackedUp {
                         data_dir,
                         path,
-                        created_at_utc: stamp,
+                        created_rfc3339: timestamp.rfc3339,
                         trace: Trace::from_duration(start.elapsed().as_millis() as u64),
                     };
                     emit_output(&out, fmt);
@@ -74,16 +75,24 @@ pub async fn run_data(op: DataOp) {
             output_path,
             wallet,
         } => {
-            let stamp = utc_stamp();
-            let path = output_path.unwrap_or_else(|| format!("./afpay-{network}-{stamp}.tar.zst"));
+            let timestamp = utc_timestamp();
+            let path = output_path.unwrap_or_else(|| {
+                format!("./afpay-{network}-{}.tar.zst", timestamp.archive_stamp)
+            });
             let start = Instant::now();
-            match do_network_backup(&data_dir, network, &path, &stamp, wallet.as_deref()) {
+            match do_network_backup(
+                &data_dir,
+                network,
+                &path,
+                &timestamp.rfc3339,
+                wallet.as_deref(),
+            ) {
                 Ok(()) => {
                     let out = Output::NetworkDataBackedUp {
                         network: network.to_string(),
                         data_dir,
                         path,
-                        created_at_utc: stamp,
+                        created_rfc3339: timestamp.rfc3339,
                         trace: Trace::from_duration(start.elapsed().as_millis() as u64),
                     };
                     emit_output(&out, fmt);
@@ -131,7 +140,7 @@ pub async fn run_data(op: DataOp) {
 pub(crate) fn do_global_backup(
     data_dir: &str,
     archive_path: &str,
-    stamp: &str,
+    created_rfc3339: &str,
     extra_dirs: &[(String, String)],
 ) -> Result<(), String> {
     // Run pg_dump before opening the output file so we know HAS_PGDUMP upfront.
@@ -153,7 +162,12 @@ pub(crate) fn do_global_backup(
 
     // manifest.env
     let extra_labels: Vec<&str> = extra_dirs.iter().map(|(l, _)| l.as_str()).collect();
-    let manifest = build_global_manifest(stamp, data_dir, pg_dump_bytes.is_some(), &extra_labels);
+    let manifest = build_global_manifest(
+        created_rfc3339,
+        data_dir,
+        pg_dump_bytes.is_some(),
+        &extra_labels,
+    );
     append_bytes(&mut tar, "manifest.env", manifest.as_bytes(), 0o644)?;
 
     // data/ — full afpay data_dir
@@ -298,7 +312,7 @@ fn do_network_backup(
     data_dir: &str,
     network: Network,
     archive_path: &str,
-    stamp: &str,
+    created_rfc3339: &str,
     wallet_filter: Option<&str>,
 ) -> Result<(), String> {
     let config = RuntimeConfig::load_from_dir(data_dir).unwrap_or_default();
@@ -338,7 +352,7 @@ fn do_network_backup(
 
     // manifest.env
     let manifest = build_network_manifest(
-        stamp,
+        created_rfc3339,
         data_dir,
         network,
         pg_dump_bytes.is_some(),
@@ -597,13 +611,13 @@ fn run_pg_restore(url: &str, sql: &[u8]) -> Result<(), String> {
 // ─── manifest helpers ─────────────────────────────────────────────────────────
 
 fn build_global_manifest(
-    stamp: &str,
+    created_rfc3339: &str,
     data_dir: &str,
     has_pgdump: bool,
     extra_labels: &[&str],
 ) -> String {
     let mut s = format!(
-        "BACKUP_KIND=afpay-global\nCREATED_AT_UTC={stamp}\nAFPAY_VERSION={VERSION}\nDATA_DIR={data_dir}\n"
+        "BACKUP_KIND=afpay-global\nCREATED_RFC3339={created_rfc3339}\nAFPAY_VERSION={VERSION}\nDATA_DIR={data_dir}\n"
     );
     s.push_str(&format!("HAS_PGDUMP={has_pgdump}\n"));
     if !extra_labels.is_empty() {
@@ -613,14 +627,14 @@ fn build_global_manifest(
 }
 
 fn build_network_manifest(
-    stamp: &str,
+    created_rfc3339: &str,
     data_dir: &str,
     network: Network,
     has_pgdump: bool,
     wallet_count: usize,
 ) -> String {
     format!(
-        "BACKUP_KIND=afpay-network\nNETWORK={network}\nCREATED_AT_UTC={stamp}\nAFPAY_VERSION={VERSION}\nDATA_DIR={data_dir}\nHAS_PGDUMP={has_pgdump}\nWALLET_COUNT={wallet_count}\n"
+        "BACKUP_KIND=afpay-network\nNETWORK={network}\nCREATED_RFC3339={created_rfc3339}\nAFPAY_VERSION={VERSION}\nDATA_DIR={data_dir}\nHAS_PGDUMP={has_pgdump}\nWALLET_COUNT={wallet_count}\n"
     )
 }
 
@@ -810,19 +824,22 @@ fn validate_extra_label(label: &str) -> Result<(), String> {
 }
 
 fn emit_output(out: &Output, fmt: OutputFormat) {
-    let _ = output_fmt::emit_output(std::io::stdout().lock(), out, fmt);
+    let _ = output_fmt::emit_process_output(out, fmt);
 }
 
 fn emit_cli_error(msg: &str, fmt: OutputFormat) {
-    let value = output_fmt::cli_error_event(msg, None);
-    let rendered =
-        agent_first_data::render(&value, fmt, &agent_first_data::OutputOptions::default());
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+    let value = output_fmt::coded_error_event("backup_restore_failed", msg, None);
+    let _ = output_fmt::emit_process_event(value, fmt);
 }
 
 // ─── timestamp ────────────────────────────────────────────────────────────────
 
-pub(crate) fn utc_stamp() -> String {
+struct UtcTimestamp {
+    archive_stamp: String,
+    rfc3339: String,
+}
+
+fn utc_timestamp() -> UtcTimestamp {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -832,7 +849,14 @@ pub(crate) fn utc_stamp() -> String {
     let hour = (secs / 3600) % 24;
     let days = secs / 86400;
     let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}{month:02}{day:02}T{hour:02}{min:02}{sec:02}Z")
+    UtcTimestamp {
+        archive_stamp: format!("{year:04}{month:02}{day:02}T{hour:02}{min:02}{sec:02}Z"),
+        rfc3339: format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z"),
+    }
+}
+
+pub(crate) fn utc_archive_stamp() -> String {
+    utc_timestamp().archive_stamp
 }
 
 fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {

@@ -6,14 +6,13 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 pub struct RestInit {
     pub listen: String,
-    pub api_key: Option<String>,
+    pub api_key_secret: Option<String>,
     pub allow_public_listen: bool,
     pub log: Vec<String>,
     pub data_dir: Option<String>,
@@ -24,7 +23,7 @@ pub struct RestInit {
 
 struct AppState {
     app: Arc<App>,
-    api_key: String,
+    api_key_secret: String,
     log: Vec<String>,
     rate_limiter: Option<RateLimiter>,
 }
@@ -139,22 +138,21 @@ fn now_ms() -> u64 {
 }
 
 pub async fn run_rest(init: RestInit) {
-    let api_key: String = match init
-        .api_key
+    let api_key_secret: String = match init
+        .api_key_secret
+        .or_else(|| std::env::var("AFPAY_REST_API_KEY_SECRET").ok())
         .or_else(|| std::env::var("AFPAY_REST_API_KEY").ok())
     {
         Some(s) if !s.is_empty() => s,
         _ => {
-            let value = agent_first_data::build_cli_error(
-                "--rest-api-key is required for REST mode",
-                Some("pass an API key for bearer authentication or set AFPAY_REST_API_KEY"),
-            );
-            let rendered = agent_first_data::render(
-                value.as_value(),
+            crate::mode::cli::emit_cli_error_hint(
+                "rest_startup_failed",
+                "--rest-api-key-secret is required for REST mode",
+                Some(
+                    "pass an API key secret for bearer authentication or set AFPAY_REST_API_KEY_SECRET",
+                ),
                 agent_first_data::OutputFormat::Json,
-                &agent_first_data::OutputOptions::default(),
             );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -165,13 +163,12 @@ pub async fn run_rest(init: RestInit) {
     let mut config = match RuntimeConfig::load_from_dir(&resolved_dir) {
         Ok(c) => c,
         Err(e) => {
-            let value = agent_first_data::build_cli_error(&e, None);
-            let rendered = agent_first_data::render(
-                value.as_value(),
+            crate::mode::cli::emit_cli_error_hint(
+                "rest_startup_failed",
+                &e,
+                None,
                 agent_first_data::OutputFormat::Json,
-                &agent_first_data::OutputOptions::default(),
             );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -188,24 +185,12 @@ pub async fn run_rest(init: RestInit) {
         Some(&config),
         init.startup_args,
     ) {
-        let value = serde_json::to_value(&startup).unwrap_or(serde_json::Value::Null);
-        let rendered = agent_first_data::render(
-            &value,
-            agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
-        );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
+        crate::mode::cli::emit_output(&startup, agent_first_data::OutputFormat::Json);
     }
 
     let startup_errors = handler::startup_provider_validation_errors(&config).await;
     for error_output in &startup_errors {
-        let value = serde_json::to_value(error_output).unwrap_or(serde_json::Value::Null);
-        let rendered = agent_first_data::render(
-            &value,
-            agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
-        );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
+        crate::mode::cli::emit_output(error_output, agent_first_data::OutputFormat::Json);
     }
     if !startup_errors.is_empty() {
         std::process::exit(1);
@@ -218,7 +203,7 @@ pub async fn run_rest(init: RestInit) {
     let app = Arc::new(App::new(config, tx, Some(true), st));
     let state = Arc::new(AppState {
         app,
-        api_key,
+        api_key_secret,
         log: init.log,
         rate_limiter,
     });
@@ -231,82 +216,75 @@ pub async fn run_rest(init: RestInit) {
     let addr: std::net::SocketAddr = match init.listen.parse() {
         Ok(a) => a,
         Err(e) => {
-            let value = agent_first_data::build_cli_error(
+            crate::mode::cli::emit_cli_error_hint(
+                "rest_startup_failed",
                 &format!("invalid --rest-listen address: {e}"),
                 Some("expected format: host:port (e.g. 0.0.0.0:9401)"),
-            );
-            let rendered = agent_first_data::render(
-                value.as_value(),
                 agent_first_data::OutputFormat::Json,
-                &agent_first_data::OutputOptions::default(),
             );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
     if public_listen_requires_ack(addr) && !init.allow_public_listen {
-        let value = agent_first_data::build_cli_error(
+        crate::mode::cli::emit_cli_error_hint(
+            "rest_startup_failed",
             "refusing to bind REST to a non-loopback address without --public-listen",
             Some(
                 "use the default 127.0.0.1:9401, or pass --public-listen only behind TLS/firewall",
             ),
-        );
-        let rendered = agent_first_data::render(
-            value.as_value(),
             agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
         );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
 
     if init.allow_public_listen
         && let Err(msg) = policy.require_for_public_listen()
     {
-        let value = agent_first_data::build_cli_error(
+        crate::mode::cli::emit_cli_error_hint(
+            "rest_startup_failed",
             &msg,
             Some(
                 "add at least one entry to allowed_mint_urls / allowed_esplora_urls / allowed_sol_rpc_endpoints / allowed_evm_rpc_endpoints in your runtime config before exposing the daemon",
             ),
-        );
-        let rendered = agent_first_data::render(
-            value.as_value(),
             agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
         );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
-    let banner = serde_json::json!({"code": "startup", "policy": policy.banner()});
-    let rendered = agent_first_data::render(
-        &banner,
-        agent_first_data::OutputFormat::Json,
-        &agent_first_data::OutputOptions::default(),
-    );
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+    let banner = Output::Log {
+        event: "startup_policy".to_string(),
+        request_id: None,
+        version: Some(crate::config::VERSION.to_string()),
+        argv: None,
+        config: None,
+        args: Some(serde_json::json!({
+            "listen_address": addr.to_string(),
+            "policy": policy.banner(),
+        })),
+        env: None,
+        trace: Trace::from_duration(0),
+    };
+    crate::mode::cli::emit_output(&banner, agent_first_data::OutputFormat::Json);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            let value = agent_first_data::build_cli_error(&format!("REST bind failed: {e}"), None);
-            let rendered = agent_first_data::render(
-                value.as_value(),
+            crate::mode::cli::emit_cli_error_hint(
+                "rest_startup_failed",
+                &format!("REST bind failed: {e}"),
+                None,
                 agent_first_data::OutputFormat::Json,
-                &agent_first_data::OutputOptions::default(),
             );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
 
     if let Err(e) = axum::serve(listener, router).await {
-        let value = agent_first_data::build_cli_error(&format!("REST server error: {e}"), None);
-        let rendered = agent_first_data::render(
-            value.as_value(),
+        crate::mode::cli::emit_cli_error_hint(
+            "rest_startup_failed",
+            &format!("REST server error: {e}"),
+            None,
             agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
         );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
 }
@@ -396,7 +374,7 @@ async fn handle_call(
     };
 
     // Auth check
-    if let Err(status) = check_auth(&headers, &state.api_key) {
+    if let Err(status) = check_auth(&headers, &state.api_key_secret) {
         return (
             status,
             Json(http_error("unauthorized", "unauthorized", None, false)),

@@ -9,9 +9,8 @@ use agent_first_data::skill::{
     self, SkillAction, SkillAgentSelection as AfSelection, SkillOptions, SkillScope as AfScope,
     SkillSpec,
 };
-use agent_first_data::{OutputFormat, OutputOptions, json_result, render};
+use agent_first_data::{OutputFormat, json_result};
 use serde_json::Value;
-use std::io::Write;
 
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
@@ -29,7 +28,8 @@ pub fn run(req: SkillAdminRequest) -> i32 {
             Ok(value) => (0, Value::from(json_result(value).build())),
             Err(e) => (
                 1,
-                crate::output_fmt::cli_error_event(
+                crate::output_fmt::coded_error_event(
+                    "skill_error",
                     &format!("failed to serialize skill report: {e}"),
                     None,
                 ),
@@ -37,7 +37,7 @@ pub fn run(req: SkillAdminRequest) -> i32 {
         },
         Err(err) => (
             1,
-            crate::output_fmt::cli_error_event(&err.message, err.hint.as_deref()),
+            crate::output_fmt::coded_error_event("skill_error", &err.message, err.hint.as_deref()),
         ),
     };
     emit_value(&value, req.output);
@@ -45,8 +45,7 @@ pub fn run(req: SkillAdminRequest) -> i32 {
 }
 
 fn emit_value(value: &Value, output: OutputFormat) {
-    let rendered = render(value, output, &OutputOptions::default());
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+    let _ = crate::output_fmt::emit_process_event(value.clone(), output);
 }
 
 fn split_action(action: SkillAdminAction) -> (SkillAction, SkillOptions) {

@@ -4,7 +4,6 @@ use self::crypto::{Cipher, HANDSHAKE_SALT_LEN};
 use crate::handler::{self, App};
 use crate::types::*;
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -517,27 +516,22 @@ pub async fn run_rpc(init: RpcInit) {
     {
         Some(s) if !s.is_empty() => s,
         _ => {
-            let value = agent_first_data::build_cli_error(
+            crate::mode::cli::emit_cli_error_hint(
+                "rpc_startup_failed",
                 "--rpc-secret is required for RPC mode",
                 Some("pass a shared secret for client authentication or set AFPAY_RPC_SECRET"),
-            );
-            let rendered = agent_first_data::render(
-                value.as_value(),
                 agent_first_data::OutputFormat::Json,
-                &agent_first_data::OutputOptions::default(),
             );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
     if let Err(e) = Cipher::validate_secret(&secret) {
-        let value = agent_first_data::build_cli_error(&e, Some("use a random 32+ byte secret"));
-        let rendered = agent_first_data::render(
-            value.as_value(),
+        crate::mode::cli::emit_cli_error_hint(
+            "rpc_startup_failed",
+            &e,
+            Some("use a random 32+ byte secret"),
             agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
         );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
 
@@ -547,13 +541,12 @@ pub async fn run_rpc(init: RpcInit) {
     let mut config = match RuntimeConfig::load_from_dir(&resolved_dir) {
         Ok(c) => c,
         Err(e) => {
-            let value = agent_first_data::build_cli_error(&e, None);
-            let rendered = agent_first_data::render(
-                value.as_value(),
+            crate::mode::cli::emit_cli_error_hint(
+                "rpc_startup_failed",
+                &e,
+                None,
                 agent_first_data::OutputFormat::Json,
-                &agent_first_data::OutputOptions::default(),
             );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
@@ -570,24 +563,12 @@ pub async fn run_rpc(init: RpcInit) {
         Some(&config),
         init.startup_args,
     ) {
-        let value = serde_json::to_value(&startup).unwrap_or(serde_json::Value::Null);
-        let rendered = agent_first_data::render(
-            &value,
-            agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
-        );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
+        crate::mode::cli::emit_output(&startup, agent_first_data::OutputFormat::Json);
     }
 
     let startup_errors = crate::handler::startup_provider_validation_errors(&config).await;
     for error_output in &startup_errors {
-        let value = serde_json::to_value(error_output).unwrap_or(serde_json::Value::Null);
-        let rendered = agent_first_data::render(
-            &value,
-            agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
-        );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
+        crate::mode::cli::emit_output(error_output, agent_first_data::OutputFormat::Json);
     }
     if !startup_errors.is_empty() {
         std::process::exit(1);
@@ -605,71 +586,65 @@ pub async fn run_rpc(init: RpcInit) {
     let addr = match init.listen.parse() {
         Ok(a) => a,
         Err(e) => {
-            let value = agent_first_data::build_cli_error(
+            crate::mode::cli::emit_cli_error_hint(
+                "rpc_startup_failed",
                 &format!("invalid --rpc-listen address: {e}"),
                 Some("expected format: host:port (e.g. 127.0.0.1:9100)"),
-            );
-            let rendered = agent_first_data::render(
-                value.as_value(),
                 agent_first_data::OutputFormat::Json,
-                &agent_first_data::OutputOptions::default(),
             );
-            let _ = writeln!(std::io::stdout(), "{rendered}");
             std::process::exit(1);
         }
     };
     if public_listen_requires_ack(addr) && !init.allow_public_listen {
-        let value = agent_first_data::build_cli_error(
+        crate::mode::cli::emit_cli_error_hint(
+            "rpc_startup_failed",
             "refusing to bind RPC to a non-loopback address without --public-listen",
             Some(
                 "use the default 127.0.0.1:9400, or pass --public-listen only behind TLS/firewall",
             ),
-        );
-        let rendered = agent_first_data::render(
-            value.as_value(),
             agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
         );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
     if init.allow_public_listen
         && let Err(msg) = policy.require_for_public_listen()
     {
-        let value = agent_first_data::build_cli_error(
+        crate::mode::cli::emit_cli_error_hint(
+            "rpc_startup_failed",
             &msg,
             Some(
                 "add at least one entry to allowed_mint_urls / allowed_esplora_urls / allowed_sol_rpc_endpoints / allowed_evm_rpc_endpoints in your runtime config before exposing the daemon",
             ),
-        );
-        let rendered = agent_first_data::render(
-            value.as_value(),
             agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
         );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
-    let banner = serde_json::json!({"code": "startup", "policy": policy.banner()});
-    let rendered = agent_first_data::render(
-        &banner,
-        agent_first_data::OutputFormat::Json,
-        &agent_first_data::OutputOptions::default(),
-    );
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+    let banner = Output::Log {
+        event: "startup_policy".to_string(),
+        request_id: None,
+        version: Some(crate::config::VERSION.to_string()),
+        argv: None,
+        config: None,
+        args: Some(serde_json::json!({
+            "listen_address": addr.to_string(),
+            "policy": policy.banner(),
+        })),
+        env: None,
+        trace: Trace::from_duration(0),
+    };
+    crate::mode::cli::emit_output(&banner, agent_first_data::OutputFormat::Json);
 
     let server = tonic::transport::Server::builder()
         .add_service(AfPayServer::new(service))
         .serve(addr);
 
     if let Err(e) = server.await {
-        let value = agent_first_data::build_cli_error(&format!("RPC server error: {e}"), None);
-        let rendered = agent_first_data::render(
-            value.as_value(),
+        crate::mode::cli::emit_cli_error_hint(
+            "rpc_startup_failed",
+            &format!("RPC server error: {e}"),
+            None,
             agent_first_data::OutputFormat::Json,
-            &agent_first_data::OutputOptions::default(),
         );
-        let _ = writeln!(std::io::stdout(), "{rendered}");
         std::process::exit(1);
     }
 }
@@ -733,12 +708,7 @@ fn emit_rpc_log(
         env: None,
         trace: Trace::from_duration(0),
     };
-    let rendered = agent_first_data::render(
-        &serde_json::to_value(&log).unwrap_or(serde_json::Value::Null),
-        agent_first_data::OutputFormat::Json,
-        &agent_first_data::OutputOptions::default(),
-    );
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+    crate::mode::cli::emit_output(&log, agent_first_data::OutputFormat::Json);
 }
 
 fn grpc_code_name(code: Code) -> &'static str {

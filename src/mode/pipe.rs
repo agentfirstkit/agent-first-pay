@@ -32,7 +32,7 @@ pub(super) async fn run(init: PipeInit) {
     let mut config = match RuntimeConfig::load_from_dir(&resolved_dir) {
         Ok(config) => config,
         Err(error) => {
-            emit_cli_error(&error, output);
+            emit_cli_error("request_invalid", &error, output);
             std::process::exit(1);
         }
     };

@@ -184,7 +184,8 @@ pub struct LnWalletCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nwc_uri_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
+    #[serde(alias = "endpoint")]
+    pub endpoint_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,7 +201,7 @@ impl std::fmt::Debug for LnWalletCreateRequest {
                 "nwc_uri_secret",
                 &self.nwc_uri_secret.as_ref().map(|_| "***"),
             )
-            .field("endpoint", &self.endpoint)
+            .field("endpoint_url", &self.endpoint_url)
             .field(
                 "password_secret",
                 &self.password_secret.as_ref().map(|_| "***"),
@@ -221,7 +222,8 @@ pub struct WalletInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mnemonic: Option<String>,
+    #[serde(alias = "mnemonic")]
+    pub mnemonic_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

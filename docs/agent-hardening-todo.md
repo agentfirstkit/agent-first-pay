@@ -416,7 +416,7 @@ retry.
 - **Where:** `container/docker/` entrypoint scripts (not covered by this
   audit).
 - **Verify:**
-  - `AFPAY_RPC_SECRET` / `AFPAY_REST_API_KEY` generated from a CSPRNG
+  - `AFPAY_RPC_SECRET` / `AFPAY_REST_API_KEY_SECRET` generated from a CSPRNG
     (`openssl rand -base64 32` or `/dev/urandom`), never `$RANDOM` /
     `date | md5`.
   - Persisted files are `chmod 600`, in the data volume only.

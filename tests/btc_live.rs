@@ -428,12 +428,11 @@ fn btc_live_receive_wait_uses_btc_branch() {
 
     let create = Command::new(exe)
         .args([
-            "--data-dir",
-            data_dir,
+            "btc",
             "wallet",
             "create",
-            "--network",
-            "btc",
+            "--data-dir",
+            data_dir,
             "--btc-network",
             "signet",
             "--label",
@@ -455,10 +454,10 @@ fn btc_live_receive_wait_uses_btc_branch() {
 
     let wait = Command::new(exe)
         .args([
-            "--data-dir",
-            data_dir,
             "btc",
             "receive",
+            "--data-dir",
+            data_dir,
             "--wallet",
             wallet,
             "--wait",

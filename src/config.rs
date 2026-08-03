@@ -63,6 +63,7 @@ fn sanitize_startup_argv(argv: Vec<String>) -> Vec<String> {
         "--nwc-uri-secret",
         "--password-secret",
         "--pg-url-secret",
+        "--rest-api-key-secret",
         "--rest-api-key",
         "--rpc-secret",
     ];
@@ -182,7 +183,7 @@ mod tests {
                 "afpay".to_string(),
                 "--rpc-secret".to_string(),
                 "rpc-secret-value".to_string(),
-                "--rest-api-key=rest-secret-value".to_string(),
+                "--rest-api-key-secret=rest-secret-value".to_string(),
                 "--data-dir".to_string(),
                 "/tmp/afpay".to_string(),
             ]),

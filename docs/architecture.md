@@ -61,7 +61,7 @@ All networks in one process. Simplest setup:
 
 ```bash
 # REST API server (curl-accessible, no specialized client needed)
-afpay --mode rest --rest-api-key "my-secret"              # 127.0.0.1:9401 by default
+afpay --mode rest --rest-api-key-secret "my-secret"       # 127.0.0.1:9401 by default
 
 # Or selective features
 cargo build --features cashu
@@ -114,11 +114,11 @@ The same CLI commands work locally or against a remote daemon:
 
 ```bash
 # Local (wallet on this machine)
-afpay send --network ln --to lnbc1...
-afpay send --network ln --to lno1... --amount 1000   # BOLT12 offer (phoenixd only)
+afpay ln send --to lnbc1...
+afpay ln send --to lno1... --amount-sats 1000   # BOLT12 offer (phoenixd only)
 
 # Remote (forward to rpc daemon)
-afpay --rpc-endpoint 10.0.1.5:9400 --rpc-secret "abc..." send --network ln --to lnbc1...
+afpay ln send --to lnbc1... --rpc-endpoint 10.0.1.5:9400 --rpc-secret "abc..."
 ```
 
 With `--rpc-endpoint`, the CLI forwards the request. Without it, the CLI executes locally. Transparent to the caller.
@@ -176,7 +176,7 @@ afpay --mode rpc --rpc-secret "64-char-hex"
 afpay --mode rpc --rpc-listen 0.0.0.0:9400 --public-listen --rpc-secret "64-char-hex"
 
 # CLI direct to remote daemon
-afpay --rpc-endpoint vps-a:9400 --rpc-secret "64-char-hex" send --wallet w_01 ...
+afpay ln send --wallet w_01 ... --rpc-endpoint vps-a:9400 --rpc-secret "64-char-hex"
 ```
 
 For multi-level (coordinator → daemon), configure `config.toml` with named `afpay_rpc` nodes (see Deployment Patterns above). Each node can have a different secret. Secrets use the `_secret` suffix and are auto-redacted in agent-first-data output.
@@ -243,7 +243,7 @@ supervisord
 | Build | `INSTALL_BITCOIND` | `false` | Install bitcoind binary |
 | Runtime | `AFPAY_MODE` | `rest` | afpay run mode: `rest` or `rpc` |
 | Runtime | `AFPAY_PORT` | `9401` | Listen port (rest/rpc) |
-| Runtime | `AFPAY_REST_API_KEY` | auto-generated | REST Bearer token (rest mode) |
+| Runtime | `AFPAY_REST_API_KEY_SECRET` | auto-generated | REST Bearer token (rest mode); legacy `AFPAY_REST_API_KEY` remains a fallback |
 | Runtime | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret (rpc mode; 32+ bytes) |
 | Runtime | `ENABLE_PHOENIXD` | `true` | Start phoenixd process |
 | Runtime | `ENABLE_BITCOIND` | `false` | Start bitcoind process |

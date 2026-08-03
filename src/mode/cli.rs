@@ -7,7 +7,6 @@ use crate::provider::remote;
 use crate::store;
 use crate::types::*;
 use agent_first_data::OutputFormat;
-use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
@@ -27,8 +26,7 @@ pub(super) async fn run(req: CliRequest) {
         startup_requested,
         dry_run,
     } = req;
-    let stdout = std::io::stdout();
-    let mut sink = CliOutputSink::new(stdout.lock(), output_format);
+    let mut sink = CliOutputSink::new(output_format);
 
     if dry_run {
         let params = serde_json::to_value(&input).unwrap_or(serde_json::Value::Null);
@@ -51,7 +49,7 @@ pub(super) async fn run(req: CliRequest) {
     let mut config = match RuntimeConfig::load_from_dir(&resolved_dir) {
         Ok(config) => config,
         Err(error) => {
-            sink.emit_error(&error, None);
+            sink.emit_error("config_invalid", &error, None);
             std::process::exit(1);
         }
     };
@@ -133,44 +131,35 @@ pub(super) async fn run_remote(req: CliRequest) {
     std::process::exit(if had_error { 1 } else { 0 });
 }
 
-pub(super) fn emit_cli_error(msg: &str, format: OutputFormat) {
-    emit_cli_error_hint(msg, None, format);
+pub(super) fn emit_cli_error(code: &str, msg: &str, format: OutputFormat) {
+    emit_cli_error_hint(code, msg, None, format);
 }
 
-pub(super) fn emit_cli_error_hint(msg: &str, hint: Option<&str>, format: OutputFormat) {
-    let value = output_fmt::cli_error_event(msg, hint);
-    let rendered =
-        agent_first_data::render(&value, format, &agent_first_data::OutputOptions::default());
-    let _ = writeln!(std::io::stdout(), "{rendered}");
+pub(super) fn emit_cli_error_hint(code: &str, msg: &str, hint: Option<&str>, format: OutputFormat) {
+    let value = output_fmt::coded_error_event(code, msg, hint);
+    let _ = output_fmt::emit_process_event(value, format);
 }
 
 pub(super) fn emit_output(out: &Output, format: OutputFormat) {
-    let _ = output_fmt::emit_output(std::io::stdout().lock(), out, format);
+    let _ = output_fmt::emit_process_output(out, format);
 }
 
-struct CliOutputSink<W: std::io::Write> {
-    writer: W,
+struct CliOutputSink {
     format: OutputFormat,
 }
 
-impl<W: std::io::Write> CliOutputSink<W> {
-    fn new(writer: W, format: OutputFormat) -> Self {
-        Self { writer, format }
+impl CliOutputSink {
+    fn new(format: OutputFormat) -> Self {
+        Self { format }
     }
 
-    fn emit_error(&mut self, message: &str, hint: Option<&str>) {
-        let mut emitter =
-            agent_first_data::CliEmitter::new(&mut self.writer, self.format).with_strict_protocol();
-        let event = agent_first_data::json_error("cli_error", message)
-            .hint_if_some(hint)
-            .build();
-        if let Ok(event) = event {
-            let _ = emitter.emit(event);
-        }
+    fn emit_error(&mut self, code: &str, message: &str, hint: Option<&str>) {
+        let event = output_fmt::coded_error_event(code, message, hint);
+        let _ = output_fmt::emit_process_event(event, self.format);
     }
 
     fn emit(&mut self, out: &Output) {
-        let _ = output_fmt::emit_output(&mut self.writer, out, self.format);
+        let _ = output_fmt::emit_process_output(out, self.format);
     }
 }
 

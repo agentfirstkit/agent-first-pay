@@ -1,5 +1,5 @@
 use agent_first_data::document::{
-    KeyedList, Value as AfValue, coerce_values_toward, get_path, set_path,
+    Addressing, Value as AfValue, coerce_values_toward, get_path, set_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -64,13 +64,11 @@ pub struct RuntimeConfig {
     pub allowed_btc_electrum_urls: Vec<String>,
     /// Whitelist of allowed Lightning backend endpoints (NWC / phoenixd /
     /// lnbits). Empty = no restriction. Matched by `url_allowed`. Without
-    /// this `LnWalletCreate.request.endpoint` flows into the wallet
+    /// this `LnWalletCreate.request.endpoint_url` flows into the wallet
     /// unchecked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_ln_endpoints: Vec<String>,
 }
-
-const KEYED_LISTS: &[KeyedList] = &[];
 
 impl RuntimeConfig {
     /// Read one config key. Fields ending with `_secret` are masked as `"***"`.
@@ -88,9 +86,9 @@ impl RuntimeConfig {
             return Ok(serde_json::json!("***"));
         }
         let root = self.as_af_value()?;
-        let val =
-            get_path(&root, key, KEYED_LISTS).map_err(|e| format!("config key {key}: {e}"))?;
-        Ok(serde_json::Value::from(val))
+        let val = get_path(&root, key, Addressing::INDEX_ONLY)
+            .map_err(|e| format!("config key {key}: {e}"))?;
+        serde_json::Value::try_from(val).map_err(|e| format!("config key {key}: {e}"))
     }
 
     /// Set one config key and persist to `{data_dir}/config.toml`.
@@ -103,12 +101,13 @@ impl RuntimeConfig {
         }
         if !self.apply_domain_override(key, values)? {
             let mut root = self.as_af_value()?;
-            let existing = get_path(&root, key, KEYED_LISTS).ok();
+            let existing = get_path(&root, key, Addressing::INDEX_ONLY).ok();
             let coerced = coerce_values_toward(values, existing.as_ref())
                 .map_err(|e| format!("config key {key}: {e}"))?;
-            set_path(&mut root, key, &coerced, KEYED_LISTS)
+            set_path(&mut root, key, &coerced, Addressing::INDEX_ONLY)
                 .map_err(|e| format!("config key {key}: {e}"))?;
-            let json = serde_json::Value::from(root);
+            let json =
+                serde_json::Value::try_from(root).map_err(|e| format!("config key {key}: {e}"))?;
             *self = serde_json::from_value(json).map_err(|e| {
                 let msg = e.to_string();
                 let hint = msg.split(" at line ").next().unwrap_or(&msg);

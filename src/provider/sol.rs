@@ -1174,7 +1174,7 @@ impl PayProvider for SolProvider {
             network: Network::Sol,
             address,
             label: normalized_label,
-            mnemonic: None,
+            mnemonic_secret: None,
         })
     }
 

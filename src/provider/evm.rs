@@ -1313,7 +1313,7 @@ impl PayProvider for EvmProvider {
             network: Network::Evm,
             address,
             label: normalized_label,
-            mnemonic: None,
+            mnemonic_secret: None,
         })
     }
 

@@ -60,7 +60,7 @@ async fn setup() -> (tempfile::TempDir, LnProvider, String) {
             backend: LnWalletBackend::Lnbits,
             label: Some(format!("test-{}", std::process::id())),
             nwc_uri_secret: None,
-            endpoint: Some(ep),
+            endpoint_url: Some(ep),
             password_secret: None,
             admin_key_secret: Some(key),
         })

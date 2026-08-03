@@ -146,7 +146,7 @@ Default mode is CLI — one command per invocation:
 afpay balance
 
 # Remote (forward to rpc daemon)
-afpay --rpc-endpoint 10.0.1.5:9400 --rpc-secret "64-char-hex" balance
+afpay balance --rpc-endpoint 10.0.1.5:9400 --rpc-secret "64-char-hex"
 ```
 
 Other modes: `--mode interactive` (REPL), `--mode tui` (full-screen terminal UI), `--mode pipe` (JSONL stdin/stdout), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [CLI Reference](docs/cli.md) for flags and subcommands, and [Architecture](docs/architecture.md) for deployment and protocol details.
@@ -199,8 +199,8 @@ afpay balance --network cashu
 ```bash
 # Setup (choose one backend)
 afpay wallet create --network ln --backend nwc --nwc-uri-secret "nostr+walletconnect://..."
-afpay wallet create --network ln --backend phoenixd --endpoint http://localhost:9740 --password-secret "hunter2"
-afpay wallet create --network ln --backend lnbits --endpoint https://legend.lnbits.com --admin-key-secret "abc123"
+afpay wallet create --network ln --backend phoenixd --endpoint-url http://localhost:9740 --password-secret "hunter2"
+afpay wallet create --network ln --backend lnbits --endpoint-url https://legend.lnbits.com --admin-key-secret "abc123"
 
 # Receive — BOLT11 invoice (one-time, amount-specific)
 afpay receive --network ln --amount 500
@@ -387,12 +387,16 @@ Single-container deployment with supervisord (afpay + optional phoenixd + option
 # btc-electrum, ln; repeatable).
 afpay container install --allow mint=https://mint.example
 
+# Credentials and the credential-bearing client command are redacted by
+# default. Reveal them only for an operator who is ready to store them safely.
+afpay container status --reveal-daemon-secret
+
 # Bundle + enable phoenixd (or bitcoind); RPC instead of REST
 afpay container install --with phoenixd --allow ln=http://127.0.0.1:9740
 afpay container install --mode rpc --port 9400 --allow esplora=https://esplora.example
 
 # Status / logs / teardown
-afpay container status        # endpoint + client command
+afpay container status        # endpoint + redacted credential fields
 afpay container logs -f
 afpay container uninstall --purge
 ```

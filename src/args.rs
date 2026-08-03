@@ -1,24 +1,56 @@
+//! afpay's closed-world `cli-spec-v1` registry.
+//!
+//! One registry is the single source for argv parsing, typed invocation values,
+//! which argument combinations are legal, output contracts, `--help`, and the
+//! generated `docs/cli.md`. Every runtime "flag X requires flag Y" rule that
+//! used to live in this file is now a registered combination instead, so the
+//! parser rejects the illegal mix before any payment code runs.
+
 #[cfg(feature = "rest")]
 use crate::mode::rest::RestInit;
 #[cfg(feature = "rpc")]
 use crate::mode::rpc::RpcInit;
 use crate::types::*;
-use agent_first_data::OutputFormat;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use agent_first_data::{
+    ArgSpec, ArgSyntax, ArgValueType, BuiltCliSpec, CliOutcome, CliSpec, CliSpecError, CliValue,
+    Combination, CommandSpec, OutputFormat, OutputSpec, ResolvedInvocation, build_afdata_cli,
+    cli_help_event, cli_parse_output, cli_version_event, render_cli_reference,
+};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::sync::OnceLock;
 
 // ═══════════════════════════════════════════
 // Mode Dispatch Types
 // ═══════════════════════════════════════════
 
+/// A rejected invocation, already classified under the closed CLI error
+/// taxonomy (`cli_unknown_argument`, `cli_invalid_argument_value`, …).
 pub struct CliError {
+    pub code: &'static str,
     pub message: String,
+    pub hint: Option<String>,
+}
+
+impl CliError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            hint: None,
+        }
+    }
+
+    /// A value the registry cannot type — a duration window, a base58 address,
+    /// a `label=/path` pair. It reports the same classification the parser
+    /// would rather than inventing a second spelling for the same failure.
+    fn invalid_value(message: impl Into<String>) -> Self {
+        Self::new("cli_invalid_argument_value", message)
+    }
 }
 
 impl From<String> for CliError {
     fn from(message: String) -> Self {
-        Self { message }
+        Self::invalid_value(message)
     }
 }
 
@@ -68,11 +100,26 @@ pub struct SkillAdminOptions {
     pub force: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkillAgentSelection {
+    All,
+    Codex,
+    ClaudeCode,
+    Opencode,
+    Hermes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkillScope {
+    Personal,
+    Workspace,
+}
+
 #[cfg_attr(not(feature = "backup"), allow(dead_code))]
 pub struct DataOp {
     pub kind: DataOpKind,
     pub data_dir: Option<String>,
-    pub output: agent_first_data::OutputFormat,
+    pub output: OutputFormat,
 }
 
 #[cfg_attr(not(feature = "backup"), allow(dead_code))]
@@ -146,1872 +193,1746 @@ pub struct InteractiveInit {
     pub rpc_secret: Option<String>,
 }
 
-// RpcInit is defined in mode::rpc and re-used here
-
-// ═══════════════════════════════════════════
-// Memo Helpers
-// ═══════════════════════════════════════════
-
-fn parse_memo_kv(s: &str) -> Result<(String, String), String> {
-    match s.split_once('=') {
-        Some((k, v)) => {
-            if k.is_empty() {
-                return Err("memo key must not be empty".into());
-            }
-            Ok((k.to_string(), v.to_string()))
-        }
-        None => Ok(("note".to_string(), s.to_string())),
-    }
-}
-
-fn memo_vec_to_map(v: Vec<(String, String)>) -> Option<BTreeMap<String, String>> {
-    if v.is_empty() {
-        None
-    } else {
-        Some(v.into_iter().collect())
-    }
-}
-
-// ═══════════════════════════════════════════
-// Shared Arg Structs
-// ═══════════════════════════════════════════
-
-#[derive(clap::Args, Clone)]
-struct CommonSendArgs {
-    /// Source wallet ID (auto-selected if omitted)
-    #[arg(long)]
-    wallet: Option<String>,
-    /// On-chain memo (sent with the transaction)
-    #[arg(long = "onchain-memo")]
-    onchain_memo: Option<String>,
-    /// Local bookkeeping annotation (repeatable: --local-memo purpose=donation --local-memo note=coffee)
-    #[arg(long = "local-memo", value_parser = parse_memo_kv)]
-    local_memo: Vec<(String, String)>,
-    /// Opaque idempotency key (≤128 chars). A second send with the same key and
-    /// identical body replays the first response instead of re-broadcasting;
-    /// a different body returns idempotency_conflict. Persisted for 24h.
-    #[arg(long = "idempotency-key")]
-    idempotency_key: Option<String>,
-}
-
-#[derive(clap::Args, Clone)]
-struct CommonReceiveArgs {
-    /// Wallet ID (auto-selected if omitted)
-    #[arg(long)]
-    wallet: Option<String>,
-    /// Wait for payment / matching receive transaction
-    #[arg(long)]
-    wait: bool,
-    /// Timeout in seconds for --wait
-    #[arg(long = "wait-timeout-s")]
-    wait_timeout_s: Option<u64>,
-    /// Poll interval in milliseconds for --wait
-    #[arg(long = "wait-poll-interval-ms")]
-    wait_poll_interval_ms: Option<u64>,
-    /// Write receive QR payload to an SVG file
-    #[arg(long = "qr-svg-file", default_value_t = false)]
-    qr_svg_file: bool,
-}
-
-// ═══════════════════════════════════════════
-// Clap Definitions
-// ═══════════════════════════════════════════
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum RuntimeMode {
-    Cli,
-    Pipe,
-    Interactive,
-    Tui,
-    Rpc,
-    #[cfg(feature = "rest")]
-    Rest,
-}
-
-#[derive(Parser)]
-#[command(
-    name = env!("DISPLAY_NAME"),
-    bin_name = "afpay",
-    version,
-    about = env!("CARGO_PKG_DESCRIPTION"),
-    long_about = concat!(env!("DISPLAY_NAME"), " - ", env!("CARGO_PKG_DESCRIPTION")),
-)]
-pub struct AfpayCli {
-    /// Run mode
-    #[arg(long, value_enum, default_value_t = RuntimeMode::Cli)]
-    mode: RuntimeMode,
-
-    /// Connect to remote RPC daemon (cli mode)
-    #[arg(long = "rpc-endpoint")]
-    rpc_endpoint: Option<String>,
-
-    /// Listen address for RPC daemon (rpc mode)
-    #[arg(long = "rpc-listen", default_value = "127.0.0.1:9400")]
-    rpc_listen: String,
-
-    /// RPC encryption secret
-    #[arg(long = "rpc-secret")]
-    rpc_secret: Option<String>,
-
-    /// Listen address for REST HTTP server (rest mode)
-    #[arg(long = "rest-listen", default_value = "127.0.0.1:9401")]
-    rest_listen: String,
-
-    /// API key for REST bearer authentication (rest mode)
-    #[arg(long = "rest-api-key")]
-    rest_api_key: Option<String>,
-
-    /// Allow binding REST/RPC to non-loopback addresses; use only behind TLS/firewall
-    #[arg(long = "public-listen")]
-    public_listen: bool,
-
-    /// Wallet and data directory
-    #[arg(long = "data-dir")]
-    data_dir: Option<String>,
-
-    /// Output format
-    #[arg(long, default_value = "json")]
-    output: String,
-
-    /// Redirect stdout bytes to this file
-    #[arg(long = "stdout-file", value_name = "PATH", global = true)]
-    stdout_file: Option<String>,
-
-    /// Redirect stderr bytes to this file
-    #[arg(long = "stderr-file", value_name = "PATH", global = true)]
-    stderr_file: Option<String>,
-
-    /// Log filters (comma-separated)
-    #[arg(long = "log", value_delimiter = ',')]
-    log: Vec<String>,
-
-    /// Preview the command without executing it
-    #[arg(long)]
-    dry_run: bool,
-
-    #[command(subcommand)]
-    command: Option<PayCommand>,
-}
-
-#[derive(Subcommand)]
-enum PayCommand {
-    /// Global (cross-network) operations
-    Global {
-        #[command(subcommand)]
-        action: GlobalCommand,
-    },
-    /// Cashu operations
-    Cashu {
-        #[command(subcommand)]
-        action: CashuCommand,
-    },
-    /// Lightning Network operations (NWC, phoenixd, LNbits)
-    Ln {
-        #[command(subcommand)]
-        action: LnCommand,
-    },
-    /// Solana operations
-    Sol {
-        #[command(subcommand)]
-        action: SolCommand,
-    },
-    /// EVM chain operations (Base, Arbitrum)
-    Evm {
-        #[command(subcommand)]
-        action: EvmCommand,
-    },
-    /// Bitcoin on-chain operations
-    Btc {
-        #[command(subcommand)]
-        action: BtcCommand,
-    },
-    /// List all wallets (cross-network)
-    Wallet {
-        #[command(subcommand)]
-        action: WalletTopAction,
-    },
-    /// All wallets balance (cross-network)
-    Balance {
-        /// Wallet ID (omit to show all wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-        /// Filter by network: cashu, ln, sol, evm
-        #[arg(long, value_enum)]
-        network: Option<CliNetwork>,
-        /// Verify cashu proofs against mint (slower but accurate; cashu only)
-        #[arg(long = "cashu-check")]
-        cashu_check: bool,
-    },
-    /// History queries
-    #[command(name = "history")]
-    History {
-        #[command(subcommand)]
-        action: HistoryAction,
-    },
-    /// Spend limit list and remove (cross-network)
-    Limit {
-        #[command(subcommand)]
-        action: LimitAction,
-    },
-    /// Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
-    Skill {
-        #[command(subcommand)]
-        action: SkillCliAction,
-    },
-    /// Build and run the afpay daemon container (Docker, Podman, or Apple) from the embedded recipe
-    Container {
-        #[command(subcommand)]
-        action: ContainerCliAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum SkillCliAction {
-    /// Show whether the skill is installed, valid, and up to date.
-    Status(SkillTargetArgs),
-    /// Install or refresh the skill.
-    Install(SkillWriteArgs),
-    /// Remove a managed skill.
-    Uninstall(SkillWriteArgs),
-}
-
-#[derive(Args)]
-struct SkillTargetArgs {
-    /// Agent to manage. Defaults to every agent that supports the requested scope.
-    #[arg(long = "agent", value_enum, default_value_t = SkillAgentSelection::All)]
-    agent: SkillAgentSelection,
-    /// Skill scope.
-    #[arg(long = "scope", value_enum, default_value_t = SkillScope::Personal)]
-    scope: SkillScope,
-    /// Directory that contains skill folders. Requires an explicit single --agent.
-    #[arg(long = "skills-dir")]
-    skills_dir: Option<String>,
-}
-
-#[derive(Args)]
-struct SkillWriteArgs {
-    #[command(flatten)]
-    target: SkillTargetArgs,
-    /// Overwrite or remove a skill this tool did not manage.
-    #[arg(long)]
-    force: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum SkillAgentSelection {
-    /// Manage every agent that supports the requested scope.
-    All,
-    /// Manage the Codex local skill under $CODEX_HOME/skills.
-    Codex,
-    /// Manage the Claude Code skill under ~/.claude/skills or .claude/skills.
-    #[value(name = "claude-code", alias = "claude")]
-    ClaudeCode,
-    /// Manage the opencode skill under ~/.config/opencode/skills or .opencode/skills.
-    Opencode,
-    /// Manage the Hermes skill under $HERMES_HOME/skills or ~/.hermes/skills.
-    Hermes,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum SkillScope {
-    /// Install under the user-level skills directory.
-    Personal,
-    /// Install under the current workspace's skills directory.
-    Workspace,
-}
-
 // ── Container orchestration (afpay container …) ──────────────
 // Builds and runs the afpay daemon image locally; handled by `crate::container`.
 
-#[derive(Subcommand)]
 pub enum ContainerCliAction {
-    /// Build the image if missing and run the daemon; print the client command.
     Install(ContainerInstallArgs),
-    /// Stop and remove the container (--purge also removes the image and cache).
     Uninstall(ContainerUninstallArgs),
-    /// Report whether the daemon is running, with its endpoint and client command.
     Status(ContainerStatusArgs),
-    /// Stream the container logs (raw passthrough).
     Logs(ContainerLogsArgs),
 }
 
-#[derive(Args)]
 pub struct ContainerCommonArgs {
-    /// Container runtime: docker, podman, or apple (auto-detected if omitted).
-    #[arg(long, value_enum)]
     pub runtime: Option<ContainerRuntimeArg>,
-    /// Container name.
-    #[arg(long, default_value = "afpay")]
     pub name: String,
 }
 
-#[derive(Args)]
 pub struct ContainerInstallArgs {
-    #[command(flatten)]
     pub common: ContainerCommonArgs,
-    /// Daemon port, published on 127.0.0.1.
-    #[arg(long, default_value_t = 9401)]
     pub port: u16,
-    /// Server mode: rest (HTTP + bearer key) or rpc (gRPC + PSK).
-    #[arg(long, value_enum, default_value_t = ContainerModeArg::Rest)]
     pub mode: ContainerModeArg,
-    /// Optional bundled daemon to install and enable (repeatable): phoenixd, bitcoind.
-    #[arg(long = "with", value_name = "DAEMON")]
     pub with: Vec<String>,
-    /// Operator allowlist entry (repeatable), `<category>=<url>`. afpay refuses to
-    /// expose a public listener without one. Categories: mint, esplora, sol-rpc,
-    /// evm-rpc, btc-core, btc-electrum, ln.
-    #[arg(long = "allow", value_name = "CATEGORY=URL")]
     pub allow: Vec<String>,
-    /// Bitcoin network when --with bitcoind: mainnet or signet.
-    #[arg(long = "btc-network", default_value = "mainnet")]
     pub btc_network: String,
-    /// bitcoind RPC port when --with bitcoind.
-    #[arg(long = "btc-rpc-port", default_value_t = 8332)]
     pub btc_rpc_port: u16,
-    /// bitcoind prune target (MB) when --with bitcoind.
-    #[arg(long = "btc-prune-mb", default_value_t = 550)]
     pub btc_prune_mb: u32,
-    /// Cargo feature set for --from-source builds (defaults to the Dockerfile's set).
-    #[arg(long)]
     pub features: Option<String>,
-    /// Rebuild the image even if it already exists.
-    #[arg(long)]
     pub rebuild: bool,
-    /// Build the full image from a source checkout instead of downloading the prebuilt release.
-    #[arg(long = "from-source")]
     pub from_source: bool,
-    /// Source checkout to build from with --from-source (default: current dir).
-    #[arg(long, value_name = "DIR")]
     pub context: Option<String>,
+    pub reveal_daemon_secret: bool,
 }
 
-#[derive(Args)]
 pub struct ContainerUninstallArgs {
-    #[command(flatten)]
     pub common: ContainerCommonArgs,
-    /// Also remove the built image and the cached build context.
-    #[arg(long)]
     pub purge: bool,
 }
 
-#[derive(Args)]
 pub struct ContainerStatusArgs {
-    #[command(flatten)]
     pub common: ContainerCommonArgs,
-    /// Published port, used to format the endpoint and client command.
-    #[arg(long, default_value_t = 9401)]
     pub port: u16,
-    /// Server mode, used to pick the secret file (rest-api-key vs rpc-secret).
-    #[arg(long, value_enum, default_value_t = ContainerModeArg::Rest)]
     pub mode: ContainerModeArg,
+    pub reveal_daemon_secret: bool,
 }
 
-#[derive(Args)]
 pub struct ContainerLogsArgs {
-    #[command(flatten)]
     pub common: ContainerCommonArgs,
-    /// Follow the log output.
-    #[arg(long, short = 'f')]
     pub follow: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerRuntimeArg {
     Docker,
     Podman,
     Apple,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerModeArg {
     Rest,
     Rpc,
 }
 
-fn parse_extra_dir(s: &str) -> Result<(String, String), String> {
-    match s.split_once('=') {
-        Some((label, path)) if !label.is_empty() && !path.is_empty() => {
-            Ok((label.to_string(), path.to_string()))
-        }
-        _ => Err(format!("expected label=/path, got: {s}")),
+// ═══════════════════════════════════════════
+// Registry: shared vocabulary
+// ═══════════════════════════════════════════
+
+const NETWORKS: [&str; 5] = ["cashu", "ln", "sol", "evm", "btc"];
+const AGENTS: [&str; 4] = ["codex", "claude-code", "opencode", "hermes"];
+const EVERY_AGENT: &str = "all";
+
+/// Arguments every CLI-mode command accepts. They used to be root-level
+/// flags that had to precede the subcommand; the registry is flat, so each
+/// command declares them and they are written after the command path.
+const RUNTIME_IDS: [&str; 5] = ["data_dir", "log", "rpc_endpoint", "rpc_secret", "dry_run"];
+
+fn runtime_args() -> [ArgSpec; 5] {
+    [
+        data_dir_arg(),
+        ArgSpec::option("--log", "FILTER")
+            .repeatable()
+            .about("Log filter to enable; repeat, or pass a comma-separated list"),
+        ArgSpec::option("--rpc-endpoint", "HOST:PORT")
+            .about("Forward the command to a remote afpay RPC daemon instead of running locally"),
+        ArgSpec::option("--rpc-secret", "SECRET").about("Shared secret for --rpc-endpoint"),
+        ArgSpec::flag("--dry-run").about("Preview the command without executing it"),
+    ]
+}
+
+fn data_dir_arg() -> ArgSpec {
+    ArgSpec::option("--data-dir", "DIR").about("Wallet and data directory")
+}
+
+fn protocol() -> OutputSpec {
+    OutputSpec::protocol_finite(
+        ["json", "yaml", "plain"],
+        ["split", "stdout", "stderr"],
+        "json",
+        "split",
+    )
+    .file_sinks(["stdout", "stderr"])
+}
+
+/// A long-lived session that emits many terminal events over time — the pipe
+/// protocol, the REPL, and the two daemons — rather than one result and exit.
+fn session() -> OutputSpec {
+    OutputSpec::protocol_stream(
+        ["json", "yaml", "plain"],
+        ["split", "stdout", "stderr"],
+        "json",
+        "split",
+    )
+    .file_sinks(["stdout", "stderr"])
+}
+
+/// Bytes the container runtime writes straight through this process.
+fn passthrough() -> OutputSpec {
+    OutputSpec::raw().file_sinks(["stdout", "stderr"])
+}
+
+fn group<I, S>(path: I, about: &str) -> CommandSpec
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    CommandSpec::new(path).about(about)
+}
+
+/// A command that resolves to a payment request, and therefore accepts the
+/// shared runtime arguments.
+fn leaf<I, S>(path: I, about: &str) -> CommandSpec
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut command = CommandSpec::new(path).about(about);
+    for argument in runtime_args() {
+        command = command.arg(argument);
+    }
+    command
+}
+
+/// One shape of a payment request: the runtime arguments are always legal, so
+/// they are folded in here rather than repeated on every combination.
+fn shape(id: &str, action: &str) -> Combination {
+    Combination::new(id)
+        .action(action)
+        .optional(RUNTIME_IDS)
+        .output(protocol())
+}
+
+fn wallet_arg(about: &str) -> ArgSpec {
+    ArgSpec::option("--wallet", "WALLET_ID").about(about)
+}
+
+fn network_arg() -> ArgSpec {
+    ArgSpec::option_enum("--network", NETWORKS)
+        .value_name("NETWORK")
+        .about("Restrict to one network")
+}
+
+/// Arguments shared by every `send`. `onchain_memo` is opt-in because Lightning
+/// has no on-chain memo to carry: it is absent from `ln send` entirely rather
+/// than accepted and then rejected.
+fn send_args(onchain_memo: bool) -> Vec<ArgSpec> {
+    let mut args = vec![wallet_arg("Source wallet ID (auto-selected if omitted)")];
+    if onchain_memo {
+        args.push(
+            ArgSpec::option("--onchain-memo", "TEXT")
+                .about("On-chain memo, sent with the transaction"),
+        );
+    }
+    args.push(
+        ArgSpec::option("--local-memo", "KEY=VALUE")
+            .repeatable()
+            .about("Local bookkeeping annotation; bare text is stored as note=<text>"),
+    );
+    args.push(ArgSpec::option("--idempotency-key", "KEY").about(
+        "Opaque key (≤128 chars); a repeat with the same key and body replays the first \
+         response instead of re-broadcasting",
+    ));
+    args
+}
+
+fn send_ids(onchain_memo: bool) -> Vec<&'static str> {
+    if onchain_memo {
+        vec!["wallet", "onchain_memo", "local_memo", "idempotency_key"]
+    } else {
+        vec!["wallet", "local_memo", "idempotency_key"]
     }
 }
 
-#[derive(Subcommand)]
-enum GlobalCommand {
-    /// Global spend limit (USD cents)
-    Limit {
-        #[command(subcommand)]
-        action: GlobalLimitAction,
-    },
-    /// Global runtime configuration
-    Config {
-        #[command(subcommand)]
-        action: GlobalConfigAction,
-    },
-    /// Back up all data to a .tar.zst archive
-    Backup {
-        /// Output archive path (default: ./afpay-global-{timestamp}.tar.zst)
-        #[arg(long)]
-        output: Option<String>,
-        /// Include an extra directory: --extra-dir label=/path (repeatable)
-        #[arg(long = "extra-dir", value_parser = parse_extra_dir)]
-        extra_dir: Vec<(String, String)>,
-    },
-    /// Restore all data from a .tar.zst archive
-    Restore {
-        /// Path to the backup archive
-        archive: String,
-        /// Clear all existing data before restoring (default: merge)
-        #[arg(long = "dangerously-overwrite")]
-        dangerously_overwrite: bool,
-        /// Override PostgreSQL connection URL for the pg restore step
-        #[arg(long = "pg-url-secret")]
-        pg_url_secret: Option<String>,
-        /// Restore an extra directory: --extra-dir label=/path (repeatable)
-        #[arg(long = "extra-dir", value_parser = parse_extra_dir)]
-        extra_dir: Vec<(String, String)>,
-    },
+/// Arguments every `receive` accepts, in both its shapes.
+fn receive_args() -> Vec<ArgSpec> {
+    vec![
+        wallet_arg("Wallet ID (auto-selected if omitted)"),
+        ArgSpec::flag("--wait").about("Block until a matching payment settles"),
+        ArgSpec::option_i64("--wait-timeout-s", "SECONDS").about("Give up waiting after N seconds"),
+        ArgSpec::option_i64("--wait-poll-interval-ms", "MS").about("Poll interval while waiting"),
+        ArgSpec::flag("--qr-svg-file").about("Write the receive QR payload to an SVG file"),
+    ]
 }
 
-#[derive(Subcommand)]
-enum GlobalConfigAction {
-    /// Get a config value by dot-path key (omit key to show all)
-    Get {
-        /// Dot-path key (e.g. log, exchange_rate.ttl_s)
-        key: Option<String>,
-    },
-    /// Set a config value by dot-path key
-    Set {
-        /// Dot-path key (e.g. log, exchange_rate.ttl_s)
-        key: String,
-        /// Value(s) to set
-        values: Vec<String>,
-    },
-}
+const RECEIVE_IDLE_IDS: [&str; 2] = ["wallet", "qr_svg_file"];
+const RECEIVE_WAIT_IDS: [&str; 4] = [
+    "wallet",
+    "qr_svg_file",
+    "wait_timeout_s",
+    "wait_poll_interval_ms",
+];
 
-#[derive(Subcommand)]
-enum GlobalLimitAction {
-    /// Add a global spend limit (USD cents)
-    Add {
-        /// Time window: e.g. 30m, 1h, 24h, 7d
-        #[arg(long)]
-        window: String,
-        /// Maximum spend in USD cents
-        #[arg(long)]
-        max_spend: u64,
-    },
-}
-
-/// Per-wallet configuration for cashu, ln, btc (label only).
-#[derive(Subcommand)]
-enum SimpleWalletConfigAction {
-    /// Show current wallet configuration
-    Show,
-    /// Update wallet settings
-    Set {
-        /// New label
-        #[arg(long)]
-        label: Option<String>,
-    },
-}
-
-/// Per-wallet configuration for sol (label + rpc-endpoint + token management).
-#[derive(Subcommand)]
-enum SolWalletConfigAction {
-    /// Show current wallet configuration
-    Show,
-    /// Update wallet settings
-    Set {
-        /// New label
-        #[arg(long)]
-        label: Option<String>,
-        /// Replace RPC endpoint(s)
-        #[arg(long = "rpc-endpoint")]
-        rpc_endpoint: Vec<String>,
-    },
-    /// Register a custom token for balance tracking
-    #[command(name = "token-add")]
-    TokenAdd {
-        /// Token symbol (e.g. dai)
-        #[arg(long)]
-        symbol: String,
-        /// Token contract address
-        #[arg(long)]
-        address: String,
-        /// Token decimals
-        #[arg(long, default_value_t = 6)]
-        decimals: u8,
-    },
-    /// Unregister a custom token
-    #[command(name = "token-remove")]
-    TokenRemove {
-        /// Token symbol to remove
-        #[arg(long)]
-        symbol: String,
-    },
-}
-
-/// Per-wallet configuration for evm (label + rpc-endpoint + chain-id + token management).
-#[derive(Subcommand)]
-enum EvmWalletConfigAction {
-    /// Show current wallet configuration
-    Show,
-    /// Update wallet settings
-    Set {
-        /// New label
-        #[arg(long)]
-        label: Option<String>,
-        /// Replace RPC endpoint(s)
-        #[arg(long = "rpc-endpoint")]
-        rpc_endpoint: Vec<String>,
-        /// EVM chain ID
-        #[arg(long = "chain-id")]
-        chain_id: Option<u64>,
-    },
-    /// Register a custom token for balance tracking
-    #[command(name = "token-add")]
-    TokenAdd {
-        /// Token symbol (e.g. dai)
-        #[arg(long)]
-        symbol: String,
-        /// Token contract address
-        #[arg(long)]
-        address: String,
-        /// Token decimals
-        #[arg(long, default_value_t = 6)]
-        decimals: u8,
-    },
-    /// Unregister a custom token
-    #[command(name = "token-remove")]
-    TokenRemove {
-        /// Token symbol to remove
-        #[arg(long)]
-        symbol: String,
-    },
-}
-
-/// Limit actions for cashu, ln, btc (sats-only networks — no --token flag).
-#[derive(Subcommand)]
-enum SimpleLimitAction {
-    /// Add a network or wallet spend limit
-    Add {
-        /// Time window: e.g. 30m, 1h, 24h, 7d
-        #[arg(long)]
-        window: String,
-        /// Maximum spend in base units
-        #[arg(long)]
-        max_spend: u64,
-    },
-}
-
-/// Limit actions for sol, evm (multi-token networks — has --token flag).
-#[derive(Subcommand)]
-enum TokenLimitAction {
-    /// Add a network or wallet spend limit
-    Add {
-        /// Token: native, usdc, usdt
-        #[arg(long)]
-        token: Option<String>,
-        /// Time window: e.g. 30m, 1h, 24h, 7d
-        #[arg(long)]
-        window: String,
-        /// Maximum spend in base units
-        #[arg(long)]
-        max_spend: u64,
-    },
-}
-
-#[derive(Subcommand)]
-enum CashuCommand {
-    /// Send P2P cashu token (outputs token string; for Lightning, use send-to-ln)
-    #[command(name = "send")]
-    Send {
-        /// Amount in sats (base units)
-        #[arg(long = "amount-sats")]
-        amount_sats: u64,
-        /// Restrict to wallets on these mint URLs (tried in order)
-        #[arg(long = "cashu-mint")]
-        mint_url: Vec<String>,
-        #[command(flatten)]
-        common: CommonSendArgs,
-        /// Hidden: catches --to and redirects to send-to-ln
-        #[arg(long, hide = true)]
-        to: Option<String>,
-    },
-    /// Receive cashu token
-    #[command(name = "receive")]
-    Receive {
-        /// Cashu token string
-        token: String,
-        /// Wallet ID (auto-matched from token if omitted)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Send cashu to a Lightning invoice
-    #[command(name = "send-to-ln")]
-    SendToLn {
-        /// Lightning invoice (bolt11)
-        #[arg(long)]
-        to: String,
-        #[command(flatten)]
-        common: CommonSendArgs,
-    },
-    /// Create Lightning invoice to receive cashu from LN
-    #[command(name = "receive-from-ln")]
-    ReceiveFromLn {
-        /// Amount in sats (base units)
-        #[arg(long = "amount-sats")]
-        amount_sats: Option<u64>,
-        /// On-chain memo (sent with the transaction)
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        #[command(flatten)]
-        common: CommonReceiveArgs,
-    },
-    /// Claim minted tokens from a receive-from-ln quote
-    #[command(name = "receive-from-ln-claim")]
-    ReceiveFromLnClaim {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        /// Quote ID / payment hash from deposit
-        #[arg(long = "ln-quote-id")]
-        ln_quote_id: String,
-    },
-    /// Check cashu balance
-    Balance {
-        /// Wallet ID (omit to show all cashu wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-        /// Verify proofs against mint (slower but accurate)
-        #[arg(long)]
-        check: bool,
-    },
-    /// Wallet management
-    Wallet {
-        #[command(subcommand)]
-        action: CashuWalletAction,
-    },
-    /// Spend limit for cashu network or a specific cashu wallet
-    Limit {
-        /// Wallet ID (omit for network-level limit)
-        #[arg(long)]
-        wallet: Option<String>,
-        #[command(subcommand)]
-        action: SimpleLimitAction,
-    },
-    /// Per-wallet configuration
-    Config {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        #[command(subcommand)]
-        action: SimpleWalletConfigAction,
-    },
-    /// Back up cashu wallet data to a .tar.zst archive
-    Backup {
-        /// Output archive path (default: ./afpay-cashu-{timestamp}.tar.zst)
-        #[arg(long)]
-        output: Option<String>,
-        /// Wallet ID (omit to back up all cashu wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Restore cashu wallet data from a .tar.zst archive
-    Restore {
-        /// Path to the backup archive
-        archive: String,
-        /// Clear existing data before restoring (default: merge)
-        #[arg(long = "dangerously-overwrite")]
-        dangerously_overwrite: bool,
-        /// Override PostgreSQL connection URL for the pg restore step
-        #[arg(long = "pg-url-secret")]
-        pg_url_secret: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum CashuWalletAction {
-    /// Create a new cashu wallet
-    Create {
-        /// Cashu mint URL
-        #[arg(long = "cashu-mint")]
-        mint_url: String,
-        /// Optional label
-        #[arg(long)]
-        label: Option<String>,
-        /// Existing BIP39 mnemonic secret to restore this wallet
-        #[arg(long = "mnemonic-secret")]
-        mnemonic_secret: Option<String>,
-    },
-    /// Close a zero-balance cashu wallet
-    Close {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        /// Dangerously skip balance checks when closing wallet
-        #[arg(long = "dangerously-skip-balance-check-and-may-lose-money")]
-        dangerously_skip_balance_check_and_may_lose_money: bool,
-    },
-    /// List cashu wallets
-    List,
-    /// Dangerously show wallet seed mnemonic (12 BIP39 words)
-    #[command(name = "dangerously-show-seed")]
-    ShowSeed {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-    },
-    /// Restore lost proofs from mint (fixes counter/proof sync issues)
-    Restore {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum LnCommand {
-    /// Wallet management
-    Wallet {
-        #[command(subcommand)]
-        action: LnWalletAction,
-    },
-    /// Pay a Lightning invoice or BOLT12 offer
-    #[command(name = "send")]
-    Send {
-        /// BOLT11 invoice or BOLT12 offer (lno1…) to pay
-        #[arg(long)]
-        to: String,
-        /// Amount in sats (required for BOLT12 offers, rejected for BOLT11)
-        #[arg(long = "amount-sats")]
-        amount_sats: Option<u64>,
-        #[command(flatten)]
-        common: CommonSendArgs,
-    },
-    /// Create a Lightning invoice (BOLT11) or get a reusable BOLT12 offer
-    #[command(name = "receive")]
-    Receive {
-        /// Amount in sats (omit for BOLT12 offer)
-        #[arg(long = "amount-sats")]
-        amount_sats: Option<u64>,
-        #[command(flatten)]
-        common: CommonReceiveArgs,
-    },
-    /// Check balance
-    Balance {
-        /// Wallet ID (omit to show all ln wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Spend limit for ln network or a specific ln wallet
-    Limit {
-        /// Wallet ID (omit for network-level limit)
-        #[arg(long)]
-        wallet: Option<String>,
-        #[command(subcommand)]
-        action: SimpleLimitAction,
-    },
-    /// Per-wallet configuration
-    Config {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        #[command(subcommand)]
-        action: SimpleWalletConfigAction,
-    },
-    /// Back up Lightning wallet data to a .tar.zst archive
-    Backup {
-        /// Output archive path (default: ./afpay-ln-{timestamp}.tar.zst)
-        #[arg(long)]
-        output: Option<String>,
-        /// Wallet ID (omit to back up all ln wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Restore Lightning wallet data from a .tar.zst archive
-    Restore {
-        /// Path to the backup archive
-        archive: String,
-        /// Clear existing data before restoring (default: merge)
-        #[arg(long = "dangerously-overwrite")]
-        dangerously_overwrite: bool,
-        /// Override PostgreSQL connection URL for the pg restore step
-        #[arg(long = "pg-url-secret")]
-        pg_url_secret: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum SolCommand {
-    /// Wallet management
-    Wallet {
-        #[command(subcommand)]
-        action: SolWalletAction,
-    },
-    /// Send SOL or SPL token transfer
-    #[command(name = "send")]
-    Send {
-        /// Recipient Solana address (base58)
-        #[arg(long)]
-        to: String,
-        /// Amount in token base units (lamports for SOL, smallest unit for SPL tokens)
-        #[arg(long)]
-        amount: u64,
-        /// Token: "native" for SOL, "usdc", "usdt", or SPL mint address
-        #[arg(long)]
-        token: String,
-        /// Reference key for order binding (base58-encoded 32 bytes, per strain-payment-method-solana)
-        #[arg(long)]
-        reference: Option<String>,
-        #[command(flatten)]
-        common: CommonSendArgs,
-    },
-    /// Show wallet receive address
-    #[command(name = "receive")]
-    Receive {
-        /// On-chain memo to watch for (used with --wait)
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Minimum confirmation depth before considering payment settled (requires --wait)
-        #[arg(long = "min-confirmations")]
-        min_confirmations: Option<u32>,
-        /// Reference key to watch for (base58, used with --wait, per strain-payment-method-solana)
-        #[arg(long)]
-        reference: Option<String>,
-        #[command(flatten)]
-        common: CommonReceiveArgs,
-    },
-    /// Check balance
-    Balance {
-        /// Wallet ID (omit to show all sol wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Spend limit for sol network or a specific sol wallet
-    Limit {
-        /// Wallet ID (omit for network-level limit)
-        #[arg(long)]
-        wallet: Option<String>,
-        #[command(subcommand)]
-        action: TokenLimitAction,
-    },
-    /// Per-wallet configuration
-    Config {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        #[command(subcommand)]
-        action: SolWalletConfigAction,
-    },
-    /// Back up Solana wallet data to a .tar.zst archive
-    Backup {
-        /// Output archive path (default: ./afpay-sol-{timestamp}.tar.zst)
-        #[arg(long)]
-        output: Option<String>,
-        /// Wallet ID (omit to back up all sol wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Restore Solana wallet data from a .tar.zst archive
-    Restore {
-        /// Path to the backup archive
-        archive: String,
-        /// Clear existing data before restoring (default: merge)
-        #[arg(long = "dangerously-overwrite")]
-        dangerously_overwrite: bool,
-        /// Override PostgreSQL connection URL for the pg restore step
-        #[arg(long = "pg-url-secret")]
-        pg_url_secret: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum SolWalletAction {
-    /// Create a new Solana wallet
-    Create {
-        /// Solana JSON-RPC endpoint (repeat to configure failover order)
-        #[arg(long = "sol-rpc-endpoint", required = true)]
-        sol_rpc_endpoint: Vec<String>,
-        /// Optional label
-        #[arg(long)]
-        label: Option<String>,
-        /// Solana cluster tag. Stored on the wallet; sends to a different
-        /// cluster are rejected. Accepted: mainnet-beta, devnet, testnet.
-        #[arg(long = "sol-cluster")]
-        sol_cluster: Option<String>,
-    },
-    /// Close a Solana wallet
-    Close {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        /// Dangerously skip balance checks when closing wallet
-        #[arg(long = "dangerously-skip-balance-check-and-may-lose-money")]
-        dangerously_skip_balance_check_and_may_lose_money: bool,
-    },
-    /// List Solana wallets
-    List,
-    /// Dangerously show wallet seed mnemonic (12 BIP39 words)
-    #[command(name = "dangerously-show-seed")]
-    ShowSeed {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum EvmCommand {
-    /// Wallet management
-    Wallet {
-        #[command(subcommand)]
-        action: EvmWalletAction,
-    },
-    /// Send native token or ERC-20 token transfer
-    #[command(name = "send")]
-    Send {
-        /// Recipient address (0x...)
-        #[arg(long)]
-        to: String,
-        /// Amount in token base units (wei for ETH, smallest unit for ERC-20)
-        #[arg(long)]
-        amount: u64,
-        /// Token: "native" for chain native, "usdc" or contract address for ERC-20
-        #[arg(long)]
-        token: String,
-        /// Optional chain_id pin. When set, the daemon verifies the wallet's
-        /// chain_id matches before broadcasting. Mismatch returns wrong_chain.
-        #[arg(long = "chain-id")]
-        chain_id: Option<u64>,
-        #[command(flatten)]
-        common: CommonSendArgs,
-    },
-    /// Show wallet receive address
-    #[command(name = "receive")]
-    Receive {
-        /// On-chain memo to watch for (used with --wait)
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Minimum confirmation depth before considering payment settled (requires --wait)
-        #[arg(long = "min-confirmations")]
-        min_confirmations: Option<u32>,
-        #[command(flatten)]
-        common: CommonReceiveArgs,
-    },
-    /// Check balance
-    Balance {
-        /// Wallet ID (omit to show all evm wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Spend limit for evm network or a specific evm wallet
-    Limit {
-        /// Wallet ID (omit for network-level limit)
-        #[arg(long)]
-        wallet: Option<String>,
-        #[command(subcommand)]
-        action: TokenLimitAction,
-    },
-    /// Per-wallet configuration
-    Config {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        #[command(subcommand)]
-        action: EvmWalletConfigAction,
-    },
-    /// Back up EVM wallet data to a .tar.zst archive
-    Backup {
-        /// Output archive path (default: ./afpay-evm-{timestamp}.tar.zst)
-        #[arg(long)]
-        output: Option<String>,
-        /// Wallet ID (omit to back up all evm wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Restore EVM wallet data from a .tar.zst archive
-    Restore {
-        /// Path to the backup archive
-        archive: String,
-        /// Clear existing data before restoring (default: merge)
-        #[arg(long = "dangerously-overwrite")]
-        dangerously_overwrite: bool,
-        /// Override PostgreSQL connection URL for the pg restore step
-        #[arg(long = "pg-url-secret")]
-        pg_url_secret: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum EvmWalletAction {
-    /// Create a new EVM chain wallet
-    Create {
-        /// EVM JSON-RPC endpoint (repeat to configure failover order)
-        #[arg(long = "evm-rpc-endpoint", required = true)]
-        evm_rpc_endpoint: Vec<String>,
-        /// Chain ID (default: 8453 = Base)
-        #[arg(long = "chain-id", default_value_t = 8453)]
-        chain_id: u64,
-        /// Optional label
-        #[arg(long)]
-        label: Option<String>,
-    },
-    /// Close an EVM chain wallet
-    Close {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        /// Dangerously skip balance checks when closing wallet
-        #[arg(long = "dangerously-skip-balance-check-and-may-lose-money")]
-        dangerously_skip_balance_check_and_may_lose_money: bool,
-    },
-    /// List EVM chain wallets
-    List,
-    /// Dangerously show wallet seed mnemonic (12 BIP39 words)
-    #[command(name = "dangerously-show-seed")]
-    ShowSeed {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum BtcCommand {
-    /// Wallet management
-    Wallet {
-        #[command(subcommand)]
-        action: BtcWalletAction,
-    },
-    /// Send BTC on-chain
-    #[command(name = "send")]
-    Send {
-        /// Recipient Bitcoin address (bc1.../tb1...)
-        #[arg(long)]
-        to: String,
-        /// Amount in satoshis
-        #[arg(long = "amount-sats")]
-        amount_sats: u64,
-        #[command(flatten)]
-        common: CommonSendArgs,
-    },
-    /// Show wallet receive address
-    #[command(name = "receive")]
-    Receive {
-        /// Max history records scanned per poll when resolving tx id
-        #[arg(long = "wait-sync-limit")]
-        wait_sync_limit: Option<usize>,
-        #[command(flatten)]
-        common: CommonReceiveArgs,
-    },
-    /// Check balance
-    Balance {
-        /// Wallet ID (omit to show all btc wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Spend limit for btc network or a specific btc wallet
-    Limit {
-        /// Wallet ID (omit for network-level limit)
-        #[arg(long)]
-        wallet: Option<String>,
-        #[command(subcommand)]
-        action: SimpleLimitAction,
-    },
-    /// Per-wallet configuration
-    Config {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        #[command(subcommand)]
-        action: SimpleWalletConfigAction,
-    },
-    /// Back up Bitcoin wallet data to a .tar.zst archive
-    Backup {
-        /// Output archive path (default: ./afpay-btc-{timestamp}.tar.zst)
-        #[arg(long)]
-        output: Option<String>,
-        /// Wallet ID (omit to back up all btc wallets)
-        #[arg(long)]
-        wallet: Option<String>,
-    },
-    /// Restore Bitcoin wallet data from a .tar.zst archive
-    Restore {
-        /// Path to the backup archive
-        archive: String,
-        /// Clear existing data before restoring (default: merge)
-        #[arg(long = "dangerously-overwrite")]
-        dangerously_overwrite: bool,
-        /// Override PostgreSQL connection URL for the pg restore step
-        #[arg(long = "pg-url-secret")]
-        pg_url_secret: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum BtcWalletAction {
-    /// Create a new Bitcoin wallet
-    Create {
-        /// Bitcoin sub-network: mainnet or signet (default: mainnet)
-        #[arg(long = "btc-network", default_value = "mainnet")]
-        btc_network: String,
-        /// Address type: taproot or segwit (default: taproot)
-        #[arg(long = "btc-address-type", default_value = "taproot")]
-        btc_address_type: String,
-        /// Chain-source backend: esplora (default), core-rpc, electrum
-        #[arg(long = "btc-backend", value_enum)]
-        btc_backend: Option<CliBtcBackend>,
-        /// Custom Esplora API URL
-        #[arg(long = "btc-esplora-url")]
-        btc_esplora_url: Option<String>,
-        /// Bitcoin Core RPC URL (core-rpc backend)
-        #[arg(long = "btc-core-url")]
-        btc_core_url: Option<String>,
-        /// Bitcoin Core RPC auth "user:pass" (core-rpc backend)
-        #[arg(long = "btc-core-auth-secret")]
-        btc_core_auth_secret: Option<String>,
-        /// Electrum server URL (electrum backend)
-        #[arg(long = "btc-electrum-url")]
-        btc_electrum_url: Option<String>,
-        /// Existing BIP39 mnemonic secret to restore wallet
-        #[arg(long = "mnemonic-secret")]
-        mnemonic_secret: Option<String>,
-        /// Optional label
-        #[arg(long)]
-        label: Option<String>,
-    },
-    /// Close a Bitcoin wallet
-    Close {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        /// Dangerously skip balance checks when closing wallet
-        #[arg(long = "dangerously-skip-balance-check-and-may-lose-money")]
-        dangerously_skip_balance_check_and_may_lose_money: bool,
-    },
-    /// List Bitcoin wallets
-    List,
-    /// Dangerously show wallet seed mnemonic (12 BIP39 words)
-    #[command(name = "dangerously-show-seed")]
-    ShowSeed {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum LnWalletAction {
-    /// Create a new Lightning wallet
-    Create {
-        /// Backend: nwc, phoenixd, lnbits
-        #[arg(long, value_enum)]
-        backend: CliLnBackend,
-        /// NWC connection URI secret (for nwc backend)
-        #[arg(long = "nwc-uri-secret")]
-        nwc_uri_secret: Option<String>,
-        /// Endpoint URL (for phoenixd, lnbits)
-        #[arg(long)]
-        endpoint: Option<String>,
-        /// Password secret (for phoenixd)
-        #[arg(long = "password-secret")]
-        password_secret: Option<String>,
-        /// Admin API key secret (for lnbits)
-        #[arg(long = "admin-key-secret")]
-        admin_key_secret: Option<String>,
-        /// Optional label
-        #[arg(long)]
-        label: Option<String>,
-    },
-    /// Close a Lightning wallet
-    Close {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-        /// Dangerously skip balance checks when closing wallet
-        #[arg(long = "dangerously-skip-balance-check-and-may-lose-money")]
-        dangerously_skip_balance_check_and_may_lose_money: bool,
-    },
-    /// List Lightning wallets
-    List,
-    /// Dangerously show wallet seed (for LN this is backend credential, not mnemonic words)
-    #[command(name = "dangerously-show-seed")]
-    ShowSeed {
-        /// Wallet ID
-        #[arg(long)]
-        wallet: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum CliLnBackend {
-    Nwc,
-    Phoenixd,
-    Lnbits,
-}
-
-impl From<CliLnBackend> for LnWalletBackend {
-    fn from(value: CliLnBackend) -> Self {
-        match value {
-            CliLnBackend::Nwc => LnWalletBackend::Nwc,
-            CliLnBackend::Phoenixd => LnWalletBackend::Phoenixd,
-            CliLnBackend::Lnbits => LnWalletBackend::Lnbits,
-        }
+/// Both shapes of one `receive`: an address/invoice now, or the same call
+/// blocking until it settles. `--wait-timeout-s` and its siblings describe the
+/// wait, so only the waiting shape accepts them.
+fn receive_command(
+    path: [&str; 2],
+    action: &str,
+    about: &str,
+    idle_extra: &[&'static str],
+    wait_extra: &[&'static str],
+    extra_args: Vec<ArgSpec>,
+) -> CommandSpec {
+    let mut command = leaf(path, about);
+    for argument in receive_args().into_iter().chain(extra_args) {
+        command = command.arg(argument);
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum CliBtcBackend {
-    Esplora,
-    #[value(name = "core-rpc")]
-    CoreRpc,
-    Electrum,
-}
-
-impl From<CliBtcBackend> for BtcBackend {
-    fn from(value: CliBtcBackend) -> Self {
-        match value {
-            CliBtcBackend::Esplora => BtcBackend::Esplora,
-            CliBtcBackend::CoreRpc => BtcBackend::CoreRpc,
-            CliBtcBackend::Electrum => BtcBackend::Electrum,
-        }
-    }
-}
-
-#[derive(Subcommand)]
-enum WalletTopAction {
-    /// List all wallets (cross-network)
-    List {
-        /// Filter by network: cashu, ln, sol, evm
-        #[arg(long, value_enum)]
-        network: Option<CliNetwork>,
-    },
-}
-
-#[derive(Subcommand)]
-enum HistoryAction {
-    /// List history records from local store
-    List {
-        /// Filter by wallet ID
-        #[arg(long)]
-        wallet: Option<String>,
-        /// Filter by network: cashu, ln, sol, evm
-        #[arg(long, value_enum)]
-        network: Option<CliNetwork>,
-        /// Filter by exact on-chain memo text
-        #[arg(long = "onchain-memo")]
-        onchain_memo: Option<String>,
-        /// Max results
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        /// Offset
-        #[arg(long, default_value_t = 0)]
-        offset: usize,
-        /// Only include records created at or after this epoch second
-        #[arg(long = "since-epoch-s")]
-        since_epoch_s: Option<u64>,
-        /// Only include records created before this epoch second
-        #[arg(long = "until-epoch-s")]
-        until_epoch_s: Option<u64>,
-    },
-    /// Check history status
-    Status {
-        /// Transaction ID
-        #[arg(long = "transaction-id")]
-        transaction_id: String,
-    },
-    /// Incrementally sync on-chain/backend history into local store
-    Update {
-        /// Sync a specific wallet (defaults to all wallets in scope)
-        #[arg(long)]
-        wallet: Option<String>,
-        /// Restrict sync to a single network
-        #[arg(long, value_enum)]
-        network: Option<CliNetwork>,
-        /// Max records to scan per wallet during this incremental sync
-        #[arg(long, default_value_t = 200)]
-        limit: usize,
-    },
-}
-
-#[derive(Subcommand)]
-enum LimitAction {
-    /// Remove a spend limit rule by ID
-    Remove {
-        /// Rule ID (e.g. r_1a2b3c4d)
-        #[arg(long)]
-        rule_id: String,
-    },
-    /// List current limit status
-    List,
-    /// Manually reconcile a stuck spend-ledger reservation (operator-only).
-    ///
-    /// Use when AccountingInconsistent fired (money sent but ledger could not
-    /// confirm) or when a BTC settlement crossed the reservation TTL. Pass
-    /// `--confirm` if the payment actually succeeded (writes a spend event so
-    /// the limit reflects the spend), or `--cancel` if it did not.
-    Reconcile {
-        /// Reservation ID (numeric, from limit_list / Output::Sent.reservation_ids).
-        #[arg(long = "reservation-id")]
-        reservation_id: u64,
-        /// Mark the reservation Confirmed (mutually exclusive with --cancel).
-        #[arg(long, group = "reconcile_action")]
-        confirm: bool,
-        /// Mark the reservation Cancelled (mutually exclusive with --confirm).
-        #[arg(long, group = "reconcile_action")]
-        cancel: bool,
-        /// Required audit note (1..=512 chars) — why this reservation is being
-        /// forced to a terminal state.
-        #[arg(long)]
-        reason: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum CliNetwork {
-    Ln,
-    Sol,
-    Evm,
-    Cashu,
-    Btc,
-}
-
-impl From<CliNetwork> for Network {
-    fn from(c: CliNetwork) -> Self {
-        match c {
-            CliNetwork::Ln => Network::Ln,
-            CliNetwork::Sol => Network::Sol,
-            CliNetwork::Evm => Network::Evm,
-            CliNetwork::Cashu => Network::Cashu,
-            CliNetwork::Btc => Network::Btc,
-        }
-    }
+    let network = path[0];
+    command
+        .combination(
+            shape(&format!("{network}-receive"), action)
+                .about("Return the receive address or invoice and exit")
+                .optional(RECEIVE_IDLE_IDS)
+                .optional(idle_extra.to_vec()),
+        )
+        .combination(
+            shape(&format!("{network}-receive-wait"), action)
+                .about("Block until a matching payment settles; only this shape describes the wait")
+                .required(["wait"])
+                .optional(RECEIVE_WAIT_IDS)
+                .optional(wait_extra.to_vec()),
+        )
 }
 
 // ═══════════════════════════════════════════
-// Subcommand Parser (reused by interactive mode)
+// Registry: per-network command families
 // ═══════════════════════════════════════════
 
-#[derive(Parser)]
-#[command(no_binary_name = true, name = "afpay")]
-struct SubcommandParser {
-    #[command(subcommand)]
-    command: PayCommand,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigKind {
+    /// Label only.
+    Label,
+    /// Label, RPC endpoints, and custom token registration.
+    SolTokens,
+    /// Label, RPC endpoints, chain id, and custom token registration.
+    EvmTokens,
 }
 
-/// Parse a subcommand from args (e.g. `["cashu", "send", "--amount-sats", "100"]`).
-/// Used by interactive mode to reuse CLI command definitions.
-#[cfg(any(feature = "interactive", test))]
-pub fn parse_subcommand(args: &[&str], id: &str) -> Result<Input, String> {
-    let parsed = SubcommandParser::try_parse_from(args).map_err(|e| e.to_string())?;
-    command_to_input(parsed.command, id)
+struct NetworkFamily {
+    name: &'static str,
+    label: &'static str,
+    /// Multi-token networks scope a spend limit by token.
+    token_limits: bool,
+    config: ConfigKind,
 }
 
-/// Render clap help for the given args (e.g. `&["--help"]`, `&["cashu", "--help"]`).
-#[cfg(feature = "interactive")]
-pub fn subcommand_help(args: &[&str]) -> String {
-    match SubcommandParser::try_parse_from(args) {
-        Ok(_) => String::new(),
-        Err(e) => e.to_string(),
+const FAMILIES: [NetworkFamily; 5] = [
+    NetworkFamily {
+        name: "cashu",
+        label: "Cashu",
+        token_limits: false,
+        config: ConfigKind::Label,
+    },
+    NetworkFamily {
+        name: "ln",
+        label: "Lightning",
+        token_limits: false,
+        config: ConfigKind::Label,
+    },
+    NetworkFamily {
+        name: "sol",
+        label: "Solana",
+        token_limits: true,
+        config: ConfigKind::SolTokens,
+    },
+    NetworkFamily {
+        name: "evm",
+        label: "EVM",
+        token_limits: true,
+        config: ConfigKind::EvmTokens,
+    },
+    NetworkFamily {
+        name: "btc",
+        label: "Bitcoin",
+        token_limits: false,
+        config: ConfigKind::Label,
+    },
+];
+
+/// Every command each of the five networks shares, generated once per network:
+/// wallet close/list/seed, spend limits, per-wallet config, balance, and the
+/// archive pair.
+fn family_commands(family: &NetworkFamily) -> Vec<CommandSpec> {
+    let net = family.name;
+    let label = family.label;
+    let mut commands = vec![
+        group([net, "wallet"], &format!("{label} wallet management")),
+        leaf([net, "wallet", "close"], &format!("Close a {label} wallet"))
+            .arg(wallet_arg("Wallet ID"))
+            .arg(
+                ArgSpec::flag("--dangerously-skip-balance-check-and-may-lose-money")
+                    .about("Close even if the wallet still holds funds"),
+            )
+            .combination(
+                shape(&format!("{net}-wallet-close"), "wallet_close")
+                    .required(["wallet"])
+                    .optional(["dangerously_skip_balance_check_and_may_lose_money"]),
+            ),
+        leaf([net, "wallet", "list"], &format!("List {label} wallets"))
+            .combination(shape(&format!("{net}-wallet-list"), "wallet_list")),
+        leaf(
+            [net, "wallet", "dangerously-show-seed"],
+            &format!("Reveal the {label} wallet seed; output is deliberately unredacted"),
+        )
+        .arg(wallet_arg("Wallet ID"))
+        .combination(
+            shape(&format!("{net}-wallet-show-seed"), "wallet_show_seed").required(["wallet"]),
+        ),
+        group(
+            [net, "limit"],
+            &format!("Spend limits for the {label} network or one {label} wallet"),
+        ),
+        limit_add_command(net, label, family.token_limits),
+        group(
+            [net, "config"],
+            &format!("Per-wallet {label} configuration"),
+        ),
+        leaf(
+            [net, "config", "show"],
+            &format!("Show one {label} wallet's configuration"),
+        )
+        .arg(wallet_arg("Wallet ID"))
+        .combination(shape(&format!("{net}-config-show"), "config_show").required(["wallet"])),
+        config_set_command(net, label, family.config),
+        CommandSpec::new([net, "backup"])
+            .about(format!("Back up {label} wallet data to a .tar.zst archive"))
+            .arg(data_dir_arg())
+            .arg(ArgSpec::option("--archive-out", "PATH").about(format!(
+                "Archive path (default: ./afpay-{net}-<epoch>.tar.zst)"
+            )))
+            .arg(wallet_arg(&format!(
+                "Wallet ID (omit to back up every {label} wallet)"
+            )))
+            .combination(
+                Combination::new(format!("{net}-backup"))
+                    .action("network_backup")
+                    .optional(["data_dir", "archive_out", "wallet"])
+                    .output(protocol()),
+            ),
+        restore_command(net, label),
+    ];
+    if family.config != ConfigKind::Label {
+        commands.push(token_add_command(net, label));
+        commands.push(token_remove_command(net, label));
     }
+    commands
 }
 
-/// Describes a single CLI argument extracted from clap definitions.
-#[cfg(feature = "interactive")]
-#[derive(Debug, Clone)]
-pub struct ArgInfo {
-    /// Long flag name without `--` prefix (e.g. `"amount-sats"`, `"to"`).
-    pub long: String,
-    /// Clap help string for this argument.
-    pub help: String,
-    /// Whether the argument is required.
-    pub required: bool,
-    /// Whether this is a boolean flag (no value, presence = true).
-    pub is_flag: bool,
-    /// Positional argument index (None for named `--` args).
-    pub positional_index: Option<usize>,
+fn limit_add_command(net: &'static str, label: &str, token: bool) -> CommandSpec {
+    let mut command = leaf(
+        [net, "limit", "add"],
+        &format!("Add a {label} network or wallet spend limit"),
+    )
+    .arg(wallet_arg(
+        "Wallet ID; omit for a limit covering the whole network",
+    ))
+    .arg(ArgSpec::option("--window", "DURATION").about("Rolling window, e.g. 30m, 1h, 24h, 7d"))
+    .arg(ArgSpec::option_i64("--max-spend", "AMOUNT").about("Maximum spend in base units"));
+    let mut optional = vec!["wallet"];
+    if token {
+        command =
+            command.arg(ArgSpec::option("--token", "TOKEN").about("Token the limit applies to"));
+        optional.push("token");
+    }
+    command.combination(
+        shape(&format!("{net}-limit-add"), "limit_add")
+            .required(["window", "max_spend"])
+            .optional(optional),
+    )
 }
 
-/// Return the list of user-facing arguments for a subcommand path.
-///
-/// Example: `subcommand_args(&["cashu", "send"])` returns the args for `afpay cashu send`.
-///
-/// Hidden args and internal clap args (`help`, `version`) are excluded.
-/// Flattened structs (e.g. `CommonSendArgs`) are inlined automatically by clap.
-#[cfg(feature = "interactive")]
-pub fn subcommand_args(path: &[&str]) -> Vec<ArgInfo> {
-    use clap::CommandFactory;
-    let root = SubcommandParser::command();
-    let cmd = walk_subcommands(&root, path);
-    let Some(cmd) = cmd else {
-        return vec![];
-    };
-    cmd.get_arguments()
-        .filter(|a| !a.is_hide_set())
-        .filter(|a| {
-            let id = a.get_id().as_str();
-            id != "help" && id != "version"
-        })
-        .map(|a| {
-            let long = a
-                .get_long()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| a.get_id().to_string());
-            let help = a.get_help().map(|s| s.to_string()).unwrap_or_default();
-            let required = a.is_required_set();
-            let is_flag = !a.get_action().takes_values();
-            let positional_index = a.get_index();
-            ArgInfo {
-                long,
-                help,
-                required,
-                is_flag,
-                positional_index,
+fn config_set_command(net: &'static str, label: &str, kind: ConfigKind) -> CommandSpec {
+    let mut command = leaf(
+        [net, "config", "set"],
+        &format!("Update one {label} wallet's settings"),
+    )
+    .arg(wallet_arg("Wallet ID"))
+    .arg(ArgSpec::option("--label", "LABEL").about("New wallet label"));
+    let mut optional = vec!["label"];
+    match kind {
+        ConfigKind::Label => {}
+        ConfigKind::SolTokens => {
+            command = command.arg(
+                ArgSpec::option("--sol-rpc-endpoint", "URL")
+                    .repeatable()
+                    .about("Replace the Solana JSON-RPC endpoints, in failover order"),
+            );
+            optional.push("sol_rpc_endpoint");
+        }
+        ConfigKind::EvmTokens => {
+            command = command
+                .arg(
+                    ArgSpec::option("--evm-rpc-endpoint", "URL")
+                        .repeatable()
+                        .about("Replace the EVM JSON-RPC endpoints, in failover order"),
+                )
+                .arg(ArgSpec::option_i64("--chain-id", "ID").about("EVM chain ID"));
+            optional.push("evm_rpc_endpoint");
+            optional.push("chain_id");
+        }
+    }
+    command.combination(
+        shape(&format!("{net}-config-set"), "config_set")
+            .required(["wallet"])
+            .optional(optional),
+    )
+}
+
+fn token_add_command(net: &'static str, label: &str) -> CommandSpec {
+    leaf(
+        [net, "config", "token-add"],
+        &format!("Register a custom {label} token for balance tracking"),
+    )
+    .arg(wallet_arg("Wallet ID"))
+    .arg(ArgSpec::option("--symbol", "SYMBOL").about("Token symbol, e.g. dai"))
+    .arg(ArgSpec::option("--address", "ADDRESS").about("Token contract or mint address"))
+    .arg(
+        ArgSpec::option_i64("--decimals", "N")
+            .default_i64(6)
+            .about("Token decimals"),
+    )
+    .combination(
+        shape(&format!("{net}-token-add"), "config_token_add")
+            .required(["wallet", "symbol", "address"])
+            .optional(["decimals"]),
+    )
+}
+
+fn token_remove_command(net: &'static str, label: &str) -> CommandSpec {
+    leaf(
+        [net, "config", "token-remove"],
+        &format!("Unregister a custom {label} token"),
+    )
+    .arg(wallet_arg("Wallet ID"))
+    .arg(ArgSpec::option("--symbol", "SYMBOL").about("Token symbol to remove"))
+    .combination(
+        shape(&format!("{net}-token-remove"), "config_token_remove").required(["wallet", "symbol"]),
+    )
+}
+
+fn restore_command(net: &'static str, label: &str) -> CommandSpec {
+    CommandSpec::new([net, "restore"])
+        .about(format!(
+            "Restore {label} wallet data from a .tar.zst archive"
+        ))
+        .arg(ArgSpec::positional("archive", 0, "ARCHIVE").about("Path to the backup archive"))
+        .arg(data_dir_arg())
+        .arg(
+            ArgSpec::flag("--dangerously-overwrite")
+                .about("Clear existing data before restoring instead of merging"),
+        )
+        .arg(
+            ArgSpec::option("--pg-url-secret", "URL")
+                .about("Override the PostgreSQL connection URL for the pg restore step"),
+        )
+        .combination(
+            Combination::new(format!("{net}-restore"))
+                .action("network_restore")
+                .required(["archive"])
+                .optional(["data_dir", "dangerously_overwrite", "pg_url_secret"])
+                .output(protocol()),
+        )
+}
+
+fn balance_command(family: &NetworkFamily) -> CommandSpec {
+    let net = family.name;
+    let mut command = leaf([net, "balance"], &format!("{} balance", family.label)).arg(wallet_arg(
+        &format!("Wallet ID (omit to show every {} wallet)", family.label),
+    ));
+    let mut optional = vec!["wallet"];
+    if net == "cashu" {
+        command = command.arg(
+            ArgSpec::flag("--check")
+                .about("Verify proofs against the mint; slower but authoritative"),
+        );
+        optional.push("check");
+    }
+    command.combination(shape(&format!("{net}-balance"), "network_balance").optional(optional))
+}
+
+// ═══════════════════════════════════════════
+// Registry: the whole CLI
+// ═══════════════════════════════════════════
+
+/// Build the registry. Every legal `afpay` invocation is one combination here.
+fn build_cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
+    let mut spec = CliSpec::new("afpay", env!("CARGO_PKG_VERSION"))
+        .about(env!("CARGO_PKG_DESCRIPTION"))
+        .display_name(env!("DISPLAY_NAME"))
+        .lifecycle_output(protocol())
+        .command(root_command());
+    if let Some(build) = Some(env!("GIT_SHA")).filter(|sha| *sha != "unknown") {
+        spec = spec.build_id(build);
+    }
+
+    for command in global_commands()
+        .into_iter()
+        .chain(network_commands())
+        .chain(cross_network_commands())
+        .chain(skill_commands())
+        .chain(container_commands())
+    {
+        spec = spec.command(command);
+    }
+
+    build_afdata_cli(spec)
+}
+
+/// `afpay` with no subcommand runs a long-lived session instead of one request.
+/// Each session is its own shape, so the arguments that only configure the gRPC
+/// daemon cannot be passed to the REPL, and vice versa.
+fn root_command() -> CommandSpec {
+    let mut modes = vec!["pipe", "interactive", "tui", "rpc"];
+    #[cfg(feature = "rest")]
+    modes.push("rest");
+
+    let mut command = CommandSpec::new(Vec::<String>::new())
+        .about("Run a long-lived afpay session instead of a single command")
+        .arg(
+            ArgSpec::option_enum("--mode", modes)
+                .value_name("MODE")
+                .about("Long-lived session to run instead of a single command"),
+        )
+        .arg(data_dir_arg())
+        .arg(
+            ArgSpec::option("--log", "FILTER")
+                .repeatable()
+                .about("Log filter to enable; repeat, or pass a comma-separated list"),
+        )
+        .arg(
+            ArgSpec::option("--rpc-endpoint", "HOST:PORT")
+                .about("Drive a remote afpay RPC daemon from this session"),
+        )
+        .arg(ArgSpec::option("--rpc-secret", "SECRET").about("Shared secret for the RPC channel"))
+        .arg(
+            ArgSpec::option("--rpc-listen", "HOST:PORT")
+                .default("127.0.0.1:9400")
+                .about("Listen address for the RPC daemon"),
+        )
+        .arg(
+            ArgSpec::flag("--public-listen").about(
+                "Allow binding to a non-loopback address; use only behind TLS or a firewall",
+            ),
+        );
+
+    #[cfg(feature = "rest")]
+    {
+        command = command
+            .arg(
+                ArgSpec::option("--rest-listen", "HOST:PORT")
+                    .default("127.0.0.1:9401")
+                    .about("Listen address for the REST server"),
+            )
+            .arg(
+                ArgSpec::option("--rest-api-key-secret", "KEY")
+                    .about("Bearer API key the REST server requires"),
+            );
+    }
+
+    command = command
+        .combination(
+            Combination::new("session-pipe")
+                .action("mode_pipe")
+                .about("Read JSONL requests on stdin and answer on stdout")
+                .fixed("mode", "pipe")
+                .optional(["data_dir", "log", "public_listen"])
+                .output(session()),
+        )
+        .combination(
+            Combination::new("session-interactive")
+                .action("mode_interactive")
+                .about("Human REPL with completion and QR helpers")
+                .fixed("mode", "interactive")
+                .optional(["data_dir", "log", "rpc_endpoint", "rpc_secret"])
+                .output(session()),
+        )
+        .combination(
+            Combination::new("session-tui")
+                .action("mode_tui")
+                .about("Full-screen terminal workflow over the same command interface")
+                .fixed("mode", "tui")
+                .optional(["data_dir", "log", "rpc_endpoint", "rpc_secret"])
+                .output(session()),
+        )
+        .combination(
+            Combination::new("session-rpc")
+                .action("mode_rpc")
+                .about("Encrypted gRPC daemon; only this shape accepts --rpc-listen")
+                .fixed("mode", "rpc")
+                .optional([
+                    "data_dir",
+                    "log",
+                    "rpc_listen",
+                    "rpc_secret",
+                    "public_listen",
+                ])
+                .output(session()),
+        );
+
+    #[cfg(feature = "rest")]
+    {
+        command = command.combination(
+            Combination::new("session-rest")
+                .action("mode_rest")
+                .about("HTTP API server; only this shape accepts --rest-listen")
+                .fixed("mode", "rest")
+                .optional([
+                    "data_dir",
+                    "log",
+                    "rest_listen",
+                    "rest_api_key_secret",
+                    "public_listen",
+                ])
+                .output(session()),
+        );
+    }
+
+    command
+}
+
+fn global_commands() -> Vec<CommandSpec> {
+    vec![
+        group(
+            ["global"],
+            "Cross-network operations and global configuration",
+        ),
+        group(["global", "limit"], "Global spend limit, in USD cents"),
+        leaf(
+            ["global", "limit", "add"],
+            "Add a global spend limit, in USD cents",
+        )
+        .arg(ArgSpec::option("--window", "DURATION").about("Rolling window, e.g. 30m, 1h, 24h, 7d"))
+        .arg(ArgSpec::option_i64("--max-spend", "CENTS").about("Maximum spend in USD cents"))
+        .combination(
+            shape("global-limit-add", "global_limit_add").required(["window", "max_spend"]),
+        ),
+        group(["global", "config"], "Global runtime configuration"),
+        leaf(
+            ["global", "config", "get"],
+            "Read the runtime configuration, or one value by dot-path",
+        )
+        .arg(
+            ArgSpec::positional("key", 0, "KEY")
+                .about("Dot-path key, e.g. log or exchange_rate.ttl_s; omit to show everything"),
+        )
+        .combination(shape("global-config-get", "global_config_get").optional(["key"])),
+        leaf(
+            ["global", "config", "set"],
+            "Set one runtime configuration value",
+        )
+        .arg(ArgSpec::positional("key", 0, "KEY").about("Dot-path key"))
+        .arg(
+            ArgSpec::positional("values", 1, "VALUE")
+                .repeatable()
+                .about("Value, or repeated values for a list-valued key"),
+        )
+        .combination(
+            shape("global-config-set", "global_config_set")
+                .required(["key"])
+                .optional(["values"]),
+        ),
+        CommandSpec::new(["global", "backup"])
+            .about("Back up every network's data to a .tar.zst archive")
+            .arg(data_dir_arg())
+            .arg(
+                ArgSpec::option("--archive-out", "PATH")
+                    .about("Archive path (default: ./afpay-global-<epoch>.tar.zst)"),
+            )
+            .arg(
+                ArgSpec::option("--extra-dir", "LABEL=/path")
+                    .repeatable()
+                    .about("Also archive this directory under LABEL"),
+            )
+            .combination(
+                Combination::new("global-backup")
+                    .action("global_backup")
+                    .optional(["data_dir", "archive_out", "extra_dir"])
+                    .output(protocol()),
+            ),
+        CommandSpec::new(["global", "restore"])
+            .about("Restore every network's data from a .tar.zst archive")
+            .arg(ArgSpec::positional("archive", 0, "ARCHIVE").about("Path to the backup archive"))
+            .arg(data_dir_arg())
+            .arg(
+                ArgSpec::flag("--dangerously-overwrite")
+                    .about("Clear existing data before restoring instead of merging"),
+            )
+            .arg(
+                ArgSpec::option("--pg-url-secret", "URL")
+                    .about("Override the PostgreSQL connection URL for the pg restore step"),
+            )
+            .arg(
+                ArgSpec::option("--extra-dir", "LABEL=/path")
+                    .repeatable()
+                    .about("Also restore this directory from LABEL"),
+            )
+            .combination(
+                Combination::new("global-restore")
+                    .action("global_restore")
+                    .required(["archive"])
+                    .optional([
+                        "data_dir",
+                        "dangerously_overwrite",
+                        "pg_url_secret",
+                        "extra_dir",
+                    ])
+                    .output(protocol()),
+            ),
+    ]
+}
+
+fn network_commands() -> Vec<CommandSpec> {
+    let mut commands = Vec::new();
+    for family in &FAMILIES {
+        commands.push(group(
+            [family.name],
+            match family.name {
+                "cashu" => "Cashu ecash operations",
+                "ln" => "Lightning Network operations (NWC, phoenixd, LNbits)",
+                "sol" => "Solana operations",
+                "evm" => "EVM chain operations (Base, Arbitrum, …)",
+                _ => "Bitcoin on-chain operations",
+            },
+        ));
+        commands.extend(family_commands(family));
+        commands.push(balance_command(family));
+    }
+    commands.extend(cashu_commands());
+    commands.extend(ln_commands());
+    commands.extend(sol_commands());
+    commands.extend(evm_commands());
+    commands.extend(btc_commands());
+    commands
+}
+
+fn cashu_commands() -> Vec<CommandSpec> {
+    vec![
+        leaf(
+            ["cashu", "wallet", "create"],
+            "Create a Cashu wallet on one mint",
+        )
+        .arg(ArgSpec::option("--cashu-mint", "URL").about("Cashu mint URL"))
+        .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
+        .arg(
+            ArgSpec::option("--mnemonic-secret", "WORDS")
+                .about("Existing BIP39 mnemonic to restore this wallet from"),
+        )
+        .combination(
+            shape("cashu-wallet-create", "cashu_wallet_create")
+                .required(["cashu_mint"])
+                .optional(["label", "mnemonic_secret"]),
+        ),
+        leaf(
+            ["cashu", "wallet", "restore"],
+            "Restore lost proofs from the mint, repairing counter or proof drift",
+        )
+        .arg(wallet_arg("Wallet ID"))
+        .combination(shape("cashu-wallet-restore", "cashu_wallet_restore").required(["wallet"])),
+        {
+            let mut command = leaf(
+                ["cashu", "send"],
+                "Mint a P2P Cashu token; to pay a Lightning invoice use `cashu send-to-ln`",
+            )
+            .arg(ArgSpec::option_i64("--amount-sats", "SATS").about("Amount in sats"))
+            .arg(
+                ArgSpec::option("--cashu-mint", "URL")
+                    .repeatable()
+                    .about("Restrict to wallets on these mints, tried in order"),
+            );
+            for argument in send_args(true) {
+                command = command.arg(argument);
             }
+            command.combination(
+                shape("cashu-send", "cashu_send")
+                    .required(["amount_sats"])
+                    .optional(["cashu_mint"])
+                    .optional(send_ids(true)),
+            )
+        },
+        leaf(["cashu", "receive"], "Redeem a Cashu token into a wallet")
+            .arg(ArgSpec::positional("token", 0, "TOKEN").about("Cashu token string"))
+            .arg(wallet_arg(
+                "Wallet ID (auto-matched from the token if omitted)",
+            ))
+            .combination(
+                shape("cashu-receive-token", "cashu_receive")
+                    .required(["token"])
+                    .optional(["wallet"]),
+            ),
+        {
+            let mut command = leaf(
+                ["cashu", "send-to-ln"],
+                "Melt Cashu proofs to pay a Lightning invoice",
+            )
+            .arg(ArgSpec::option("--to", "BOLT11").about("Lightning invoice to pay"));
+            for argument in send_args(true) {
+                command = command.arg(argument);
+            }
+            command.combination(
+                shape("cashu-send-to-ln", "cashu_send_to_ln")
+                    .required(["to"])
+                    .optional(send_ids(true)),
+            )
+        },
+        receive_command(
+            ["cashu", "receive-from-ln"],
+            "cashu_receive_from_ln",
+            "Create a Lightning invoice that mints Cashu proofs when paid",
+            &["amount_sats", "onchain_memo"],
+            &["amount_sats", "onchain_memo"],
+            vec![
+                ArgSpec::option_i64("--amount-sats", "SATS").about("Amount in sats"),
+                ArgSpec::option("--onchain-memo", "TEXT").about("Invoice description"),
+            ],
+        ),
+        leaf(
+            ["cashu", "receive-from-ln-claim"],
+            "Claim the proofs minted by a settled receive-from-ln quote",
+        )
+        .arg(wallet_arg("Wallet ID"))
+        .arg(
+            ArgSpec::option("--ln-quote-id", "QUOTE_ID")
+                .about("Quote ID or payment hash from the deposit"),
+        )
+        .combination(
+            shape("cashu-receive-from-ln-claim", "cashu_receive_from_ln_claim")
+                .required(["wallet", "ln_quote_id"]),
+        ),
+    ]
+}
+
+/// `ln wallet create` as three shapes, one per backend. Each backend needs a
+/// different credential, and the registry now says which — the old code took
+/// every credential and then failed at runtime on the wrong combination.
+fn ln_wallet_create_command() -> CommandSpec {
+    leaf(["ln", "wallet", "create"], "Create a Lightning wallet")
+        .arg(
+            ArgSpec::option_enum("--backend", ["nwc", "phoenixd", "lnbits"])
+                .value_name("BACKEND")
+                .about("Lightning backend this wallet talks to"),
+        )
+        .arg(ArgSpec::option("--nwc-uri-secret", "URI").about("NWC connection URI"))
+        .arg(ArgSpec::option("--endpoint-url", "URL").about("Backend HTTP endpoint"))
+        .arg(ArgSpec::option("--password-secret", "PASSWORD").about("phoenixd HTTP password"))
+        .arg(ArgSpec::option("--admin-key-secret", "KEY").about("LNbits admin API key"))
+        .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
+        .combination(
+            shape("ln-wallet-create-nwc", "ln_wallet_create")
+                .about("Nostr Wallet Connect; authenticates with a connection URI")
+                .fixed("backend", "nwc")
+                .required(["nwc_uri_secret"])
+                .optional(["label"]),
+        )
+        .combination(
+            shape("ln-wallet-create-phoenixd", "ln_wallet_create")
+                .about("phoenixd; authenticates with an endpoint and HTTP password")
+                .fixed("backend", "phoenixd")
+                .required(["endpoint_url", "password_secret"])
+                .optional(["label"]),
+        )
+        .combination(
+            shape("ln-wallet-create-lnbits", "ln_wallet_create")
+                .about("LNbits; authenticates with an endpoint and admin API key")
+                .fixed("backend", "lnbits")
+                .required(["endpoint_url", "admin_key_secret"])
+                .optional(["label"]),
+        )
+}
+
+fn ln_commands() -> Vec<CommandSpec> {
+    vec![
+        ln_wallet_create_command(),
+        {
+            let mut command = leaf(
+                ["ln", "send"],
+                "Pay a BOLT11 invoice or a BOLT12 offer. Lightning carries no on-chain memo, \
+                 so annotate with --local-memo",
+            )
+            .arg(ArgSpec::option("--to", "INVOICE").about("BOLT11 invoice or BOLT12 offer (lno1…)"))
+            .arg(
+                ArgSpec::option_i64("--amount-sats", "SATS")
+                    .about("Amount in sats; required for a BOLT12 offer, rejected for BOLT11"),
+            );
+            for argument in send_args(false) {
+                command = command.arg(argument);
+            }
+            command.combination(
+                shape("ln-send", "ln_send")
+                    .required(["to"])
+                    .optional(["amount_sats"])
+                    .optional(send_ids(false)),
+            )
+        },
+        receive_command(
+            ["ln", "receive"],
+            "ln_receive",
+            "Create a BOLT11 invoice, or return the reusable BOLT12 offer",
+            &["amount_sats"],
+            &["amount_sats"],
+            vec![
+                ArgSpec::option_i64("--amount-sats", "SATS")
+                    .about("Amount in sats; omit for a BOLT12 offer"),
+            ],
+        ),
+    ]
+}
+
+fn sol_commands() -> Vec<CommandSpec> {
+    vec![
+        leaf(["sol", "wallet", "create"], "Create a Solana wallet")
+            .arg(
+                ArgSpec::option("--sol-rpc-endpoint", "URL")
+                    .repeatable()
+                    .about("Solana JSON-RPC endpoint; repeat to set the failover order"),
+            )
+            .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
+            .arg(
+                ArgSpec::option_enum("--sol-cluster", ["mainnet-beta", "devnet", "testnet"])
+                    .value_name("CLUSTER")
+                    .about("Cluster pinned to this wallet; sends elsewhere are rejected"),
+            )
+            .combination(
+                shape("sol-wallet-create", "sol_wallet_create")
+                    .required(["sol_rpc_endpoint"])
+                    .optional(["label", "sol_cluster"]),
+            ),
+        {
+            let mut command = leaf(["sol", "send"], "Send SOL or an SPL token")
+                .arg(ArgSpec::option("--to", "ADDRESS").about("Recipient Solana address (base58)"))
+                .arg(
+                    ArgSpec::option_i64("--amount", "BASE_UNITS")
+                        .about("Amount in base units (lamports for SOL)"),
+                )
+                .arg(
+                    ArgSpec::option("--token", "TOKEN")
+                        .about("`native` for SOL, or a registered token symbol"),
+                )
+                .arg(
+                    ArgSpec::option("--reference", "KEY")
+                        .about("Reference key for order binding (base58-encoded 32 bytes)"),
+                );
+            for argument in send_args(true) {
+                command = command.arg(argument);
+            }
+            command.combination(
+                shape("sol-send", "sol_send")
+                    .required(["to", "amount", "token"])
+                    .optional(["reference"])
+                    .optional(send_ids(true)),
+            )
+        },
+        receive_command(
+            ["sol", "receive"],
+            "sol_receive",
+            "Show the wallet's receive address",
+            &[],
+            &["onchain_memo", "min_confirmations", "reference"],
+            vec![
+                ArgSpec::option("--onchain-memo", "TEXT").about("On-chain memo to watch for"),
+                ArgSpec::option_i64("--min-confirmations", "N")
+                    .about("Confirmation depth before the payment counts as settled"),
+                ArgSpec::option("--reference", "KEY").about("Reference key to watch for (base58)"),
+            ],
+        ),
+    ]
+}
+
+fn evm_commands() -> Vec<CommandSpec> {
+    vec![
+        leaf(["evm", "wallet", "create"], "Create an EVM chain wallet")
+            .arg(
+                ArgSpec::option("--evm-rpc-endpoint", "URL")
+                    .repeatable()
+                    .about("EVM JSON-RPC endpoint; repeat to set the failover order"),
+            )
+            .arg(
+                ArgSpec::option_i64("--chain-id", "ID")
+                    .default_i64(8453)
+                    .about("EVM chain ID"),
+            )
+            .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
+            .combination(
+                shape("evm-wallet-create", "evm_wallet_create")
+                    .required(["evm_rpc_endpoint"])
+                    .optional(["chain_id", "label"]),
+            ),
+        {
+            let mut command = leaf(
+                ["evm", "send"],
+                "Send the chain's native token or an ERC-20",
+            )
+            .arg(ArgSpec::option("--to", "ADDRESS").about("Recipient address (0x…)"))
+            .arg(
+                ArgSpec::option_i64("--amount", "BASE_UNITS")
+                    .about("Amount in base units (wei for ETH)"),
+            )
+            .arg(
+                ArgSpec::option("--token", "TOKEN").about("`native`, or a registered token symbol"),
+            )
+            .arg(
+                ArgSpec::option_i64("--chain-id", "ID")
+                    .about("Pin the chain; a mismatched wallet returns wrong_chain"),
+            );
+            for argument in send_args(true) {
+                command = command.arg(argument);
+            }
+            command.combination(
+                shape("evm-send", "evm_send")
+                    .required(["to", "amount", "token"])
+                    .optional(["chain_id"])
+                    .optional(send_ids(true)),
+            )
+        },
+        // EVM has no watcher, so this command has one shape and no --wait: the
+        // old code accepted the flag and then rejected every use of it.
+        leaf(["evm", "receive"], "Show the wallet's receive address")
+            .arg(wallet_arg("Wallet ID (auto-selected if omitted)"))
+            .arg(ArgSpec::option("--onchain-memo", "TEXT").about("Memo recorded with the request"))
+            .combination(shape("evm-receive", "evm_receive").optional(["wallet", "onchain_memo"])),
+    ]
+}
+
+/// `btc wallet create` as three shapes, one per chain source. Which URL the
+/// wallet needs follows from the backend, so the registry pairs them instead of
+/// letting the provider discover the mismatch later.
+fn btc_wallet_create_command() -> CommandSpec {
+    let base = |command: CommandSpec| {
+        command
+            .arg(
+                ArgSpec::option_enum("--btc-network", ["mainnet", "signet"])
+                    .value_name("NETWORK")
+                    .default("mainnet")
+                    .about("Bitcoin sub-network"),
+            )
+            .arg(
+                ArgSpec::option_enum("--btc-address-type", ["taproot", "segwit"])
+                    .value_name("TYPE")
+                    .default("taproot")
+                    .about("Address type"),
+            )
+            .arg(
+                ArgSpec::option_enum("--btc-backend", ["esplora", "core-rpc", "electrum"])
+                    .value_name("BACKEND")
+                    .default("esplora")
+                    .about("Chain-source backend"),
+            )
+            .arg(ArgSpec::option("--btc-esplora-url", "URL").about("Custom Esplora API URL"))
+            .arg(ArgSpec::option("--btc-core-url", "URL").about("Bitcoin Core RPC URL"))
+            .arg(
+                ArgSpec::option("--btc-core-auth-secret", "USER:PASS")
+                    .about("Bitcoin Core RPC credentials"),
+            )
+            .arg(ArgSpec::option("--btc-electrum-url", "URL").about("Electrum server URL"))
+            .arg(
+                ArgSpec::option("--mnemonic-secret", "WORDS")
+                    .about("Existing BIP39 mnemonic to restore this wallet from"),
+            )
+            .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
+    };
+    let common = [
+        "btc_network",
+        "btc_address_type",
+        "mnemonic_secret",
+        "label",
+    ];
+    base(leaf(["btc", "wallet", "create"], "Create a Bitcoin wallet"))
+        .combination(
+            shape("btc-wallet-create-esplora", "btc_wallet_create")
+                .about("Esplora chain source; only this shape accepts --btc-esplora-url")
+                .fixed("btc_backend", "esplora")
+                .optional(["btc_esplora_url"])
+                .optional(common),
+        )
+        .combination(
+            shape("btc-wallet-create-core-rpc", "btc_wallet_create")
+                .about("Bitcoin Core RPC chain source; requires --btc-core-url")
+                .fixed("btc_backend", "core-rpc")
+                .required(["btc_core_url"])
+                .optional(["btc_core_auth_secret"])
+                .optional(common),
+        )
+        .combination(
+            shape("btc-wallet-create-electrum", "btc_wallet_create")
+                .about("Electrum chain source; requires --btc-electrum-url")
+                .fixed("btc_backend", "electrum")
+                .required(["btc_electrum_url"])
+                .optional(common),
+        )
+}
+
+fn btc_commands() -> Vec<CommandSpec> {
+    vec![
+        btc_wallet_create_command(),
+        {
+            let mut command = leaf(["btc", "send"], "Send BTC on-chain")
+                .arg(
+                    ArgSpec::option("--to", "ADDRESS")
+                        .about("Recipient Bitcoin address (bc1… / tb1…)"),
+                )
+                .arg(ArgSpec::option_i64("--amount-sats", "SATS").about("Amount in satoshis"));
+            for argument in send_args(true) {
+                command = command.arg(argument);
+            }
+            command.combination(
+                shape("btc-send", "btc_send")
+                    .required(["to", "amount_sats"])
+                    .optional(send_ids(true)),
+            )
+        },
+        receive_command(
+            ["btc", "receive"],
+            "btc_receive",
+            "Show the wallet's receive address",
+            &[],
+            &["wait_sync_limit"],
+            vec![
+                ArgSpec::option_i64("--wait-sync-limit", "N")
+                    .about("Max history records scanned per poll while resolving the tx id"),
+            ],
+        ),
+    ]
+}
+
+fn cross_network_commands() -> Vec<CommandSpec> {
+    vec![
+        group(["wallet"], "Cross-network wallet views"),
+        leaf(["wallet", "list"], "List wallets across every network")
+            .arg(network_arg())
+            .combination(shape("wallet-list-all", "wallet_list").optional(["network"])),
+        leaf(["balance"], "Balance across every network")
+            .arg(wallet_arg("Wallet ID (omit to show every wallet)"))
+            .arg(network_arg())
+            .arg(
+                ArgSpec::flag("--cashu-check")
+                    .about("Verify Cashu proofs against the mint; slower but authoritative"),
+            )
+            .combination(shape("balance-all", "balance").optional([
+                "wallet",
+                "network",
+                "cashu_check",
+            ])),
+        group(["history"], "Transaction history"),
+        leaf(
+            ["history", "list"],
+            "List history records from the local store",
+        )
+        .arg(wallet_arg("Filter by wallet ID"))
+        .arg(network_arg())
+        .arg(ArgSpec::option("--onchain-memo", "TEXT").about("Filter by exact on-chain memo"))
+        .arg(
+            ArgSpec::option_i64("--limit", "N")
+                .default_i64(20)
+                .about("Maximum records returned"),
+        )
+        .arg(
+            ArgSpec::option_i64("--offset", "N")
+                .default_i64(0)
+                .about("Records to skip"),
+        )
+        .arg(
+            ArgSpec::option_i64("--since-epoch-s", "EPOCH")
+                .about("Only records created at or after this epoch second"),
+        )
+        .arg(
+            ArgSpec::option_i64("--until-epoch-s", "EPOCH")
+                .about("Only records created before this epoch second"),
+        )
+        .combination(shape("history-list", "history_list").optional([
+            "wallet",
+            "network",
+            "onchain_memo",
+            "limit",
+            "offset",
+            "since_epoch_s",
+            "until_epoch_s",
+        ])),
+        leaf(
+            ["history", "status"],
+            "Report one transaction's current status",
+        )
+        .arg(ArgSpec::option("--transaction-id", "TX_ID").about("Transaction ID"))
+        .combination(shape("history-status", "history_status").required(["transaction_id"])),
+        leaf(
+            ["history", "update"],
+            "Incrementally sync backend history into the local store",
+        )
+        .arg(wallet_arg(
+            "Sync one wallet (default: every wallet in scope)",
+        ))
+        .arg(network_arg())
+        .arg(
+            ArgSpec::option_i64("--limit", "N")
+                .default_i64(200)
+                .about("Maximum records scanned per wallet"),
+        )
+        .combination(
+            shape("history-update", "history_update").optional(["wallet", "network", "limit"]),
+        ),
+        group(["limit"], "Cross-network spend-limit administration"),
+        leaf(
+            ["limit", "list"],
+            "Show every spend-limit rule and its usage",
+        )
+        .combination(shape("limit-list", "limit_list")),
+        leaf(["limit", "remove"], "Remove a spend-limit rule by ID")
+            .arg(ArgSpec::option("--rule-id", "RULE_ID").about("Rule ID, e.g. r_1a2b3c4d"))
+            .combination(shape("limit-remove", "limit_remove").required(["rule_id"])),
+        leaf(
+            ["limit", "reconcile"],
+            "Force a stuck spend-ledger reservation to a terminal state (operator-only)",
+        )
+        .arg(ArgSpec::option_i64("--reservation-id", "ID").about("Reservation ID"))
+        .arg(ArgSpec::flag("--confirm").about("The payment did settle"))
+        .arg(ArgSpec::flag("--cancel").about("The payment did not settle"))
+        .arg(
+            ArgSpec::option("--reason", "TEXT")
+                .about("Audit note (1..=512 chars) explaining the forced outcome"),
+        )
+        .combination(
+            shape("limit-reconcile-confirm", "limit_reconcile_confirm")
+                .about("Record the spend: the payment actually succeeded")
+                .required(["reservation_id", "confirm", "reason"]),
+        )
+        .combination(
+            shape("limit-reconcile-cancel", "limit_reconcile_cancel")
+                .about("Release the reservation: the payment did not happen")
+                .required(["reservation_id", "cancel", "reason"]),
+        ),
+    ]
+}
+
+/// One skill verb, as two shapes. `--skills-dir` names a single directory, so
+/// it is meaningless when the verb fans out across every agent.
+fn skill_command(verb: &str, about: &str, force: bool) -> CommandSpec {
+    let mut command = CommandSpec::new(["skill", verb])
+        .about(about)
+        .arg(
+            ArgSpec::option_enum("--agent", std::iter::once(EVERY_AGENT).chain(AGENTS))
+                .value_name("AGENT")
+                .default(EVERY_AGENT)
+                .about("Agent to manage"),
+        )
+        .arg(
+            ArgSpec::option_enum("--scope", ["personal", "workspace"])
+                .value_name("SCOPE")
+                .default("personal")
+                .about("Skill scope"),
+        )
+        .arg(ArgSpec::option("--skills-dir", "DIR").about("Directory that contains skill folders"));
+
+    let mut every: Vec<&str> = vec!["scope"];
+    let mut named: Vec<&str> = vec!["scope", "skills_dir"];
+    if force {
+        command =
+            command
+                .arg(ArgSpec::flag("--force").about(
+                    "Overwrite or remove an Agent-First Pay skill this tool did not manage",
+                ));
+        every.push("force");
+        named.push("force");
+    }
+
+    command
+        .combination(
+            Combination::new(format!("skill-{verb}-every-agent"))
+                .action(format!("skill_{verb}"))
+                .about("Target every agent that supports the scope")
+                .fixed("agent", EVERY_AGENT)
+                .optional(every)
+                .output(protocol()),
+        )
+        .combination(
+            Combination::new(format!("skill-{verb}-one-agent"))
+                .action(format!("skill_{verb}"))
+                .about("Target one named agent; only this shape accepts --skills-dir")
+                .fixed_one_of("agent", AGENTS)
+                .optional(named)
+                .output(protocol()),
+        )
+}
+
+fn skill_commands() -> Vec<CommandSpec> {
+    vec![
+        group(
+            ["skill"],
+            "Manage the embedded Agent Skill for Codex, Claude Code, opencode, and Hermes",
+        ),
+        skill_command(
+            "status",
+            "Show whether the Agent-First Pay skill is installed, valid, and up to date",
+            false,
+        ),
+        skill_command(
+            "install",
+            "Install or refresh the Agent-First Pay skill",
+            true,
+        ),
+        skill_command(
+            "uninstall",
+            "Remove an afpay-managed Agent-First Pay skill",
+            true,
+        ),
+    ]
+}
+
+fn container_base(command: CommandSpec) -> CommandSpec {
+    command
+        .arg(
+            ArgSpec::option_enum("--runtime", ["docker", "podman", "apple"])
+                .value_name("RUNTIME")
+                .about("Container runtime; auto-detected when omitted"),
+        )
+        .arg(
+            ArgSpec::option("--name", "NAME")
+                .default("afpay")
+                .about("Container name"),
+        )
+}
+
+fn container_mode_arg() -> ArgSpec {
+    ArgSpec::option_enum("--mode", ["rest", "rpc"])
+        .value_name("MODE")
+        .default("rest")
+        .about("Server mode: rest (HTTP + bearer key) or rpc (gRPC + PSK)")
+}
+
+fn container_port_arg() -> ArgSpec {
+    ArgSpec::option_i64("--port", "PORT")
+        .default_i64(9401)
+        .about("Daemon port, published on 127.0.0.1")
+}
+
+fn reveal_arg() -> ArgSpec {
+    ArgSpec::flag("--reveal-daemon-secret")
+        .about("Print the generated daemon credential and the credential-bearing client command")
+}
+
+fn container_commands() -> Vec<CommandSpec> {
+    let install_common = [
+        "runtime",
+        "name",
+        "port",
+        "mode",
+        "with",
+        "allow",
+        "btc_network",
+        "btc_rpc_port",
+        "btc_prune_mb",
+        "reveal_daemon_secret",
+    ];
+    vec![
+        group(
+            ["container"],
+            "Build and run the afpay daemon container (Docker, Podman, or Apple)",
+        ),
+        container_base(
+            CommandSpec::new(["container", "install"])
+                .about("Build the image if missing, run the daemon, and print the client command"),
+        )
+        .arg(container_port_arg())
+        .arg(container_mode_arg())
+        .arg(
+            ArgSpec::option_enum("--with", ["phoenixd", "bitcoind"])
+                .value_name("DAEMON")
+                .repeatable()
+                .about("Bundled daemon to install and enable"),
+        )
+        .arg(
+            ArgSpec::option("--allow", "CATEGORY=URL")
+                .repeatable()
+                .about(
+                    "Operator allowlist entry; a public listener refuses to start without one. \
+                     Categories: mint, esplora, sol-rpc, evm-rpc, btc-core, btc-electrum, ln",
+                ),
+        )
+        .arg(
+            ArgSpec::option_enum("--btc-network", ["mainnet", "signet"])
+                .value_name("NETWORK")
+                .default("mainnet")
+                .about("Bitcoin network when --with bitcoind"),
+        )
+        .arg(
+            ArgSpec::option_i64("--btc-rpc-port", "PORT")
+                .default_i64(8332)
+                .about("bitcoind RPC port when --with bitcoind"),
+        )
+        .arg(
+            ArgSpec::option_i64("--btc-prune-mb", "MB")
+                .default_i64(550)
+                .about("bitcoind prune target when --with bitcoind"),
+        )
+        .arg(ArgSpec::flag("--rebuild").about("Rebuild the image even when it already exists"))
+        .arg(
+            ArgSpec::flag("--from-source")
+                .about("Compile the image from a source checkout instead of the prebuilt release"),
+        )
+        .arg(
+            ArgSpec::option("--features", "FEATURES")
+                .about("Cargo feature set for the source build"),
+        )
+        .arg(ArgSpec::option("--context", "DIR").about("Source checkout to build from"))
+        .arg(reveal_arg())
+        .combination(
+            Combination::new("container-install-release")
+                .action("container_install")
+                .about("Download the prebuilt release image pinned to this binary")
+                .optional(install_common)
+                .optional(["rebuild"])
+                .output(protocol()),
+        )
+        .combination(
+            Combination::new("container-install-from-source")
+                .action("container_install")
+                .about("Compile from a checkout; only this shape accepts --features and --context")
+                .required(["from_source"])
+                .optional(install_common)
+                .optional(["features", "context"])
+                .output(protocol()),
+        ),
+        container_base(
+            CommandSpec::new(["container", "uninstall"])
+                .about("Stop and remove the container; --purge also drops the image and cache"),
+        )
+        .arg(ArgSpec::flag("--purge").about("Also remove the built image and the cached context"))
+        .combination(
+            Combination::new("container-uninstall")
+                .action("container_uninstall")
+                .optional(["runtime", "name", "purge"])
+                .output(protocol()),
+        ),
+        container_base(
+            CommandSpec::new(["container", "status"]).about(
+                "Report whether the daemon is running, with its endpoint and client command",
+            ),
+        )
+        .arg(container_port_arg())
+        .arg(container_mode_arg())
+        .arg(reveal_arg())
+        .combination(
+            Combination::new("container-status")
+                .action("container_status")
+                .optional(["runtime", "name", "port", "mode", "reveal_daemon_secret"])
+                .output(protocol()),
+        ),
+        // The runtime writes the log bytes straight through this process, so
+        // they are raw output rather than protocol events.
+        container_base(
+            CommandSpec::new(["container", "logs"]).about("Stream the container logs, unchanged"),
+        )
+        .arg(ArgSpec::flag("--follow").about("Keep streaming as new lines arrive"))
+        .combination(
+            Combination::new("container-logs")
+                .action("container_logs")
+                .optional(["runtime", "name", "follow"])
+                .output(passthrough()),
+        ),
+    ]
+}
+
+// ═══════════════════════════════════════════
+// Registry access
+// ═══════════════════════════════════════════
+
+static CLI: OnceLock<Result<BuiltCliSpec, String>> = OnceLock::new();
+
+fn cli() -> Result<&'static BuiltCliSpec, CliError> {
+    CLI.get_or_init(|| build_cli_spec().map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|message| CliError::new("cli_spec_invalid", message.clone()))
+}
+
+/// Every action the registry can resolve to. `bind_actions` checks this list
+/// against the registry at startup, so a shape without a handler — or a handler
+/// without a shape — fails before any argv is read.
+fn action_ids() -> Vec<&'static str> {
+    let mut ids = vec![
+        "mode_pipe",
+        "mode_interactive",
+        "mode_tui",
+        "mode_rpc",
+        "global_limit_add",
+        "global_config_get",
+        "global_config_set",
+        "global_backup",
+        "global_restore",
+        "wallet_close",
+        "wallet_list",
+        "wallet_show_seed",
+        "limit_add",
+        "config_show",
+        "config_set",
+        "config_token_add",
+        "config_token_remove",
+        "network_backup",
+        "network_restore",
+        "network_balance",
+        "cashu_wallet_create",
+        "cashu_wallet_restore",
+        "cashu_send",
+        "cashu_receive",
+        "cashu_send_to_ln",
+        "cashu_receive_from_ln",
+        "cashu_receive_from_ln_claim",
+        "ln_wallet_create",
+        "ln_send",
+        "ln_receive",
+        "sol_wallet_create",
+        "sol_send",
+        "sol_receive",
+        "evm_wallet_create",
+        "evm_send",
+        "evm_receive",
+        "btc_wallet_create",
+        "btc_send",
+        "btc_receive",
+        "balance",
+        "history_list",
+        "history_status",
+        "history_update",
+        "limit_list",
+        "limit_remove",
+        "limit_reconcile_confirm",
+        "limit_reconcile_cancel",
+        "skill_status",
+        "skill_install",
+        "skill_uninstall",
+        "container_install",
+        "container_uninstall",
+        "container_status",
+        "container_logs",
+    ];
+    #[cfg(feature = "rest")]
+    ids.push("mode_rest");
+    ids
+}
+
+type ModeHandler = fn(&ResolvedInvocation) -> Result<Mode, CliError>;
+
+// ═══════════════════════════════════════════
+// Invocation accessors
+// ═══════════════════════════════════════════
+
+fn opt_str(invocation: &ResolvedInvocation, id: &str) -> Option<String> {
+    invocation
+        .optional(id)
+        .and_then(CliValue::as_str)
+        .map(str::to_string)
+}
+
+fn req_str(invocation: &ResolvedInvocation, id: &str) -> String {
+    invocation
+        .required(id)
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A wallet id the caller may leave blank; the handler auto-selects for `None`.
+fn wallet_of(invocation: &ResolvedInvocation) -> Option<String> {
+    opt_str(invocation, "wallet").filter(|value| !value.is_empty())
+}
+
+fn strs(invocation: &ResolvedInvocation, id: &str) -> Vec<String> {
+    invocation
+        .repeated(id)
+        .iter()
+        .filter_map(CliValue::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn flag(invocation: &ResolvedInvocation, id: &str) -> bool {
+    invocation
+        .optional(id)
+        .and_then(CliValue::as_bool)
+        .unwrap_or(false)
+}
+
+/// The registry's integer type is `i64`; every count afpay carries is unsigned.
+/// The bound check reports the same classification the parser would.
+fn unsigned(invocation: &ResolvedInvocation, id: &str, max: u64) -> Result<Option<u64>, CliError> {
+    match invocation.optional(id).and_then(CliValue::as_i64) {
+        None => Ok(None),
+        Some(value) if value >= 0 && (value as u64) <= max => Ok(Some(value as u64)),
+        Some(_) => Err(CliError::invalid_value(format!(
+            "--{} must be between 0 and {max}",
+            id.replace('_', "-")
+        ))),
+    }
+}
+
+fn required_unsigned(invocation: &ResolvedInvocation, id: &str, max: u64) -> Result<u64, CliError> {
+    unsigned(invocation, id, max)?
+        .ok_or_else(|| CliError::invalid_value(format!("--{} is required", id.replace('_', "-"))))
+}
+
+fn opt_usize(invocation: &ResolvedInvocation, id: &str) -> Result<Option<usize>, CliError> {
+    Ok(unsigned(invocation, id, usize::MAX as u64)?.map(|value| value as usize))
+}
+
+fn format_of(invocation: &ResolvedInvocation) -> OutputFormat {
+    invocation
+        .output_plan()
+        .format()
+        .and_then(|format| cli_parse_output(format).ok())
+        .unwrap_or(OutputFormat::Json)
+}
+
+/// `--log a,b` and `--log a --log b` mean the same thing.
+fn log_of(invocation: &ResolvedInvocation) -> Vec<String> {
+    let entries: Vec<String> = strs(invocation, "log")
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+    agent_first_data::cli_parse_log_filters(&entries)
+        .as_slice()
+        .to_vec()
+}
+
+fn network_of_path(invocation: &ResolvedInvocation) -> Option<Network> {
+    invocation
+        .command_path()
+        .first()
+        .map(String::as_str)
+        .and_then(network_from_str)
+}
+
+fn network_from_str(name: &str) -> Option<Network> {
+    match name {
+        "cashu" => Some(Network::Cashu),
+        "ln" => Some(Network::Ln),
+        "sol" => Some(Network::Sol),
+        "evm" => Some(Network::Evm),
+        "btc" => Some(Network::Btc),
+        _ => None,
+    }
+}
+
+fn network_filter(invocation: &ResolvedInvocation) -> Option<Network> {
+    opt_str(invocation, "network").and_then(|name| network_from_str(&name))
+}
+
+fn startup_requested() -> bool {
+    std::env::args().any(|argument| argument == "--log")
+}
+
+fn startup_args(invocation: &ResolvedInvocation, mode: &str) -> serde_json::Value {
+    serde_json::json!({
+        "mode": mode,
+        "output_format": invocation.output_plan().format().unwrap_or("json"),
+        "output_to": invocation.output_plan().destination().unwrap_or("split"),
+        "data_dir": opt_str(invocation, "data_dir"),
+        "rpc_endpoint": opt_str(invocation, "rpc_endpoint"),
+        "rpc_listen_address": opt_str(invocation, "rpc_listen"),
+        "rest_listen_address": opt_str(invocation, "rest_listen"),
+        "public_listen_enabled": flag(invocation, "public_listen"),
+    })
+}
+
+// ═══════════════════════════════════════════
+// Memo, window, and address helpers
+// ═══════════════════════════════════════════
+
+fn parse_memo_kv(entry: &str) -> Result<(String, String), String> {
+    match entry.split_once('=') {
+        Some((key, value)) => {
+            if key.is_empty() {
+                return Err("memo key must not be empty".into());
+            }
+            Ok((key.to_string(), value.to_string()))
+        }
+        None => Ok(("note".to_string(), entry.to_string())),
+    }
+}
+
+fn local_memo_of(
+    invocation: &ResolvedInvocation,
+) -> Result<Option<BTreeMap<String, String>>, CliError> {
+    let mut map = BTreeMap::new();
+    for entry in strs(invocation, "local_memo") {
+        let (key, value) = parse_memo_kv(&entry).map_err(CliError::invalid_value)?;
+        map.insert(key, value);
+    }
+    Ok((!map.is_empty()).then_some(map))
+}
+
+fn extra_dirs_of(invocation: &ResolvedInvocation) -> Result<Vec<(String, String)>, CliError> {
+    strs(invocation, "extra_dir")
+        .iter()
+        .map(|entry| match entry.split_once('=') {
+            Some((label, path)) if !label.is_empty() && !path.is_empty() => {
+                Ok((label.to_string(), path.to_string()))
+            }
+            _ => Err(CliError::invalid_value(format!(
+                "--extra-dir expects label=/path, got: {entry}"
+            ))),
         })
         .collect()
 }
 
-#[cfg(feature = "interactive")]
-fn walk_subcommands<'a>(cmd: &'a clap::Command, path: &[&str]) -> Option<&'a clap::Command> {
-    if path.is_empty() {
-        return Some(cmd);
-    }
-    for sub in cmd.get_subcommands() {
-        if sub.get_name() == path[0] {
-            return walk_subcommands(sub, &path[1..]);
-        }
-    }
-    None
-}
-
-// ═══════════════════════════════════════════
-// Parsing
-// ═══════════════════════════════════════════
-
-pub fn parse_args() -> Result<Mode, CliError> {
-    let raw: Vec<String> = std::env::args().collect();
-    let startup_requested = raw.iter().any(|a| a == "--log");
-
-    let build = match env!("GIT_SHA") {
-        "unknown" => None,
-        sha => Some(sha),
+fn parse_window(value: &str) -> Result<u64, String> {
+    let (digits, multiplier) = if let Some(rest) = value.strip_suffix('d') {
+        (rest, 86400u64)
+    } else if let Some(rest) = value.strip_suffix('h') {
+        (rest, 3600u64)
+    } else if let Some(rest) = value.strip_suffix('m') {
+        (rest, 60u64)
+    } else {
+        return Err(format!(
+            "invalid window '{value}': expected suffix m (minutes), h (hours), or d (days)"
+        ));
     };
-    match agent_first_data::cli_handle_version_or_continue(
-        &raw,
-        &AfpayCli::command(),
-        "afpay",
-        Some(env!("DISPLAY_NAME")),
-        crate::config::VERSION,
-        build,
-    ) {
-        Ok(Some(version)) => {
-            let _ = write!(std::io::stdout(), "{version}");
-            std::process::exit(0);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            let stdout = std::io::stdout();
-            let mut emitter = agent_first_data::CliEmitter::new(stdout.lock(), OutputFormat::Json)
-                .with_strict_protocol();
-            if emitter.emit_error("cli_error", &err.to_string()).is_err() {
-                std::process::exit(4);
-            }
-            std::process::exit(2);
-        }
+    let count: u64 = digits
+        .parse()
+        .map_err(|_| format!("invalid window number '{digits}'"))?;
+    if count == 0 {
+        return Err("window cannot be zero".to_string());
     }
-
-    match agent_first_data::cli_handle_help_or_continue(
-        &raw,
-        &AfpayCli::command(),
-        &agent_first_data::HelpConfig::human_cli_default(),
-    ) {
-        Ok(Some(help)) => {
-            let _ = write!(std::io::stdout(), "{help}");
-            std::process::exit(0);
-        }
-        Ok(None) => {}
-        Err(err) => {
-            let stdout = std::io::stdout();
-            let mut emitter = agent_first_data::CliEmitter::new(stdout.lock(), OutputFormat::Json)
-                .with_strict_protocol();
-            if emitter.emit_error("cli_error", &err.to_string()).is_err() {
-                std::process::exit(4);
-            }
-            std::process::exit(2);
-        }
-    }
-
-    let cli = match AfpayCli::try_parse_from(&raw) {
-        Ok(c) => c,
-        Err(e) => {
-            use clap::error::ErrorKind;
-            if matches!(e.kind(), ErrorKind::DisplayVersion) {
-                let _ = writeln!(std::io::stdout(), "{e}");
-                std::process::exit(0);
-            }
-            return Err(e.to_string().into());
-        }
-    };
-    let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
-    let output = agent_first_data::cli_parse_output(&cli.output).map_err(CliError::from)?;
-    let log_filters = agent_first_data::cli_parse_log_filters(&cli.log);
-    let log = log_filters.as_slice().to_vec();
-    let startup_args = build_startup_args(&cli);
-
-    match cli.mode {
-        RuntimeMode::Pipe => {
-            return Ok(Mode::Pipe(PipeInit {
-                output,
-                log,
-                data_dir: cli.data_dir,
-                startup_argv: raw.clone(),
-                startup_args,
-                startup_requested,
-                scrub_parse_errors: cli.public_listen,
-            }));
-        }
-        RuntimeMode::Interactive => {
-            let (rpc_endpoint, rpc_secret) =
-                resolve_rpc_args(cli.rpc_endpoint, cli.rpc_secret, cli.data_dir.as_deref());
-            return Ok(Mode::Interactive(InteractiveInit {
-                frontend: InteractiveFrontend::Interactive,
-                output,
-                log,
-                data_dir: cli.data_dir,
-                rpc_endpoint,
-                rpc_secret,
-            }));
-        }
-        RuntimeMode::Tui => {
-            let (rpc_endpoint, rpc_secret) =
-                resolve_rpc_args(cli.rpc_endpoint, cli.rpc_secret, cli.data_dir.as_deref());
-            return Ok(Mode::Interactive(InteractiveInit {
-                frontend: InteractiveFrontend::Tui,
-                output,
-                log,
-                data_dir: cli.data_dir,
-                rpc_endpoint,
-                rpc_secret,
-            }));
-        }
-        RuntimeMode::Rpc => {
-            #[cfg(feature = "rpc")]
-            {
-                return Ok(Mode::Rpc(RpcInit {
-                    listen: cli.rpc_listen,
-                    rpc_secret: cli.rpc_secret,
-                    allow_public_listen: cli.public_listen,
-                    log: log_filters.clone(),
-                    data_dir: cli.data_dir,
-                    startup_argv: raw.clone(),
-                    startup_args: startup_args.clone(),
-                    startup_requested,
-                }));
-            }
-            #[cfg(not(feature = "rpc"))]
-            {
-                return Ok(Mode::Rpc(RpcStub));
-            }
-        }
-        #[cfg(feature = "rest")]
-        RuntimeMode::Rest => {
-            return Ok(Mode::Rest(RestInit {
-                listen: cli.rest_listen,
-                api_key: cli.rest_api_key,
-                allow_public_listen: cli.public_listen,
-                log,
-                data_dir: cli.data_dir,
-                startup_argv: raw.clone(),
-                startup_args: startup_args.clone(),
-                startup_requested,
-            }));
-        }
-        RuntimeMode::Cli => {}
-    }
-
-    let command = match cli.command {
-        Some(PayCommand::Global {
-            action:
-                GlobalCommand::Backup {
-                    output: out,
-                    extra_dir,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::GlobalBackup {
-                    output_path: out,
-                    extra_dirs: extra_dir,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Global {
-            action:
-                GlobalCommand::Restore {
-                    archive,
-                    dangerously_overwrite,
-                    pg_url_secret,
-                    extra_dir,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::GlobalRestore {
-                    archive_path: archive,
-                    overwrite: dangerously_overwrite,
-                    pg_url_secret,
-                    extra_dirs: extra_dir,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Cashu {
-            action:
-                CashuCommand::Backup {
-                    output: out,
-                    wallet,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkBackup {
-                    network: Network::Cashu,
-                    output_path: out,
-                    wallet,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Cashu {
-            action:
-                CashuCommand::Restore {
-                    archive,
-                    dangerously_overwrite,
-                    pg_url_secret,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkRestore {
-                    network: Network::Cashu,
-                    archive_path: archive,
-                    overwrite: dangerously_overwrite,
-                    pg_url_secret,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Ln {
-            action:
-                LnCommand::Backup {
-                    output: out,
-                    wallet,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkBackup {
-                    network: Network::Ln,
-                    output_path: out,
-                    wallet,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Ln {
-            action:
-                LnCommand::Restore {
-                    archive,
-                    dangerously_overwrite,
-                    pg_url_secret,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkRestore {
-                    network: Network::Ln,
-                    archive_path: archive,
-                    overwrite: dangerously_overwrite,
-                    pg_url_secret,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Sol {
-            action:
-                SolCommand::Backup {
-                    output: out,
-                    wallet,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkBackup {
-                    network: Network::Sol,
-                    output_path: out,
-                    wallet,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Sol {
-            action:
-                SolCommand::Restore {
-                    archive,
-                    dangerously_overwrite,
-                    pg_url_secret,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkRestore {
-                    network: Network::Sol,
-                    archive_path: archive,
-                    overwrite: dangerously_overwrite,
-                    pg_url_secret,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Evm {
-            action:
-                EvmCommand::Backup {
-                    output: out,
-                    wallet,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkBackup {
-                    network: Network::Evm,
-                    output_path: out,
-                    wallet,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Evm {
-            action:
-                EvmCommand::Restore {
-                    archive,
-                    dangerously_overwrite,
-                    pg_url_secret,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkRestore {
-                    network: Network::Evm,
-                    archive_path: archive,
-                    overwrite: dangerously_overwrite,
-                    pg_url_secret,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Btc {
-            action:
-                BtcCommand::Backup {
-                    output: out,
-                    wallet,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkBackup {
-                    network: Network::Btc,
-                    output_path: out,
-                    wallet,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Btc {
-            action:
-                BtcCommand::Restore {
-                    archive,
-                    dangerously_overwrite,
-                    pg_url_secret,
-                },
-        }) => {
-            return Ok(Mode::Data(DataOp {
-                kind: DataOpKind::NetworkRestore {
-                    network: Network::Btc,
-                    archive_path: archive,
-                    overwrite: dangerously_overwrite,
-                    pg_url_secret,
-                },
-                data_dir: cli.data_dir,
-                output,
-            }));
-        }
-        Some(PayCommand::Skill { action }) => {
-            return Ok(Mode::SkillAdmin(SkillAdminRequest {
-                action: skill_admin_action(action),
-                output,
-            }));
-        }
-        Some(PayCommand::Container { action }) => {
-            return Ok(Mode::Container(ContainerRequest { action, output }));
-        }
-        Some(cmd) => cmd,
-        None => {
-            return Err("no subcommand provided; run with --help for usage"
-                .to_string()
-                .into());
-        }
-    };
-
-    let request_id =
-        crate::store::wallet::generate_request_identifier().map_err(|e| e.to_string())?;
-    let input = command_to_input(command, &request_id)?;
-
-    let (rpc_endpoint, rpc_secret) =
-        resolve_rpc_args(cli.rpc_endpoint, cli.rpc_secret, cli.data_dir.as_deref());
-
-    Ok(Mode::Cli(Box::new(CliRequest {
-        input,
-        output,
-        log,
-        data_dir: cli.data_dir,
-        rpc_endpoint,
-        rpc_secret,
-        startup_argv: raw,
-        startup_args,
-        startup_requested,
-        dry_run: cli.dry_run,
-    })))
+    Ok(count.saturating_mul(multiplier))
 }
-
-fn skill_admin_action(action: SkillCliAction) -> SkillAdminAction {
-    match action {
-        SkillCliAction::Status(args) => SkillAdminAction::Status(skill_options(args, false)),
-        SkillCliAction::Install(args) => {
-            SkillAdminAction::Install(skill_options(args.target, args.force))
-        }
-        SkillCliAction::Uninstall(args) => {
-            SkillAdminAction::Uninstall(skill_options(args.target, args.force))
-        }
-    }
-}
-
-fn skill_options(args: SkillTargetArgs, force: bool) -> SkillAdminOptions {
-    SkillAdminOptions {
-        agent: args.agent,
-        scope: args.scope,
-        skills_dir: args.skills_dir,
-        force,
-    }
-}
-
-// ═══════════════════════════════════════════
-// Validation helpers
-// ═══════════════════════════════════════════
 
 fn validate_sol_address(to: &str) -> Result<(), String> {
     if to.starts_with("0x") {
@@ -2026,7 +1947,6 @@ fn validate_sol_address(to: &str) -> Result<(), String> {
             to.len()
         ));
     }
-    // Quick base58 character check (Bitcoin alphabet)
     if let Some(bad) = to
         .chars()
         .find(|c| !c.is_ascii_alphanumeric() || *c == '0' || *c == 'O' || *c == 'I' || *c == 'l')
@@ -2077,910 +1997,10 @@ fn validate_token_not_contract(token: &str) -> Result<(), String> {
     {
         return Err(format!(
             "raw contract address not accepted for --token; register it first: \
-             afpay <network> config --wallet <id> token-add --symbol <name> --address {token}"
+             afpay <network> config token-add --wallet <id> --symbol <name> --address {token}"
         ));
     }
     Ok(())
-}
-
-fn command_to_input(cmd: PayCommand, id: &str) -> Result<Input, String> {
-    match cmd {
-        // `skill` is intercepted in `parse_args` and never reaches command dispatch.
-        PayCommand::Skill { .. } => Err("skill is handled before command dispatch".to_string()),
-        PayCommand::Container { .. } => {
-            Err("container is handled before command dispatch".to_string())
-        }
-        PayCommand::Global { action } => match action {
-            GlobalCommand::Limit { action } => match action {
-                GlobalLimitAction::Add { window, max_spend } => {
-                    let window_s = parse_window(&window)?;
-                    Ok(Input::LimitAdd {
-                        id: id.to_string(),
-                        limit: SpendLimit {
-                            rule_id: None,
-                            scope: SpendScope::GlobalUsdCents,
-                            network: None,
-                            wallet: None,
-                            window_s,
-                            max_spend,
-                            token: None,
-                        },
-                    })
-                }
-            },
-            GlobalCommand::Config { action } => match action {
-                GlobalConfigAction::Get { key } => Ok(Input::ConfigGet {
-                    id: id.to_string(),
-                    key,
-                }),
-                GlobalConfigAction::Set { key, values } => Ok(Input::ConfigSet {
-                    id: id.to_string(),
-                    key,
-                    values,
-                }),
-            },
-            GlobalCommand::Backup { .. } | GlobalCommand::Restore { .. } => {
-                unreachable!("global backup/restore handled before dispatch")
-            }
-        },
-        PayCommand::Cashu { action } => cashu_command_to_input(action, id),
-        PayCommand::Ln { action } => ln_command_to_input(action, id),
-        PayCommand::Sol { action } => sol_command_to_input(action, id),
-        PayCommand::Evm { action } => evm_command_to_input(action, id),
-        PayCommand::Btc { action } => btc_command_to_input(action, id),
-        PayCommand::Wallet { action } => match action {
-            WalletTopAction::List { network } => Ok(Input::WalletList {
-                id: id.to_string(),
-                network: network.map(Into::into),
-            }),
-        },
-        PayCommand::Balance {
-            wallet,
-            network,
-            cashu_check,
-        } => Ok(Input::Balance {
-            id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()),
-            network: network.map(Into::into),
-            check: cashu_check,
-        }),
-        PayCommand::History { action } => match action {
-            HistoryAction::List {
-                wallet,
-                network,
-                onchain_memo,
-                limit,
-                offset,
-                since_epoch_s,
-                until_epoch_s,
-            } => Ok(Input::HistoryList {
-                id: id.to_string(),
-                wallet,
-                network: network.map(Into::into),
-                onchain_memo,
-                limit: Some(limit),
-                offset: Some(offset),
-                since_epoch_s,
-                until_epoch_s,
-            }),
-            HistoryAction::Status { transaction_id } => Ok(Input::HistoryStatus {
-                id: id.to_string(),
-                transaction_id,
-            }),
-            HistoryAction::Update {
-                wallet,
-                network,
-                limit,
-            } => Ok(Input::HistoryUpdate {
-                id: id.to_string(),
-                wallet,
-                network: network.map(Into::into),
-                limit: Some(limit),
-            }),
-        },
-        PayCommand::Limit { action } => match action {
-            LimitAction::Remove { rule_id } => Ok(Input::LimitRemove {
-                id: id.to_string(),
-                rule_id,
-            }),
-            LimitAction::List => Ok(Input::LimitList { id: id.to_string() }),
-            LimitAction::Reconcile {
-                reservation_id,
-                confirm,
-                cancel,
-                reason,
-            } => {
-                let action = match (confirm, cancel) {
-                    (true, false) => ReconcileAction::Confirm,
-                    (false, true) => ReconcileAction::Cancel,
-                    (false, false) => {
-                        return Err("limit reconcile requires --confirm or --cancel".into());
-                    }
-                    (true, true) => {
-                        return Err(
-                            "limit reconcile: --confirm and --cancel are mutually exclusive".into(),
-                        );
-                    }
-                };
-                Ok(Input::ReconcileReservation {
-                    id: id.to_string(),
-                    reservation_id,
-                    action,
-                    reason,
-                })
-            }
-        },
-    }
-}
-
-fn simple_config_to_input(
-    wallet: String,
-    action: SimpleWalletConfigAction,
-    id: &str,
-) -> Result<Input, String> {
-    match action {
-        SimpleWalletConfigAction::Show => Ok(Input::WalletConfigShow {
-            id: id.to_string(),
-            wallet,
-        }),
-        SimpleWalletConfigAction::Set { label } => Ok(Input::WalletConfigSet {
-            id: id.to_string(),
-            wallet,
-            label,
-            rpc_endpoints: vec![],
-            chain_id: None,
-        }),
-    }
-}
-
-fn sol_config_to_input(
-    wallet: String,
-    action: SolWalletConfigAction,
-    id: &str,
-) -> Result<Input, String> {
-    match action {
-        SolWalletConfigAction::Show => Ok(Input::WalletConfigShow {
-            id: id.to_string(),
-            wallet,
-        }),
-        SolWalletConfigAction::Set {
-            label,
-            rpc_endpoint,
-        } => Ok(Input::WalletConfigSet {
-            id: id.to_string(),
-            wallet,
-            label,
-            rpc_endpoints: rpc_endpoint,
-            chain_id: None,
-        }),
-        SolWalletConfigAction::TokenAdd {
-            symbol,
-            address,
-            decimals,
-        } => Ok(Input::WalletConfigTokenAdd {
-            id: id.to_string(),
-            wallet,
-            symbol,
-            address,
-            decimals,
-        }),
-        SolWalletConfigAction::TokenRemove { symbol } => Ok(Input::WalletConfigTokenRemove {
-            id: id.to_string(),
-            wallet,
-            symbol,
-        }),
-    }
-}
-
-fn evm_config_to_input(
-    wallet: String,
-    action: EvmWalletConfigAction,
-    id: &str,
-) -> Result<Input, String> {
-    match action {
-        EvmWalletConfigAction::Show => Ok(Input::WalletConfigShow {
-            id: id.to_string(),
-            wallet,
-        }),
-        EvmWalletConfigAction::Set {
-            label,
-            rpc_endpoint,
-            chain_id,
-        } => Ok(Input::WalletConfigSet {
-            id: id.to_string(),
-            wallet,
-            label,
-            rpc_endpoints: rpc_endpoint,
-            chain_id,
-        }),
-        EvmWalletConfigAction::TokenAdd {
-            symbol,
-            address,
-            decimals,
-        } => Ok(Input::WalletConfigTokenAdd {
-            id: id.to_string(),
-            wallet,
-            symbol,
-            address,
-            decimals,
-        }),
-        EvmWalletConfigAction::TokenRemove { symbol } => Ok(Input::WalletConfigTokenRemove {
-            id: id.to_string(),
-            wallet,
-            symbol,
-        }),
-    }
-}
-
-fn simple_limit_to_input(
-    network: Network,
-    wallet: Option<String>,
-    action: SimpleLimitAction,
-    id: &str,
-) -> Result<Input, String> {
-    match action {
-        SimpleLimitAction::Add { window, max_spend } => {
-            let window_s = parse_window(&window)?;
-            let (scope, wallet) = match wallet {
-                Some(w) => (SpendScope::Wallet, Some(w)),
-                None => (SpendScope::Network, None),
-            };
-            Ok(Input::LimitAdd {
-                id: id.to_string(),
-                limit: SpendLimit {
-                    rule_id: None,
-                    scope,
-                    network: Some(network.to_string()),
-                    wallet,
-                    window_s,
-                    max_spend,
-                    token: None,
-                },
-            })
-        }
-    }
-}
-
-fn token_limit_to_input(
-    network: Network,
-    wallet: Option<String>,
-    action: TokenLimitAction,
-    id: &str,
-) -> Result<Input, String> {
-    match action {
-        TokenLimitAction::Add {
-            token,
-            window,
-            max_spend,
-        } => {
-            let window_s = parse_window(&window)?;
-            let (scope, wallet) = match wallet {
-                Some(w) => (SpendScope::Wallet, Some(w)),
-                None => (SpendScope::Network, None),
-            };
-            Ok(Input::LimitAdd {
-                id: id.to_string(),
-                limit: SpendLimit {
-                    rule_id: None,
-                    scope,
-                    network: Some(network.to_string()),
-                    wallet,
-                    window_s,
-                    max_spend,
-                    token,
-                },
-            })
-        }
-    }
-}
-
-fn cashu_command_to_input(cmd: CashuCommand, id: &str) -> Result<Input, String> {
-    match cmd {
-        CashuCommand::Send {
-            common,
-            amount_sats,
-            mint_url,
-            to,
-        } => {
-            if to.is_some() {
-                return Err("cashu send generates a P2P cashu token — it does not send to an address. To pay a Lightning invoice, use: cashu send-to-ln --to <bolt11>".to_string());
-            }
-            Ok(Input::CashuSend {
-                id: id.to_string(),
-                wallet: common.wallet.filter(|s| !s.is_empty()),
-                amount: Amount {
-                    value: amount_sats,
-                    token: "sats".to_string(),
-                },
-                onchain_memo: common.onchain_memo,
-                local_memo: memo_vec_to_map(common.local_memo),
-                mints: if mint_url.is_empty() {
-                    None
-                } else {
-                    Some(mint_url)
-                },
-                idempotency_key: common.idempotency_key,
-            })
-        }
-        CashuCommand::Receive { wallet, token } => Ok(Input::CashuReceive {
-            id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()),
-            token,
-        }),
-        CashuCommand::SendToLn { common, to } => Ok(Input::Send {
-            id: id.to_string(),
-            wallet: common.wallet.filter(|s| !s.is_empty()),
-            network: Some(Network::Cashu),
-            to,
-            amount: None,
-            onchain_memo: common.onchain_memo,
-            local_memo: memo_vec_to_map(common.local_memo),
-            mints: None,
-            chain_id: None,
-            idempotency_key: common.idempotency_key,
-        }),
-        CashuCommand::ReceiveFromLn {
-            common,
-            amount_sats,
-            onchain_memo,
-        } => {
-            let resolved = amount_sats.map(|v| Amount {
-                value: v,
-                token: "sats".to_string(),
-            });
-            Ok(Input::Receive {
-                id: id.to_string(),
-                wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
-                network: Some(Network::Cashu),
-                amount: resolved,
-                onchain_memo,
-                wait_until_paid: common.wait,
-                wait_timeout_s: common.wait_timeout_s,
-                wait_poll_interval_ms: common.wait_poll_interval_ms,
-                wait_sync_limit: None,
-                write_qr_svg_file: common.qr_svg_file,
-                min_confirmations: None,
-                reference: None,
-            })
-        }
-        CashuCommand::ReceiveFromLnClaim {
-            wallet,
-            ln_quote_id,
-        } => Ok(Input::ReceiveClaim {
-            id: id.to_string(),
-            wallet,
-            quote_id: ln_quote_id,
-        }),
-        CashuCommand::Balance { wallet, check } => Ok(Input::Balance {
-            id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()),
-            network: Some(Network::Cashu),
-            check,
-        }),
-        CashuCommand::Wallet { action } => match action {
-            CashuWalletAction::Create {
-                mint_url,
-                label,
-                mnemonic_secret,
-            } => Ok(Input::WalletCreate {
-                id: id.to_string(),
-                network: Network::Cashu,
-                label,
-                mint_url: Some(mint_url),
-                rpc_endpoints: vec![],
-                chain_id: None,
-                mnemonic_secret,
-                btc_esplora_url: None,
-                btc_network: None,
-                btc_address_type: None,
-                btc_backend: None,
-                btc_core_url: None,
-                btc_core_auth_secret: None,
-                btc_electrum_url: None,
-                sol_cluster: None,
-            }),
-            CashuWalletAction::Close {
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            } => Ok(Input::WalletClose {
-                id: id.to_string(),
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            }),
-            CashuWalletAction::List => Ok(Input::WalletList {
-                id: id.to_string(),
-                network: Some(Network::Cashu),
-            }),
-            CashuWalletAction::ShowSeed { wallet } => Ok(Input::WalletShowSeed {
-                id: id.to_string(),
-                wallet,
-            }),
-            CashuWalletAction::Restore { wallet } => Ok(Input::Restore {
-                id: id.to_string(),
-                wallet,
-            }),
-        },
-        CashuCommand::Limit { wallet, action } => {
-            simple_limit_to_input(Network::Cashu, wallet, action, id)
-        }
-        CashuCommand::Config { wallet, action } => simple_config_to_input(wallet, action, id),
-        CashuCommand::Backup { .. } | CashuCommand::Restore { .. } => {
-            unreachable!("cashu backup/restore handled before dispatch")
-        }
-    }
-}
-
-fn ln_command_to_input(cmd: LnCommand, id: &str) -> Result<Input, String> {
-    match cmd {
-        LnCommand::Wallet { action } => match action {
-            LnWalletAction::Create {
-                backend,
-                nwc_uri_secret,
-                endpoint,
-                password_secret,
-                admin_key_secret,
-                label,
-            } => {
-                let backend_code: LnWalletBackend = backend.into();
-                let request = match backend_code {
-                    LnWalletBackend::Nwc => LnWalletCreateRequest {
-                        backend: backend_code,
-                        label,
-                        nwc_uri_secret: Some(
-                            nwc_uri_secret.ok_or("--nwc-uri-secret is required for nwc backend")?,
-                        ),
-                        endpoint: None,
-                        password_secret: None,
-                        admin_key_secret: None,
-                    },
-                    LnWalletBackend::Phoenixd => LnWalletCreateRequest {
-                        backend: backend_code,
-                        label,
-                        nwc_uri_secret: None,
-                        endpoint: Some(
-                            endpoint.ok_or("--endpoint is required for phoenixd backend")?,
-                        ),
-                        password_secret: Some(
-                            password_secret
-                                .ok_or("--password-secret is required for phoenixd backend")?,
-                        ),
-                        admin_key_secret: None,
-                    },
-                    LnWalletBackend::Lnbits => LnWalletCreateRequest {
-                        backend: backend_code,
-                        label,
-                        nwc_uri_secret: None,
-                        endpoint: Some(
-                            endpoint.ok_or("--endpoint is required for lnbits backend")?,
-                        ),
-                        password_secret: None,
-                        admin_key_secret: Some(
-                            admin_key_secret
-                                .ok_or("--admin-key-secret is required for lnbits backend")?,
-                        ),
-                    },
-                };
-
-                Ok(Input::LnWalletCreate {
-                    id: id.to_string(),
-                    request,
-                })
-            }
-            LnWalletAction::Close {
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            } => Ok(Input::WalletClose {
-                id: id.to_string(),
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            }),
-            LnWalletAction::List => Ok(Input::WalletList {
-                id: id.to_string(),
-                network: Some(Network::Ln),
-            }),
-            LnWalletAction::ShowSeed { wallet } => Ok(Input::WalletShowSeed {
-                id: id.to_string(),
-                wallet,
-            }),
-        },
-        LnCommand::Send {
-            common,
-            to,
-            amount_sats,
-        } => {
-            if common.onchain_memo.is_some() {
-                return Err(
-                    "--onchain-memo is not supported for ln; use --local-memo for bookkeeping"
-                        .into(),
-                );
-            }
-            validate_bolt11(&to)?;
-            let to = if is_bolt12_offer(&to) {
-                let amt = amount_sats
-                    .ok_or("--amount-sats is required when sending to a bolt12 offer")?;
-                format!("{to}?amount={amt}")
-            } else {
-                if amount_sats.is_some() {
-                    return Err(
-                        "--amount-sats is not accepted for bolt11 invoices; the invoice encodes the amount".into(),
-                    );
-                }
-                to
-            };
-            Ok(Input::Send {
-                id: id.to_string(),
-                wallet: common.wallet.filter(|s| !s.is_empty()),
-                network: Some(Network::Ln),
-                to,
-                amount: None,
-                onchain_memo: None,
-                local_memo: memo_vec_to_map(common.local_memo),
-                mints: None,
-                chain_id: None,
-                idempotency_key: common.idempotency_key,
-            })
-        }
-        LnCommand::Receive {
-            common,
-            amount_sats,
-        } => Ok(Input::Receive {
-            id: id.to_string(),
-            wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
-            network: Some(Network::Ln),
-            amount: amount_sats.map(|v| Amount {
-                value: v,
-                token: "sats".to_string(),
-            }),
-            onchain_memo: None,
-            wait_until_paid: common.wait,
-            wait_timeout_s: common.wait_timeout_s,
-            wait_poll_interval_ms: common.wait_poll_interval_ms,
-            wait_sync_limit: None,
-            write_qr_svg_file: common.qr_svg_file,
-            min_confirmations: None,
-            reference: None,
-        }),
-        LnCommand::Balance { wallet } => Ok(Input::Balance {
-            id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()),
-            network: Some(Network::Ln),
-            check: false,
-        }),
-        LnCommand::Limit { wallet, action } => {
-            simple_limit_to_input(Network::Ln, wallet, action, id)
-        }
-        LnCommand::Config { wallet, action } => simple_config_to_input(wallet, action, id),
-        LnCommand::Backup { .. } | LnCommand::Restore { .. } => {
-            unreachable!("ln backup/restore handled before dispatch")
-        }
-    }
-}
-
-fn sol_command_to_input(cmd: SolCommand, id: &str) -> Result<Input, String> {
-    match cmd {
-        SolCommand::Wallet { action } => match action {
-            SolWalletAction::Create {
-                sol_rpc_endpoint,
-                label,
-                sol_cluster,
-            } => Ok(Input::WalletCreate {
-                id: id.to_string(),
-                network: Network::Sol,
-                label,
-                mint_url: None,
-                rpc_endpoints: sol_rpc_endpoint,
-                chain_id: None,
-                mnemonic_secret: None,
-                btc_esplora_url: None,
-                btc_network: None,
-                btc_address_type: None,
-                btc_backend: None,
-                btc_core_url: None,
-                btc_core_auth_secret: None,
-                btc_electrum_url: None,
-                sol_cluster,
-            }),
-            SolWalletAction::Close {
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            } => Ok(Input::WalletClose {
-                id: id.to_string(),
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            }),
-            SolWalletAction::List => Ok(Input::WalletList {
-                id: id.to_string(),
-                network: Some(Network::Sol),
-            }),
-            SolWalletAction::ShowSeed { wallet } => Ok(Input::WalletShowSeed {
-                id: id.to_string(),
-                wallet,
-            }),
-        },
-        SolCommand::Send {
-            common,
-            to,
-            amount,
-            token,
-            reference,
-        } => {
-            validate_sol_address(&to)?;
-            validate_token_not_contract(&token)?;
-            let mut target = format!("solana:{to}?amount={amount}&token={token}");
-            if let Some(ref r) = reference {
-                target.push_str(&format!("&reference={r}"));
-            }
-            Ok(Input::Send {
-                id: id.to_string(),
-                wallet: common.wallet.filter(|s| !s.is_empty()),
-                network: Some(Network::Sol),
-                to: target,
-                amount: None,
-                onchain_memo: common.onchain_memo,
-                local_memo: memo_vec_to_map(common.local_memo),
-                mints: None,
-                chain_id: None,
-                idempotency_key: common.idempotency_key,
-            })
-        }
-        SolCommand::Receive {
-            common,
-            onchain_memo,
-            min_confirmations,
-            reference,
-        } => Ok(Input::Receive {
-            id: id.to_string(),
-            wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
-            network: Some(Network::Sol),
-            amount: None,
-            onchain_memo: onchain_memo.filter(|s| !s.trim().is_empty()),
-            wait_until_paid: common.wait,
-            wait_timeout_s: common.wait_timeout_s,
-            wait_poll_interval_ms: common.wait_poll_interval_ms,
-            wait_sync_limit: None,
-            write_qr_svg_file: common.qr_svg_file,
-            min_confirmations,
-            reference,
-        }),
-        SolCommand::Balance { wallet } => Ok(Input::Balance {
-            id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()),
-            network: Some(Network::Sol),
-            check: false,
-        }),
-        SolCommand::Limit { wallet, action } => {
-            token_limit_to_input(Network::Sol, wallet, action, id)
-        }
-        SolCommand::Config { wallet, action } => sol_config_to_input(wallet, action, id),
-        SolCommand::Backup { .. } | SolCommand::Restore { .. } => {
-            unreachable!("sol backup/restore handled before dispatch")
-        }
-    }
-}
-
-fn evm_command_to_input(cmd: EvmCommand, id: &str) -> Result<Input, String> {
-    match cmd {
-        EvmCommand::Wallet { action } => match action {
-            EvmWalletAction::Create {
-                evm_rpc_endpoint,
-                chain_id,
-                label,
-            } => Ok(Input::WalletCreate {
-                id: id.to_string(),
-                network: Network::Evm,
-                label,
-                mint_url: None,
-                rpc_endpoints: evm_rpc_endpoint,
-                chain_id: Some(chain_id),
-                mnemonic_secret: None,
-                btc_esplora_url: None,
-                btc_network: None,
-                btc_address_type: None,
-                btc_backend: None,
-                btc_core_url: None,
-                btc_core_auth_secret: None,
-                btc_electrum_url: None,
-                sol_cluster: None,
-            }),
-            EvmWalletAction::Close {
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            } => Ok(Input::WalletClose {
-                id: id.to_string(),
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            }),
-            EvmWalletAction::List => Ok(Input::WalletList {
-                id: id.to_string(),
-                network: Some(Network::Evm),
-            }),
-            EvmWalletAction::ShowSeed { wallet } => Ok(Input::WalletShowSeed {
-                id: id.to_string(),
-                wallet,
-            }),
-        },
-        EvmCommand::Send {
-            common,
-            to,
-            amount,
-            token,
-            chain_id,
-        } => {
-            validate_evm_address(&to)?;
-            validate_token_not_contract(&token)?;
-            let target = format!("ethereum:{to}?amount={amount}&token={token}");
-            Ok(Input::Send {
-                id: id.to_string(),
-                wallet: common.wallet.filter(|s| !s.is_empty()),
-                network: Some(Network::Evm),
-                to: target,
-                amount: None,
-                onchain_memo: common.onchain_memo,
-                local_memo: memo_vec_to_map(common.local_memo),
-                mints: None,
-                chain_id,
-                idempotency_key: common.idempotency_key,
-            })
-        }
-        EvmCommand::Receive {
-            common,
-            onchain_memo,
-            min_confirmations,
-        } => {
-            if common.wait {
-                return Err(
-                    "evm receive --wait requires --amount; use unified receive command".into(),
-                );
-            }
-            Ok(Input::Receive {
-                id: id.to_string(),
-                wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
-                network: Some(Network::Evm),
-                amount: None,
-                onchain_memo,
-                wait_until_paid: common.wait,
-                wait_timeout_s: common.wait_timeout_s,
-                wait_poll_interval_ms: common.wait_poll_interval_ms,
-                wait_sync_limit: None,
-                write_qr_svg_file: false,
-                min_confirmations,
-                reference: None,
-            })
-        }
-        EvmCommand::Balance { wallet } => Ok(Input::Balance {
-            id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()),
-            network: Some(Network::Evm),
-            check: false,
-        }),
-        EvmCommand::Limit { wallet, action } => {
-            token_limit_to_input(Network::Evm, wallet, action, id)
-        }
-        EvmCommand::Config { wallet, action } => evm_config_to_input(wallet, action, id),
-        EvmCommand::Backup { .. } | EvmCommand::Restore { .. } => {
-            unreachable!("evm backup/restore handled before dispatch")
-        }
-    }
-}
-
-fn btc_command_to_input(cmd: BtcCommand, id: &str) -> Result<Input, String> {
-    match cmd {
-        BtcCommand::Wallet { action } => match action {
-            BtcWalletAction::Create {
-                label,
-                btc_network,
-                btc_address_type,
-                btc_esplora_url,
-                btc_backend,
-                btc_core_url,
-                btc_core_auth_secret,
-                btc_electrum_url,
-                mnemonic_secret,
-            } => Ok(Input::WalletCreate {
-                id: id.to_string(),
-                network: Network::Btc,
-                label,
-                mint_url: None,
-                rpc_endpoints: vec![],
-                chain_id: None,
-                mnemonic_secret,
-                btc_esplora_url,
-                btc_network: Some(btc_network),
-                btc_address_type: Some(btc_address_type),
-                btc_backend: btc_backend.map(Into::into),
-                btc_core_url,
-                btc_core_auth_secret,
-                btc_electrum_url,
-                sol_cluster: None,
-            }),
-            BtcWalletAction::Close {
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            } => Ok(Input::WalletClose {
-                id: id.to_string(),
-                wallet,
-                dangerously_skip_balance_check_and_may_lose_money,
-            }),
-            BtcWalletAction::List => Ok(Input::WalletList {
-                id: id.to_string(),
-                network: Some(Network::Btc),
-            }),
-            BtcWalletAction::ShowSeed { wallet } => Ok(Input::WalletShowSeed {
-                id: id.to_string(),
-                wallet,
-            }),
-        },
-        BtcCommand::Send {
-            common,
-            to,
-            amount_sats,
-        } => {
-            let target = format!("bitcoin:{to}?amount={amount_sats}");
-            Ok(Input::Send {
-                id: id.to_string(),
-                wallet: common.wallet.filter(|s| !s.is_empty()),
-                network: Some(Network::Btc),
-                to: target,
-                amount: None,
-                onchain_memo: common.onchain_memo,
-                local_memo: memo_vec_to_map(common.local_memo),
-                mints: None,
-                chain_id: None,
-                idempotency_key: common.idempotency_key,
-            })
-        }
-        BtcCommand::Receive {
-            common,
-            wait_sync_limit,
-        } => Ok(Input::Receive {
-            id: id.to_string(),
-            wallet: common.wallet.filter(|s| !s.is_empty()).unwrap_or_default(),
-            network: Some(Network::Btc),
-            amount: None,
-            onchain_memo: None,
-            wait_until_paid: common.wait,
-            wait_timeout_s: common.wait_timeout_s,
-            wait_poll_interval_ms: common.wait_poll_interval_ms,
-            wait_sync_limit,
-            write_qr_svg_file: false,
-            min_confirmations: None,
-            reference: None,
-        }),
-        BtcCommand::Balance { wallet } => Ok(Input::Balance {
-            id: id.to_string(),
-            wallet: wallet.filter(|s| !s.is_empty()),
-            network: Some(Network::Btc),
-            check: false,
-        }),
-        BtcCommand::Limit { wallet, action } => {
-            simple_limit_to_input(Network::Btc, wallet, action, id)
-        }
-        BtcCommand::Config { wallet, action } => simple_config_to_input(wallet, action, id),
-        BtcCommand::Backup { .. } | BtcCommand::Restore { .. } => {
-            unreachable!("btc backup/restore handled before dispatch")
-        }
-    }
-}
-
-fn parse_window(s: &str) -> Result<u64, String> {
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('d') {
-        (n, 86400u64)
-    } else if let Some(n) = s.strip_suffix('h') {
-        (n, 3600u64)
-    } else if let Some(n) = s.strip_suffix('m') {
-        (n, 60u64)
-    } else {
-        return Err(format!(
-            "invalid window '{s}': expected suffix m (minutes), h (hours), or d (days)"
-        ));
-    };
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("invalid window number '{num_str}'"))?;
-    if num == 0 {
-        return Err("window cannot be zero".to_string());
-    }
-    Ok(num.saturating_mul(multiplier))
 }
 
 /// Resolve rpc_endpoint/rpc_secret: CLI args take priority, then config.toml.
@@ -2993,7 +2013,7 @@ fn resolve_rpc_args(
         return (cli_endpoint, cli_secret);
     }
     let dir = data_dir
-        .map(|s| s.to_string())
+        .map(|value| value.to_string())
         .unwrap_or_else(|| RuntimeConfig::default().data_dir);
     let config = RuntimeConfig::load_from_dir(&dir).unwrap_or_default();
     if config.rpc_endpoint.is_some() {
@@ -3002,33 +2022,974 @@ fn resolve_rpc_args(
     (None, cli_secret)
 }
 
-fn build_startup_args(cli: &AfpayCli) -> serde_json::Value {
-    serde_json::json!({
-        "mode": format!("{:?}", cli.mode),
-        "output": cli.output,
-        "data_dir": cli.data_dir,
-        "rpc_endpoint": cli.rpc_endpoint,
-        "rpc_listen": cli.rpc_listen,
-        "rest_listen": cli.rest_listen,
-        "public_listen": cli.public_listen,
+// ═══════════════════════════════════════════
+// Entry point
+// ═══════════════════════════════════════════
+
+pub fn parse_args() -> Result<Mode, CliError> {
+    let cli = cli()?;
+    let handlers = action_ids()
+        .into_iter()
+        .map(|id| (id, dispatch as ModeHandler));
+    let app = cli
+        .bind_actions(handlers)
+        .map_err(|error| CliError::new("cli_actions_invalid", error.to_string()))?;
+
+    let outcome = match app.resolve_from(std::env::args_os()) {
+        Ok(outcome) => outcome,
+        // Rejected before anything ran: the error names its own rule in
+        // `error.code`, so there is no generic `cli_error` to branch on.
+        Err(error) => {
+            let event = agent_first_data::cli_error_event(&error);
+            if crate::output_fmt::emit_process_event(event.into(), OutputFormat::Json).is_err() {
+                std::process::exit(4);
+            }
+            std::process::exit(error.exit_code().into());
+        }
+    };
+
+    match outcome {
+        CliOutcome::Run(invocation) => app.execute(&invocation),
+        // `--docs` renders the whole registry as raw Markdown, so it carries no
+        // format of its own and never becomes a protocol event.
+        CliOutcome::Docs(_) => {
+            write_or_exit(&render_cli_reference(cli));
+            std::process::exit(0);
+        }
+        CliOutcome::Help(help) => {
+            if format_of_plan(help.output_plan()) == OutputFormat::Plain {
+                write_or_exit(&help.plain());
+            } else {
+                emit_or_exit(
+                    cli_help_event(&help).into(),
+                    format_of_plan(help.output_plan()),
+                );
+            }
+            std::process::exit(0);
+        }
+        CliOutcome::Version(version) => {
+            emit_or_exit(
+                cli_version_event(&version).into(),
+                format_of_plan(version.output_plan()),
+            );
+            std::process::exit(0);
+        }
+    }
+}
+
+fn format_of_plan(plan: &agent_first_data::OutputPlan) -> OutputFormat {
+    plan.format()
+        .and_then(|format| cli_parse_output(format).ok())
+        .unwrap_or(OutputFormat::Json)
+}
+
+fn write_or_exit(text: &str) {
+    if crate::output_fmt::write_process_result(text).is_err() {
+        std::process::exit(4);
+    }
+}
+
+fn emit_or_exit(event: serde_json::Value, format: OutputFormat) {
+    if crate::output_fmt::emit_process_event(event, format).is_err() {
+        std::process::exit(4);
+    }
+}
+
+// ═══════════════════════════════════════════
+// Action dispatch
+// ═══════════════════════════════════════════
+
+fn dispatch(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
+    let action = invocation.action_id();
+    match action {
+        "mode_pipe" => Ok(Mode::Pipe(PipeInit {
+            output: format_of(invocation),
+            log: log_of(invocation),
+            data_dir: opt_str(invocation, "data_dir"),
+            startup_argv: std::env::args().collect(),
+            startup_args: startup_args(invocation, "pipe"),
+            startup_requested: startup_requested(),
+            scrub_parse_errors: flag(invocation, "public_listen"),
+        })),
+        "mode_interactive" => Ok(interactive_mode(
+            invocation,
+            InteractiveFrontend::Interactive,
+        )),
+        "mode_tui" => Ok(interactive_mode(invocation, InteractiveFrontend::Tui)),
+        "mode_rpc" => rpc_mode(invocation),
+        #[cfg(feature = "rest")]
+        "mode_rest" => Ok(Mode::Rest(RestInit {
+            listen: opt_str(invocation, "rest_listen").unwrap_or_default(),
+            api_key_secret: opt_str(invocation, "rest_api_key_secret"),
+            allow_public_listen: flag(invocation, "public_listen"),
+            log: log_of(invocation),
+            data_dir: opt_str(invocation, "data_dir"),
+            startup_argv: std::env::args().collect(),
+            startup_args: startup_args(invocation, "rest"),
+            startup_requested: startup_requested(),
+        })),
+        "skill_status" | "skill_install" | "skill_uninstall" => {
+            Ok(Mode::SkillAdmin(SkillAdminRequest {
+                action: skill_action(invocation, action),
+                output: format_of(invocation),
+            }))
+        }
+        "container_install" | "container_uninstall" | "container_status" | "container_logs" => {
+            Ok(Mode::Container(ContainerRequest {
+                action: container_action(invocation, action)?,
+                output: format_of(invocation),
+            }))
+        }
+        "global_backup" | "global_restore" | "network_backup" | "network_restore" => {
+            Ok(Mode::Data(DataOp {
+                kind: data_op_kind(invocation, action)?,
+                data_dir: opt_str(invocation, "data_dir"),
+                output: format_of(invocation),
+            }))
+        }
+        _ => {
+            let id = crate::store::wallet::generate_request_identifier()
+                .map_err(|error| CliError::new("request_id_unavailable", error.to_string()))?;
+            let input = invocation_to_input(invocation, &id)?;
+            let (rpc_endpoint, rpc_secret) = resolve_rpc_args(
+                opt_str(invocation, "rpc_endpoint"),
+                opt_str(invocation, "rpc_secret"),
+                opt_str(invocation, "data_dir").as_deref(),
+            );
+            Ok(Mode::Cli(Box::new(CliRequest {
+                input,
+                output: format_of(invocation),
+                log: log_of(invocation),
+                data_dir: opt_str(invocation, "data_dir"),
+                rpc_endpoint,
+                rpc_secret,
+                startup_argv: std::env::args().collect(),
+                startup_args: startup_args(invocation, "cli"),
+                startup_requested: startup_requested(),
+                dry_run: flag(invocation, "dry_run"),
+            })))
+        }
+    }
+}
+
+fn interactive_mode(invocation: &ResolvedInvocation, frontend: InteractiveFrontend) -> Mode {
+    let data_dir = opt_str(invocation, "data_dir");
+    let (rpc_endpoint, rpc_secret) = resolve_rpc_args(
+        opt_str(invocation, "rpc_endpoint"),
+        opt_str(invocation, "rpc_secret"),
+        data_dir.as_deref(),
+    );
+    Mode::Interactive(InteractiveInit {
+        frontend,
+        output: format_of(invocation),
+        log: log_of(invocation),
+        data_dir,
+        rpc_endpoint,
+        rpc_secret,
     })
+}
+
+fn rpc_mode(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
+    #[cfg(feature = "rpc")]
+    {
+        Ok(Mode::Rpc(RpcInit {
+            listen: opt_str(invocation, "rpc_listen").unwrap_or_default(),
+            rpc_secret: opt_str(invocation, "rpc_secret"),
+            allow_public_listen: flag(invocation, "public_listen"),
+            log: agent_first_data::LogFilters::new(log_of(invocation)),
+            data_dir: opt_str(invocation, "data_dir"),
+            startup_argv: std::env::args().collect(),
+            startup_args: startup_args(invocation, "rpc"),
+            startup_requested: startup_requested(),
+        }))
+    }
+    #[cfg(not(feature = "rpc"))]
+    {
+        let _ = invocation;
+        Ok(Mode::Rpc(RpcStub))
+    }
+}
+
+fn skill_action(invocation: &ResolvedInvocation, action: &str) -> SkillAdminAction {
+    let options = SkillAdminOptions {
+        agent: match opt_str(invocation, "agent").as_deref() {
+            Some("codex") => SkillAgentSelection::Codex,
+            Some("claude-code") => SkillAgentSelection::ClaudeCode,
+            Some("opencode") => SkillAgentSelection::Opencode,
+            Some("hermes") => SkillAgentSelection::Hermes,
+            _ => SkillAgentSelection::All,
+        },
+        scope: match opt_str(invocation, "scope").as_deref() {
+            Some("workspace") => SkillScope::Workspace,
+            _ => SkillScope::Personal,
+        },
+        skills_dir: opt_str(invocation, "skills_dir"),
+        force: flag(invocation, "force"),
+    };
+    match action {
+        "skill_install" => SkillAdminAction::Install(options),
+        "skill_uninstall" => SkillAdminAction::Uninstall(options),
+        _ => SkillAdminAction::Status(options),
+    }
+}
+
+fn container_common(invocation: &ResolvedInvocation) -> ContainerCommonArgs {
+    ContainerCommonArgs {
+        runtime: match opt_str(invocation, "runtime").as_deref() {
+            Some("docker") => Some(ContainerRuntimeArg::Docker),
+            Some("podman") => Some(ContainerRuntimeArg::Podman),
+            Some("apple") => Some(ContainerRuntimeArg::Apple),
+            _ => None,
+        },
+        name: opt_str(invocation, "name").unwrap_or_default(),
+    }
+}
+
+fn container_mode(invocation: &ResolvedInvocation) -> ContainerModeArg {
+    match opt_str(invocation, "mode").as_deref() {
+        Some("rpc") => ContainerModeArg::Rpc,
+        _ => ContainerModeArg::Rest,
+    }
+}
+
+fn container_action(
+    invocation: &ResolvedInvocation,
+    action: &str,
+) -> Result<ContainerCliAction, CliError> {
+    Ok(match action {
+        "container_install" => ContainerCliAction::Install(ContainerInstallArgs {
+            common: container_common(invocation),
+            port: required_unsigned(invocation, "port", u64::from(u16::MAX))? as u16,
+            mode: container_mode(invocation),
+            with: strs(invocation, "with"),
+            allow: strs(invocation, "allow"),
+            btc_network: opt_str(invocation, "btc_network").unwrap_or_default(),
+            btc_rpc_port: required_unsigned(invocation, "btc_rpc_port", u64::from(u16::MAX))?
+                as u16,
+            btc_prune_mb: required_unsigned(invocation, "btc_prune_mb", u64::from(u32::MAX))?
+                as u32,
+            features: opt_str(invocation, "features"),
+            rebuild: flag(invocation, "rebuild"),
+            from_source: flag(invocation, "from_source"),
+            context: opt_str(invocation, "context"),
+            reveal_daemon_secret: flag(invocation, "reveal_daemon_secret"),
+        }),
+        "container_uninstall" => ContainerCliAction::Uninstall(ContainerUninstallArgs {
+            common: container_common(invocation),
+            purge: flag(invocation, "purge"),
+        }),
+        "container_status" => ContainerCliAction::Status(ContainerStatusArgs {
+            common: container_common(invocation),
+            port: required_unsigned(invocation, "port", u64::from(u16::MAX))? as u16,
+            mode: container_mode(invocation),
+            reveal_daemon_secret: flag(invocation, "reveal_daemon_secret"),
+        }),
+        _ => ContainerCliAction::Logs(ContainerLogsArgs {
+            common: container_common(invocation),
+            follow: flag(invocation, "follow"),
+        }),
+    })
+}
+
+fn data_op_kind(invocation: &ResolvedInvocation, action: &str) -> Result<DataOpKind, CliError> {
+    Ok(match action {
+        "global_backup" => DataOpKind::GlobalBackup {
+            output_path: opt_str(invocation, "archive_out"),
+            extra_dirs: extra_dirs_of(invocation)?,
+        },
+        "global_restore" => DataOpKind::GlobalRestore {
+            archive_path: req_str(invocation, "archive"),
+            overwrite: flag(invocation, "dangerously_overwrite"),
+            pg_url_secret: opt_str(invocation, "pg_url_secret"),
+            extra_dirs: extra_dirs_of(invocation)?,
+        },
+        "network_backup" => DataOpKind::NetworkBackup {
+            network: network_of_path(invocation).unwrap_or(Network::Cashu),
+            output_path: opt_str(invocation, "archive_out"),
+            wallet: wallet_of(invocation),
+        },
+        _ => DataOpKind::NetworkRestore {
+            network: network_of_path(invocation).unwrap_or(Network::Cashu),
+            archive_path: req_str(invocation, "archive"),
+            overwrite: flag(invocation, "dangerously_overwrite"),
+            pg_url_secret: opt_str(invocation, "pg_url_secret"),
+        },
+    })
+}
+
+// ═══════════════════════════════════════════
+// Payment requests
+// ═══════════════════════════════════════════
+
+#[derive(Default)]
+struct WalletCreateParams {
+    label: Option<String>,
+    mint_url: Option<String>,
+    rpc_endpoints: Vec<String>,
+    chain_id: Option<u64>,
+    mnemonic_secret: Option<String>,
+    btc_esplora_url: Option<String>,
+    btc_network: Option<String>,
+    btc_address_type: Option<String>,
+    btc_backend: Option<BtcBackend>,
+    btc_core_url: Option<String>,
+    btc_core_auth_secret: Option<String>,
+    btc_electrum_url: Option<String>,
+    sol_cluster: Option<String>,
+}
+
+fn wallet_create(id: &str, network: Network, params: WalletCreateParams) -> Input {
+    Input::WalletCreate {
+        id: id.to_string(),
+        network,
+        label: params.label,
+        mint_url: params.mint_url,
+        rpc_endpoints: params.rpc_endpoints,
+        chain_id: params.chain_id,
+        mnemonic_secret: params.mnemonic_secret,
+        btc_esplora_url: params.btc_esplora_url,
+        btc_network: params.btc_network,
+        btc_address_type: params.btc_address_type,
+        btc_backend: params.btc_backend,
+        btc_core_url: params.btc_core_url,
+        btc_core_auth_secret: params.btc_core_auth_secret,
+        btc_electrum_url: params.btc_electrum_url,
+        sol_cluster: params.sol_cluster,
+    }
+}
+
+fn sats(value: u64) -> Amount {
+    Amount {
+        value,
+        token: "sats".to_string(),
+    }
+}
+
+fn limit_add_input(
+    invocation: &ResolvedInvocation,
+    id: &str,
+    scope: SpendScope,
+    network: Option<Network>,
+) -> Result<Input, CliError> {
+    let window_s = parse_window(&req_str(invocation, "window")).map_err(CliError::invalid_value)?;
+    let max_spend = required_unsigned(invocation, "max_spend", u64::MAX)?;
+    let (scope, wallet) = match (scope, wallet_of(invocation)) {
+        (SpendScope::GlobalUsdCents, _) => (SpendScope::GlobalUsdCents, None),
+        (_, Some(wallet)) => (SpendScope::Wallet, Some(wallet)),
+        (_, None) => (SpendScope::Network, None),
+    };
+    Ok(Input::LimitAdd {
+        id: id.to_string(),
+        limit: SpendLimit {
+            rule_id: None,
+            scope,
+            network: network.map(|network| network.to_string()),
+            wallet,
+            window_s,
+            max_spend,
+            token: opt_str(invocation, "token"),
+        },
+    })
+}
+
+fn receive_input(
+    invocation: &ResolvedInvocation,
+    id: &str,
+    network: Network,
+    amount: Option<Amount>,
+    onchain_memo: Option<String>,
+) -> Result<Input, CliError> {
+    Ok(Input::Receive {
+        id: id.to_string(),
+        wallet: wallet_of(invocation).unwrap_or_default(),
+        network: Some(network),
+        amount,
+        onchain_memo,
+        wait_until_paid: flag(invocation, "wait"),
+        wait_timeout_s: unsigned(invocation, "wait_timeout_s", u64::MAX)?,
+        wait_poll_interval_ms: unsigned(invocation, "wait_poll_interval_ms", u64::MAX)?,
+        wait_sync_limit: opt_usize(invocation, "wait_sync_limit")?,
+        write_qr_svg_file: flag(invocation, "qr_svg_file"),
+        min_confirmations: unsigned(invocation, "min_confirmations", u64::from(u32::MAX))?
+            .map(|value| value as u32),
+        reference: opt_str(invocation, "reference"),
+    })
+}
+
+fn send_input(
+    invocation: &ResolvedInvocation,
+    id: &str,
+    network: Network,
+    to: String,
+    chain_id: Option<u64>,
+) -> Result<Input, CliError> {
+    Ok(Input::Send {
+        id: id.to_string(),
+        wallet: wallet_of(invocation),
+        network: Some(network),
+        to,
+        amount: None,
+        onchain_memo: opt_str(invocation, "onchain_memo"),
+        local_memo: local_memo_of(invocation)?,
+        mints: None,
+        chain_id,
+        idempotency_key: opt_str(invocation, "idempotency_key"),
+    })
+}
+
+fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Input, CliError> {
+    let owned = id.to_string();
+    match invocation.action_id() {
+        "wallet_close" => Ok(Input::WalletClose {
+            id: owned,
+            wallet: req_str(invocation, "wallet"),
+            dangerously_skip_balance_check_and_may_lose_money: flag(
+                invocation,
+                "dangerously_skip_balance_check_and_may_lose_money",
+            ),
+        }),
+        "wallet_list" => Ok(Input::WalletList {
+            id: owned,
+            network: network_of_path(invocation).or_else(|| network_filter(invocation)),
+        }),
+        "wallet_show_seed" => Ok(Input::WalletShowSeed {
+            id: owned,
+            wallet: req_str(invocation, "wallet"),
+        }),
+        "global_limit_add" => limit_add_input(invocation, id, SpendScope::GlobalUsdCents, None),
+        "limit_add" => limit_add_input(
+            invocation,
+            id,
+            SpendScope::Network,
+            network_of_path(invocation),
+        ),
+        "config_show" => Ok(Input::WalletConfigShow {
+            id: owned,
+            wallet: req_str(invocation, "wallet"),
+        }),
+        "config_set" => {
+            let mut endpoints = strs(invocation, "sol_rpc_endpoint");
+            endpoints.extend(strs(invocation, "evm_rpc_endpoint"));
+            Ok(Input::WalletConfigSet {
+                id: owned,
+                wallet: req_str(invocation, "wallet"),
+                label: opt_str(invocation, "label"),
+                rpc_endpoints: endpoints,
+                chain_id: unsigned(invocation, "chain_id", u64::MAX)?,
+            })
+        }
+        "config_token_add" => Ok(Input::WalletConfigTokenAdd {
+            id: owned,
+            wallet: req_str(invocation, "wallet"),
+            symbol: req_str(invocation, "symbol"),
+            address: req_str(invocation, "address"),
+            decimals: required_unsigned(invocation, "decimals", u64::from(u8::MAX))? as u8,
+        }),
+        "config_token_remove" => Ok(Input::WalletConfigTokenRemove {
+            id: owned,
+            wallet: req_str(invocation, "wallet"),
+            symbol: req_str(invocation, "symbol"),
+        }),
+        "network_balance" => Ok(Input::Balance {
+            id: owned,
+            wallet: wallet_of(invocation),
+            network: network_of_path(invocation),
+            check: flag(invocation, "check"),
+        }),
+        "balance" => Ok(Input::Balance {
+            id: owned,
+            wallet: wallet_of(invocation),
+            network: network_filter(invocation),
+            check: flag(invocation, "cashu_check"),
+        }),
+        "global_config_get" => Ok(Input::ConfigGet {
+            id: owned,
+            key: opt_str(invocation, "key"),
+        }),
+        "global_config_set" => Ok(Input::ConfigSet {
+            id: owned,
+            key: req_str(invocation, "key"),
+            values: strs(invocation, "values"),
+        }),
+        "history_list" => Ok(Input::HistoryList {
+            id: owned,
+            wallet: wallet_of(invocation),
+            network: network_filter(invocation),
+            onchain_memo: opt_str(invocation, "onchain_memo"),
+            limit: opt_usize(invocation, "limit")?,
+            offset: opt_usize(invocation, "offset")?,
+            since_epoch_s: unsigned(invocation, "since_epoch_s", u64::MAX)?,
+            until_epoch_s: unsigned(invocation, "until_epoch_s", u64::MAX)?,
+        }),
+        "history_status" => Ok(Input::HistoryStatus {
+            id: owned,
+            transaction_id: req_str(invocation, "transaction_id"),
+        }),
+        "history_update" => Ok(Input::HistoryUpdate {
+            id: owned,
+            wallet: wallet_of(invocation),
+            network: network_filter(invocation),
+            limit: opt_usize(invocation, "limit")?,
+        }),
+        "limit_list" => Ok(Input::LimitList { id: owned }),
+        "limit_remove" => Ok(Input::LimitRemove {
+            id: owned,
+            rule_id: req_str(invocation, "rule_id"),
+        }),
+        "limit_reconcile_confirm" | "limit_reconcile_cancel" => Ok(Input::ReconcileReservation {
+            id: owned,
+            reservation_id: required_unsigned(invocation, "reservation_id", u64::MAX)?,
+            action: if invocation.action_id() == "limit_reconcile_confirm" {
+                ReconcileAction::Confirm
+            } else {
+                ReconcileAction::Cancel
+            },
+            reason: req_str(invocation, "reason"),
+        }),
+        "cashu_wallet_create" => Ok(wallet_create(
+            id,
+            Network::Cashu,
+            WalletCreateParams {
+                label: opt_str(invocation, "label"),
+                mint_url: Some(req_str(invocation, "cashu_mint")),
+                mnemonic_secret: opt_str(invocation, "mnemonic_secret"),
+                ..WalletCreateParams::default()
+            },
+        )),
+        "cashu_wallet_restore" => Ok(Input::Restore {
+            id: owned,
+            wallet: req_str(invocation, "wallet"),
+        }),
+        "cashu_send" => {
+            let mints = strs(invocation, "cashu_mint");
+            Ok(Input::CashuSend {
+                id: owned,
+                wallet: wallet_of(invocation),
+                amount: sats(required_unsigned(invocation, "amount_sats", u64::MAX)?),
+                onchain_memo: opt_str(invocation, "onchain_memo"),
+                local_memo: local_memo_of(invocation)?,
+                mints: (!mints.is_empty()).then_some(mints),
+                idempotency_key: opt_str(invocation, "idempotency_key"),
+            })
+        }
+        "cashu_receive" => Ok(Input::CashuReceive {
+            id: owned,
+            wallet: wallet_of(invocation),
+            token: req_str(invocation, "token"),
+        }),
+        "cashu_send_to_ln" => send_input(
+            invocation,
+            id,
+            Network::Cashu,
+            req_str(invocation, "to"),
+            None,
+        ),
+        "cashu_receive_from_ln" => {
+            let amount = unsigned(invocation, "amount_sats", u64::MAX)?.map(sats);
+            receive_input(
+                invocation,
+                id,
+                Network::Cashu,
+                amount,
+                opt_str(invocation, "onchain_memo"),
+            )
+        }
+        "cashu_receive_from_ln_claim" => Ok(Input::ReceiveClaim {
+            id: owned,
+            wallet: req_str(invocation, "wallet"),
+            quote_id: req_str(invocation, "ln_quote_id"),
+        }),
+        "ln_wallet_create" => {
+            let backend = match opt_str(invocation, "backend").as_deref() {
+                Some("phoenixd") => LnWalletBackend::Phoenixd,
+                Some("lnbits") => LnWalletBackend::Lnbits,
+                _ => LnWalletBackend::Nwc,
+            };
+            Ok(Input::LnWalletCreate {
+                id: owned,
+                request: LnWalletCreateRequest {
+                    backend,
+                    label: opt_str(invocation, "label"),
+                    nwc_uri_secret: opt_str(invocation, "nwc_uri_secret"),
+                    endpoint_url: opt_str(invocation, "endpoint_url"),
+                    password_secret: opt_str(invocation, "password_secret"),
+                    admin_key_secret: opt_str(invocation, "admin_key_secret"),
+                },
+            })
+        }
+        "ln_send" => {
+            let to = req_str(invocation, "to");
+            validate_bolt11(&to).map_err(CliError::invalid_value)?;
+            let amount_sats = unsigned(invocation, "amount_sats", u64::MAX)?;
+            // Whether the amount belongs on argv depends on the invoice's own
+            // contents, which no shape can see; a BOLT11 already encodes it.
+            let to = if is_bolt12_offer(&to) {
+                let value = amount_sats.ok_or_else(|| {
+                    CliError::invalid_value(
+                        "--amount-sats is required when sending to a bolt12 offer",
+                    )
+                })?;
+                format!("{to}?amount={value}")
+            } else {
+                if amount_sats.is_some() {
+                    return Err(CliError::invalid_value(
+                        "--amount-sats is not accepted for bolt11 invoices; the invoice encodes \
+                         the amount",
+                    ));
+                }
+                to
+            };
+            send_input(invocation, id, Network::Ln, to, None)
+        }
+        "ln_receive" => {
+            let amount = unsigned(invocation, "amount_sats", u64::MAX)?.map(sats);
+            receive_input(invocation, id, Network::Ln, amount, None)
+        }
+        "sol_wallet_create" => Ok(wallet_create(
+            id,
+            Network::Sol,
+            WalletCreateParams {
+                label: opt_str(invocation, "label"),
+                rpc_endpoints: strs(invocation, "sol_rpc_endpoint"),
+                sol_cluster: opt_str(invocation, "sol_cluster"),
+                ..WalletCreateParams::default()
+            },
+        )),
+        "sol_send" => {
+            let to = req_str(invocation, "to");
+            let token = req_str(invocation, "token");
+            validate_sol_address(&to).map_err(CliError::invalid_value)?;
+            validate_token_not_contract(&token).map_err(CliError::invalid_value)?;
+            let amount = required_unsigned(invocation, "amount", u64::MAX)?;
+            let mut target = format!("solana:{to}?amount={amount}&token={token}");
+            if let Some(reference) = opt_str(invocation, "reference") {
+                target.push_str(&format!("&reference={reference}"));
+            }
+            send_input(invocation, id, Network::Sol, target, None)
+        }
+        "sol_receive" => receive_input(
+            invocation,
+            id,
+            Network::Sol,
+            None,
+            opt_str(invocation, "onchain_memo").filter(|memo| !memo.trim().is_empty()),
+        ),
+        "evm_wallet_create" => Ok(wallet_create(
+            id,
+            Network::Evm,
+            WalletCreateParams {
+                label: opt_str(invocation, "label"),
+                rpc_endpoints: strs(invocation, "evm_rpc_endpoint"),
+                chain_id: unsigned(invocation, "chain_id", u64::MAX)?,
+                ..WalletCreateParams::default()
+            },
+        )),
+        "evm_send" => {
+            let to = req_str(invocation, "to");
+            let token = req_str(invocation, "token");
+            validate_evm_address(&to).map_err(CliError::invalid_value)?;
+            validate_token_not_contract(&token).map_err(CliError::invalid_value)?;
+            let amount = required_unsigned(invocation, "amount", u64::MAX)?;
+            let target = format!("ethereum:{to}?amount={amount}&token={token}");
+            let chain_id = unsigned(invocation, "chain_id", u64::MAX)?;
+            send_input(invocation, id, Network::Evm, target, chain_id)
+        }
+        "evm_receive" => receive_input(
+            invocation,
+            id,
+            Network::Evm,
+            None,
+            opt_str(invocation, "onchain_memo"),
+        ),
+        "btc_wallet_create" => Ok(wallet_create(
+            id,
+            Network::Btc,
+            WalletCreateParams {
+                label: opt_str(invocation, "label"),
+                mnemonic_secret: opt_str(invocation, "mnemonic_secret"),
+                btc_esplora_url: opt_str(invocation, "btc_esplora_url"),
+                btc_network: opt_str(invocation, "btc_network"),
+                btc_address_type: opt_str(invocation, "btc_address_type"),
+                btc_backend: match opt_str(invocation, "btc_backend").as_deref() {
+                    Some("core-rpc") => Some(BtcBackend::CoreRpc),
+                    Some("electrum") => Some(BtcBackend::Electrum),
+                    _ => Some(BtcBackend::Esplora),
+                },
+                btc_core_url: opt_str(invocation, "btc_core_url"),
+                btc_core_auth_secret: opt_str(invocation, "btc_core_auth_secret"),
+                btc_electrum_url: opt_str(invocation, "btc_electrum_url"),
+                ..WalletCreateParams::default()
+            },
+        )),
+        "btc_send" => {
+            let to = req_str(invocation, "to");
+            let amount = required_unsigned(invocation, "amount_sats", u64::MAX)?;
+            send_input(
+                invocation,
+                id,
+                Network::Btc,
+                format!("bitcoin:{to}?amount={amount}"),
+                None,
+            )
+        }
+        "btc_receive" => receive_input(invocation, id, Network::Btc, None, None),
+        other => Err(CliError::new(
+            "cli_action_unreachable",
+            format!("resolved action `{other}` has no implementation"),
+        )),
+    }
+}
+
+// ═══════════════════════════════════════════
+// Interactive-mode reuse
+// ═══════════════════════════════════════════
+
+/// Parse an interactive-session command line, e.g.
+/// `["cashu", "send", "--amount-sats", "100"]`, through the same registry the
+/// process entry point uses.
+#[cfg(any(feature = "interactive", test))]
+pub fn parse_subcommand(args: &[&str], id: &str) -> Result<Input, String> {
+    let cli = cli().map_err(|error| error.message)?;
+    let mut argv = vec!["afpay".to_string()];
+    argv.extend(args.iter().map(|value| (*value).to_string()));
+    match cli.resolve_from(argv) {
+        Ok(CliOutcome::Run(invocation)) => {
+            invocation_to_input(&invocation, id).map_err(|error| error.message)
+        }
+        // `<cmd> --help` inside the session prints help instead of dispatching.
+        Ok(CliOutcome::Help(help)) => Err(help.plain()),
+        Ok(_) => Err("--version and --docs are not available inside a session".to_string()),
+        Err(error) => Err(error.message),
+    }
+}
+
+/// Render help for the given args, e.g. `&["--help"]` or `&["cashu", "--help"]`.
+#[cfg(feature = "interactive")]
+pub fn subcommand_help(args: &[&str]) -> String {
+    let Ok(cli) = cli() else {
+        return String::new();
+    };
+    let mut argv = vec!["afpay".to_string()];
+    argv.extend(args.iter().map(|value| (*value).to_string()));
+    match cli.resolve_from(argv) {
+        Ok(CliOutcome::Help(help)) => help.plain(),
+        _ => String::new(),
+    }
+}
+
+/// Describes a single CLI argument, for the TUI's generated forms.
+#[cfg(feature = "interactive")]
+#[derive(Debug, Clone)]
+pub struct ArgInfo {
+    /// Long flag name without the `--` prefix, or the positional's id.
+    pub long: String,
+    /// The registry's description of this argument.
+    pub help: String,
+    /// Required by every shape of the command.
+    pub required: bool,
+    /// A boolean flag: presence is the value.
+    pub is_flag: bool,
+    /// Positional index, `None` for named arguments.
+    pub positional_index: Option<usize>,
+}
+
+/// The user-facing arguments of one command path, read straight from the
+/// registry. The shared runtime arguments are left out: the session already
+/// owns the data dir, log filters, and transport.
+#[cfg(feature = "interactive")]
+pub fn subcommand_args(path: &[&str]) -> Vec<ArgInfo> {
+    let Ok(cli) = cli() else {
+        return Vec::new();
+    };
+    let wanted: Vec<String> = path.iter().map(|value| (*value).to_string()).collect();
+    let Some(command) = cli
+        .spec()
+        .commands
+        .iter()
+        .find(|candidate| candidate.command_path == wanted)
+    else {
+        return Vec::new();
+    };
+    command
+        .arguments
+        .iter()
+        .filter(|argument| !RUNTIME_IDS.contains(&argument.argument_id.as_str()))
+        .map(|argument| ArgInfo {
+            long: match &argument.syntax {
+                ArgSyntax::Long { name } => name.trim_start_matches("--").to_string(),
+                ArgSyntax::Positional { .. } => argument.argument_id.clone(),
+            },
+            help: argument.about.clone().unwrap_or_default(),
+            required: !command.combinations.is_empty()
+                && command.combinations.iter().all(|combination| {
+                    combination
+                        .required
+                        .iter()
+                        .any(|id| id == &argument.argument_id)
+                }),
+            is_flag: argument.value_type == ArgValueType::Flag,
+            positional_index: match &argument.syntax {
+                ArgSyntax::Positional { index } => Some(*index),
+                ArgSyntax::Long { .. } => None,
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use agent_first_data::CliErrorRule;
+
+    fn built() -> &'static BuiltCliSpec {
+        match cli() {
+            Ok(cli) => cli,
+            Err(error) => panic!("registry must build: {}", error.message),
+        }
+    }
+
+    fn rejection(argv: &[&str]) -> agent_first_data::CliError {
+        match built().resolve_from(argv.to_vec()) {
+            Err(error) => error,
+            Ok(_) => panic!("{argv:?} must be rejected"),
+        }
+    }
+
+    #[test]
+    fn registry_builds_and_every_shape_is_reachable() {
+        let cli = built();
+        // Each generated argv must resolve back to the shape it came from, so
+        // an overlapping or unreachable combination fails here rather than at a
+        // caller's first invocation.
+        let synthetics = cli.synthetic_invocations();
+        assert!(!synthetics.is_empty(), "the registry generated no fixtures");
+        for synthetic in synthetics {
+            let argv = synthetic.argv.clone();
+            match cli.resolve_from(argv.clone()) {
+                Ok(CliOutcome::Run(invocation)) => assert_eq!(
+                    invocation.combination_id(),
+                    synthetic.combination_id,
+                    "{argv:?} resolved to the wrong shape"
+                ),
+                Ok(_) => panic!("{argv:?} did not resolve to a run"),
+                Err(error) => panic!("{argv:?} failed to resolve: {}", error.message),
+            }
+        }
+    }
+
+    #[test]
+    fn every_registered_action_has_exactly_one_handler() {
+        let handlers = action_ids()
+            .into_iter()
+            .map(|id| (id, dispatch as ModeHandler));
+        if let Err(error) = built().bind_actions(handlers) {
+            panic!("action coverage must match the registry: {error}");
+        }
+    }
+
+    // The old code accepted `--wait` on `evm receive` and then rejected every
+    // use of it at runtime. The argument is simply not part of the command now.
+    #[test]
+    fn evm_receive_has_no_wait() {
+        let error = rejection(&["afpay", "evm", "receive", "--wait"]);
+        assert_eq!(error.rule, CliErrorRule::UnknownArgument);
+    }
+
+    #[test]
+    fn ln_wallet_create_credentials_follow_the_backend() {
+        let error = rejection(&[
+            "afpay",
+            "ln",
+            "wallet",
+            "create",
+            "--backend",
+            "nwc",
+            "--endpoint-url",
+            "https://phoenix.example",
+        ]);
+        assert_eq!(error.rule, CliErrorRule::UnregisteredCombination);
+    }
+
+    #[test]
+    fn btc_core_rpc_backend_requires_its_url() {
+        let error = rejection(&[
+            "afpay",
+            "btc",
+            "wallet",
+            "create",
+            "--btc-backend",
+            "core-rpc",
+        ]);
+        assert_eq!(error.rule, CliErrorRule::UnregisteredCombination);
+    }
+
+    #[test]
+    fn help_is_v2_with_ready_to_run_subcommands() {
+        let cli = built();
+        let root = match cli.resolve_from(["afpay", "--help"]) {
+            Ok(CliOutcome::Help(help)) => help,
+            other => panic!("root --help must render help: {other:?}"),
+        };
+        assert_eq!(root.model().schema, "cli-help-v2");
+        assert_eq!(root.model().command_path, "afpay");
+        assert!(
+            root.model()
+                .subcommands
+                .iter()
+                .any(|entry| entry == "afpay cashu --help"),
+            "subcommands must be ready-to-run strings: {:?}",
+            root.model().subcommands
+        );
+
+        let scoped = match cli.resolve_from(["afpay", "cashu", "send", "--help"]) {
+            Ok(CliOutcome::Help(help)) => help,
+            other => panic!("scoped --help must render help: {other:?}"),
+        };
+        assert_eq!(scoped.model().command_path, "afpay cashu send");
+        assert!(
+            scoped
+                .model()
+                .shapes
+                .iter()
+                .any(|shape| shape.usage.contains("--amount-sats")),
+            "every shape must be complete: {:?}",
+            scoped.model().shapes
+        );
+        assert!(scoped.plain().contains("afpay cashu send"));
+
+        // help-v1's second level is gone; there is nothing left to recurse into.
+        assert_eq!(
+            rejection(&["afpay", "--help", "--recursive"]).rule,
+            CliErrorRule::UnknownArgument
+        );
+    }
+
+    #[test]
+    fn version_is_one_structured_result() {
+        let version = match built().resolve_from(["afpay", "--version"]) {
+            Ok(CliOutcome::Version(version)) => version,
+            other => panic!("--version must render a version: {other:?}"),
+        };
+        let event = cli_version_event(&version);
+        assert_eq!(event.as_value()["kind"], "result");
+        assert_eq!(event.as_value()["result"]["code"], "version");
+        assert_eq!(event.as_value()["result"]["name"], "afpay");
+    }
+
+    #[test]
+    fn tui_session_is_its_own_shape() {
+        match built().resolve_from(["afpay", "--mode", "tui"]) {
+            Ok(CliOutcome::Run(invocation)) => {
+                assert_eq!(invocation.combination_id(), "session-tui");
+            }
+            other => panic!("--mode tui must resolve: {other:?}"),
+        }
+    }
 
     #[test]
     fn parse_window_minutes() {
         assert_eq!(parse_window("30m").unwrap(), 1800);
-    }
-
-    #[test]
-    fn parse_tui_runtime_mode() {
-        let cli = AfpayCli::try_parse_from(["afpay", "--mode", "tui", "wallet", "list"])
-            .expect("tui mode should parse");
-        assert_eq!(cli.mode, RuntimeMode::Tui);
     }
 
     #[test]
@@ -3133,15 +3094,17 @@ mod tests {
         }
     }
 
+    // `--wallet` used to sit on the `limit` group and had to precede `add`;
+    // arguments are command-local now, so it follows the whole command path.
     #[test]
     fn parse_limit_add_wallet_scope() {
         let input = parse_subcommand(
             &[
                 "cashu",
                 "limit",
+                "add",
                 "--wallet",
                 "w_abc",
-                "add",
                 "--window",
                 "30m",
                 "--max-spend",
@@ -3149,7 +3112,7 @@ mod tests {
             ],
             "t_limit_4",
         )
-        .expect("cashu limit --wallet add should parse");
+        .expect("cashu limit add --wallet should parse");
 
         match input {
             Input::LimitAdd { limit, .. } => {
@@ -3167,11 +3130,8 @@ mod tests {
     fn parse_limit_remove() {
         let input = parse_subcommand(&["limit", "remove", "--rule-id", "r_1a2b3c4d"], "t_limit_3")
             .expect("limit remove should parse");
-
         match input {
-            Input::LimitRemove { rule_id, .. } => {
-                assert_eq!(rule_id, "r_1a2b3c4d");
-            }
+            Input::LimitRemove { rule_id, .. } => assert_eq!(rule_id, "r_1a2b3c4d"),
             other => panic!("unexpected input: {other:?}"),
         }
     }
@@ -3184,10 +3144,65 @@ mod tests {
     }
 
     #[test]
+    fn limit_reconcile_needs_exactly_one_outcome() {
+        assert_eq!(
+            rejection(&[
+                "afpay",
+                "limit",
+                "reconcile",
+                "--reservation-id",
+                "7",
+                "--reason",
+                "manual",
+            ])
+            .rule,
+            CliErrorRule::UnregisteredCombination
+        );
+        assert_eq!(
+            rejection(&[
+                "afpay",
+                "limit",
+                "reconcile",
+                "--reservation-id",
+                "7",
+                "--confirm",
+                "--cancel",
+                "--reason",
+                "manual",
+            ])
+            .rule,
+            CliErrorRule::UnregisteredCombination
+        );
+        let input = parse_subcommand(
+            &[
+                "limit",
+                "reconcile",
+                "--reservation-id",
+                "7",
+                "--confirm",
+                "--reason",
+                "manual",
+            ],
+            "t_rec_1",
+        )
+        .expect("limit reconcile --confirm should parse");
+        match input {
+            Input::ReconcileReservation {
+                reservation_id,
+                action,
+                ..
+            } => {
+                assert_eq!(reservation_id, 7);
+                assert_eq!(action, ReconcileAction::Confirm);
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_ln_receive_wallet_optional() {
         let input = parse_subcommand(&["ln", "receive", "--amount-sats", "100"], "t_1")
             .expect("ln receive should parse without --wallet");
-
         match input {
             Input::Receive { wallet, amount, .. } => {
                 assert_eq!(wallet, "");
@@ -3201,7 +3216,6 @@ mod tests {
     fn parse_cashu_receive_from_ln_wallet_optional() {
         let input = parse_subcommand(&["cashu", "receive-from-ln", "--amount-sats", "100"], "t_2")
             .expect("cashu receive-from-ln should parse without --wallet");
-
         match input {
             Input::Receive {
                 wallet,
@@ -3232,8 +3246,7 @@ mod tests {
             ],
             "t_cashu_1",
         )
-        .expect("cashu send --mint-url should parse");
-
+        .expect("cashu send --cashu-mint should parse");
         match input {
             Input::CashuSend { mints, amount, .. } => {
                 assert_eq!(amount.value, 100);
@@ -3251,37 +3264,40 @@ mod tests {
 
     #[test]
     fn parse_cashu_send_legacy_mint_flag_rejected() {
-        let err = parse_subcommand(
-            &[
-                "cashu",
-                "send",
-                "--amount-sats",
-                "100",
-                "--mint",
-                "https://mint-a.example",
-            ],
-            "t_cashu_2",
-        )
-        .expect_err("legacy --mint should be rejected");
-
-        assert!(err.contains("--mint"));
+        let error = rejection(&[
+            "afpay",
+            "cashu",
+            "send",
+            "--amount-sats",
+            "100",
+            "--mint",
+            "https://mint-a.example",
+        ]);
+        assert_eq!(error.rule, CliErrorRule::UnknownArgument);
+        assert!(error.message.contains("--mint"));
     }
 
+    // `cashu send` mints a token; it has no recipient. The hidden `--to` that
+    // existed only to produce a nicer error is gone with the runtime check.
     #[test]
-    fn parse_cashu_send_to_flag_hints_send_to_ln() {
-        let err = parse_subcommand(
-            &["cashu", "send", "--amount-sats", "100", "--to", "lnbc1..."],
-            "t_hint",
-        )
-        .expect_err("--to on cashu send should be rejected with hint");
-        assert!(
-            err.contains("send-to-ln"),
-            "should suggest send-to-ln: {err}"
-        );
+    fn parse_cashu_send_rejects_to() {
+        let error = rejection(&[
+            "afpay",
+            "cashu",
+            "send",
+            "--amount-sats",
+            "100",
+            "--to",
+            "lnbc1...",
+        ]);
+        assert_eq!(error.rule, CliErrorRule::UnknownArgument);
+        assert!(error.message.contains("--to"));
     }
 
     #[test]
     fn parse_cashu_wallet_create_with_mnemonic_secret() {
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+                        abandon abandon about";
         let input = parse_subcommand(
             &[
                 "cashu",
@@ -3290,12 +3306,11 @@ mod tests {
                 "--cashu-mint",
                 "https://mint.example",
                 "--mnemonic-secret",
-                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                mnemonic,
             ],
             "t_cashu_create_1",
         )
         .expect("cashu wallet create --mnemonic-secret should parse");
-
         match input {
             Input::WalletCreate {
                 network,
@@ -3305,12 +3320,7 @@ mod tests {
             } => {
                 assert_eq!(network, Network::Cashu);
                 assert_eq!(mint_url.as_deref(), Some("https://mint.example"));
-                assert_eq!(
-                    mnemonic_secret.as_deref(),
-                    Some(
-                        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-                    )
-                );
+                assert_eq!(mnemonic_secret.as_deref(), Some(mnemonic));
             }
             other => panic!("unexpected input: {other:?}"),
         }
@@ -3329,7 +3339,6 @@ mod tests {
             "t_sol_create_1",
         )
         .expect("sol wallet create --sol-rpc-endpoint should parse");
-
         match input {
             Input::WalletCreate {
                 network,
@@ -3360,40 +3369,28 @@ mod tests {
             "t_sol_create_3",
         )
         .expect("sol wallet create with repeated --sol-rpc-endpoint should parse");
-
         match input {
-            Input::WalletCreate {
-                network,
+            Input::WalletCreate { rpc_endpoints, .. } => assert_eq!(
                 rpc_endpoints,
-                mint_url,
-                ..
-            } => {
-                assert_eq!(network, Network::Sol);
-                assert!(mint_url.is_none());
-                assert_eq!(
-                    rpc_endpoints,
-                    vec!["https://rpc-a.example", "https://rpc-b.example"]
-                );
-            }
+                vec!["https://rpc-a.example", "https://rpc-b.example"]
+            ),
             other => panic!("unexpected input: {other:?}"),
         }
     }
 
+    // `--rpc-endpoint` now names the remote afpay daemon on every command, so
+    // omitting `--sol-rpc-endpoint` leaves no registered shape to match.
     #[test]
-    fn parse_sol_wallet_create_legacy_rpc_endpoint_rejected() {
-        let err = parse_subcommand(
-            &[
-                "sol",
-                "wallet",
-                "create",
-                "--rpc-endpoint",
-                "https://api.mainnet-beta.solana.com",
-            ],
-            "t_sol_create_2",
-        )
-        .expect_err("legacy --rpc-endpoint should be rejected for sol wallet create");
-
-        assert!(err.contains("--rpc-endpoint"));
+    fn parse_sol_wallet_create_without_sol_rpc_endpoint_rejected() {
+        let error = rejection(&[
+            "afpay",
+            "sol",
+            "wallet",
+            "create",
+            "--rpc-endpoint",
+            "127.0.0.1:9400",
+        ]);
+        assert_eq!(error.rule, CliErrorRule::UnregisteredCombination);
     }
 
     #[test]
@@ -3403,7 +3400,6 @@ mod tests {
             "t_sol_1",
         )
         .expect("sol receive --qr-svg-file should parse");
-
         match input {
             Input::Receive {
                 wallet,
@@ -3436,24 +3432,29 @@ mod tests {
             "t_sol_1b",
         )
         .expect("sol receive --onchain-memo --wait should parse");
-
         match input {
             Input::Receive {
-                wallet,
-                network,
                 onchain_memo,
                 wait_until_paid,
                 wait_timeout_s,
                 ..
             } => {
-                assert_eq!(wallet, "w_12345678");
-                assert_eq!(network, Some(Network::Sol));
                 assert_eq!(onchain_memo.as_deref(), Some("order:ord_123"));
                 assert!(wait_until_paid);
                 assert_eq!(wait_timeout_s, Some(15));
             }
             other => panic!("unexpected input: {other:?}"),
         }
+    }
+
+    // The wait knobs describe the wait, so the shape that does not wait does
+    // not accept them.
+    #[test]
+    fn sol_receive_wait_knobs_require_wait() {
+        assert_eq!(
+            rejection(&["afpay", "sol", "receive", "--wait-timeout-s", "15"]).rule,
+            CliErrorRule::UnregisteredCombination
+        );
     }
 
     #[test]
@@ -3472,7 +3473,6 @@ mod tests {
             "t_hist_1",
         )
         .expect("history list --onchain-memo should parse");
-
         match input {
             Input::HistoryList {
                 wallet,
@@ -3504,7 +3504,6 @@ mod tests {
             "t_hist_up_1",
         )
         .expect("history update with scope should parse");
-
         match input {
             Input::HistoryUpdate {
                 wallet,
@@ -3552,7 +3551,6 @@ mod tests {
             "t_sol_2",
         )
         .expect("sol wallet dangerously-show-seed should parse");
-
         match input {
             Input::WalletShowSeed { wallet, .. } => assert_eq!(wallet, "w_sol"),
             other => panic!("unexpected input: {other:?}"),
@@ -3566,7 +3564,6 @@ mod tests {
             "t_ln_1",
         )
         .expect("ln wallet dangerously-show-seed should parse");
-
         match input {
             Input::WalletShowSeed { wallet, .. } => assert_eq!(wallet, "w_ln"),
             other => panic!("unexpected input: {other:?}"),
@@ -3575,12 +3572,9 @@ mod tests {
 
     #[test]
     fn parse_sol_wallet_legacy_show_seed_rejected() {
-        let err = parse_subcommand(
-            &["sol", "wallet", "show-seed", "--wallet", "w_sol"],
-            "t_sol_3",
-        )
-        .expect_err("legacy sol wallet show-seed should be rejected");
-        assert!(err.contains("show-seed"));
+        let error = rejection(&["afpay", "sol", "wallet", "show-seed", "--wallet", "w_sol"]);
+        assert_eq!(error.rule, CliErrorRule::UnknownCommand);
+        assert!(error.message.contains("show-seed"));
     }
 
     #[test]
@@ -3597,20 +3591,42 @@ mod tests {
             "t_3",
         )
         .expect("ln send should parse");
-
         match input {
-            Input::Send { network, .. } => {
+            Input::Send {
+                network,
+                local_memo,
+                ..
+            } => {
                 assert_eq!(network, Some(Network::Ln));
+                assert_eq!(
+                    local_memo.and_then(|memo| memo.get("note").cloned()),
+                    Some("hello".to_string())
+                );
             }
             other => panic!("unexpected input: {other:?}"),
         }
+    }
+
+    // Lightning has no on-chain memo to carry, so the flag is absent instead of
+    // accepted and then rejected.
+    #[test]
+    fn ln_send_has_no_onchain_memo() {
+        let error = rejection(&[
+            "afpay",
+            "ln",
+            "send",
+            "--to",
+            "lnbc1example",
+            "--onchain-memo",
+            "hi",
+        ]);
+        assert_eq!(error.rule, CliErrorRule::UnknownArgument);
     }
 
     #[test]
     fn parse_cashu_send_amount() {
         let input = parse_subcommand(&["cashu", "send", "--amount-sats", "500"], "t_unified_1")
             .expect("cashu send --amount-sats should parse");
-
         match input {
             Input::CashuSend { amount, .. } => {
                 assert_eq!(amount.value, 500);
@@ -3636,7 +3652,6 @@ mod tests {
             "t_unified_2",
         )
         .expect("sol send --amount --token should parse");
-
         match input {
             Input::Send { to, .. } => {
                 assert!(to.contains("amount=1000000"));
@@ -3662,7 +3677,6 @@ mod tests {
             "t_unified_3",
         )
         .expect("evm send --amount --token should parse");
-
         match input {
             Input::Send { to, .. } => {
                 assert!(to.contains("amount=1000000000"));
@@ -3676,18 +3690,18 @@ mod tests {
     fn parse_ln_receive_amount() {
         let input = parse_subcommand(&["ln", "receive", "--amount-sats", "1000"], "t_unified_4")
             .expect("ln receive --amount-sats should parse");
-
         match input {
             Input::Receive { amount, .. } => {
-                let a = amount.expect("amount should be set");
-                assert_eq!(a.value, 1000);
-                assert_eq!(a.token, "sats");
+                let amount = amount.expect("amount should be set");
+                assert_eq!(amount.value, 1000);
+                assert_eq!(amount.token, "sats");
             }
             other => panic!("unexpected input: {other:?}"),
         }
     }
+
     #[test]
-    fn parse_cashu_receive_from_ln_claim_hidden_still_works() {
+    fn parse_cashu_receive_from_ln_claim() {
         let input = parse_subcommand(
             &[
                 "cashu",
@@ -3699,7 +3713,7 @@ mod tests {
             ],
             "t_claim_5",
         )
-        .expect("hidden cashu receive-from-ln-claim should still parse");
+        .expect("cashu receive-from-ln-claim should parse");
         match input {
             Input::ReceiveClaim {
                 wallet, quote_id, ..
@@ -3719,16 +3733,10 @@ mod tests {
         )
         .expect("cashu wallet restore should parse");
         match input {
-            Input::Restore { wallet, .. } => {
-                assert_eq!(wallet, "w_cashu1");
-            }
+            Input::Restore { wallet, .. } => assert_eq!(wallet, "w_cashu1"),
             other => panic!("unexpected input: {other:?}"),
         }
     }
-
-    // ═══════════════════════════════════════════
-    // Top-level balance with --cashu-check
-    // ═══════════════════════════════════════════
 
     #[test]
     fn parse_balance_with_cashu_check() {
@@ -3756,14 +3764,10 @@ mod tests {
         }
     }
 
-    // ═══════════════════════════════════════════
-    // BOLT12 offer tests
-    // ═══════════════════════════════════════════
-
     #[test]
     fn parse_ln_receive_without_amount_for_bolt12() {
         let input = parse_subcommand(&["ln", "receive"], "t_bolt12_1")
-            .expect("ln receive without --amount should parse (bolt12 offer)");
+            .expect("ln receive without --amount-sats should parse (bolt12 offer)");
         match input {
             Input::Receive {
                 network, amount, ..
@@ -3777,11 +3781,11 @@ mod tests {
 
     #[test]
     fn parse_ln_send_bolt12_requires_amount() {
-        let err = parse_subcommand(&["ln", "send", "--to", "lno1abc123"], "t_bolt12_3")
+        let error = parse_subcommand(&["ln", "send", "--to", "lno1abc123"], "t_bolt12_3")
             .expect_err("ln send to bolt12 without --amount-sats should error");
         assert!(
-            err.contains("amount-sats"),
-            "error should mention amount-sats: {err}"
+            error.contains("amount-sats"),
+            "error should mention amount-sats: {error}"
         );
     }
 
@@ -3795,8 +3799,8 @@ mod tests {
         match input {
             Input::Send { to, network, .. } => {
                 assert_eq!(network, Some(Network::Ln));
-                assert!(to.contains("lno1abc123"), "to should contain offer");
-                assert!(to.contains("?amount=500"), "to should encode amount");
+                assert!(to.contains("lno1abc123"));
+                assert!(to.contains("?amount=500"));
             }
             other => panic!("unexpected input: {other:?}"),
         }
@@ -3817,26 +3821,21 @@ mod tests {
         )
         .expect("uppercase LNO1 should be accepted");
         match input {
-            Input::Send { to, .. } => {
-                assert!(
-                    to.contains("?amount=100"),
-                    "uppercase offer should get amount appended: {to}"
-                );
-            }
+            Input::Send { to, .. } => assert!(to.contains("?amount=100")),
             other => panic!("unexpected input: {other:?}"),
         }
     }
 
     #[test]
     fn parse_ln_send_bolt11_rejects_amount_sats() {
-        let err = parse_subcommand(
+        let error = parse_subcommand(
             &["ln", "send", "--to", "lnbc1abc", "--amount-sats", "100"],
             "t_bolt12_8",
         )
         .expect_err("ln send to bolt11 with --amount-sats should error");
         assert!(
-            err.contains("not accepted"),
-            "error should reject amount for bolt11: {err}"
+            error.contains("not accepted"),
+            "error should reject amount for bolt11: {error}"
         );
     }
 }

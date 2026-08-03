@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-pay"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control."
 license = "MIT"
@@ -45,7 +45,11 @@ ln-phoenixd = ["ln", "dep:reqwest"]
 ln-lnbits = ["ln", "dep:reqwest"]
 sol = [
     "dep:reqwest",
+    "dep:solana-address",
+    "dep:solana-hash",
     "dep:solana-sdk",
+    "dep:solana-signature",
+    "dep:solana-short-vec",
     "dep:solana-system-interface",
     "dep:bs58",
     "dep:base64",
@@ -92,9 +96,8 @@ path = "src/main.rs"
 [dependencies]
 # Local monorepo development uses sibling crates where needed; version keys keep
 # packaging tied to the matching published crates.
-agent-first-data = { version = "0.22.0", features = ["cli-help", "cli-help-markdown", "skill-admin", "stream-redirect"] }
+agent-first-data = { version = "0.29.2", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml"] }
 async-trait = "0.1"
-clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -104,10 +107,20 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "json"], opti
 nostr-wallet-connect = { package = "nwc", version = "0.44", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form", "query"], optional = true }
 bs58 = { version = "0.5", optional = true }
+# The wincode 0.6 migration these crates were mid-way through is complete:
+# solana-instruction 3.5 and solana-message 4.5 moved with the rest, so the
+# graph resolves to a single wincode again. The exact `=` pins that held the
+# 0.5 set together, and the matching `--exclude` flags in scripts/instance.sh,
+# are gone. Two copies of wincode is what broke `Transaction: SchemaWrite` —
+# if that error returns, check for a split graph before pinning anything.
+solana-address = { version = "2.7", optional = true }
+solana-hash = { version = "4.6", optional = true }
 solana-sdk = { version = "4", optional = true }
-solana-system-interface = { version = "3.2", features = ["wincode"], optional = true }
-base64 = { version = "0.22", optional = true }
-wincode = { version = "0.5.5", optional = true }
+solana-signature = { version = "3.5", optional = true }
+solana-short-vec = { version = "3.3", optional = true }
+solana-system-interface = { version = "3.3", features = ["wincode"], optional = true }
+base64 = { version = "0.23", optional = true }
+wincode = { version = "0.6", optional = true }
 
 alloy = { version = "2.2", default-features = false, features = ["provider-http", "signers", "signer-local", "signer-mnemonic", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
 bdk_wallet = { version = "3", default-features = false, features = ["std", "keys-bip39"], optional = true }

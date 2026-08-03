@@ -308,7 +308,7 @@ impl PayProvider for LnProvider {
 
         let (endpoint, secret) = match backend {
             LnWalletBackend::Nwc => {
-                Self::reject_field(backend, "endpoint", request.endpoint.as_deref())?;
+                Self::reject_field(backend, "endpoint-url", request.endpoint_url.as_deref())?;
                 Self::reject_field(
                     backend,
                     "password-secret",
@@ -330,7 +330,7 @@ impl PayProvider for LnProvider {
                     "admin-key-secret",
                     request.admin_key_secret.as_deref(),
                 )?;
-                let endpoint = Self::require_field(backend, "endpoint", request.endpoint)?;
+                let endpoint = Self::require_field(backend, "endpoint-url", request.endpoint_url)?;
                 let password =
                     Self::require_field(backend, "password-secret", request.password_secret)?;
                 (Some(endpoint), Some(password))
@@ -342,7 +342,7 @@ impl PayProvider for LnProvider {
                     "password-secret",
                     request.password_secret.as_deref(),
                 )?;
-                let endpoint = Self::require_field(backend, "endpoint", request.endpoint)?;
+                let endpoint = Self::require_field(backend, "endpoint-url", request.endpoint_url)?;
                 let admin_key =
                     Self::require_field(backend, "admin-key-secret", request.admin_key_secret)?;
                 (Some(endpoint), Some(admin_key))
@@ -396,7 +396,7 @@ impl PayProvider for LnProvider {
             network: Network::Ln,
             address: format!("ln:{}", backend.as_str()),
             label: meta.label,
-            mnemonic: None,
+            mnemonic_secret: None,
         })
     }
 

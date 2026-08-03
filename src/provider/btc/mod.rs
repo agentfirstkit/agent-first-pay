@@ -344,7 +344,7 @@ impl PayProvider for BtcProvider {
             network: Network::Btc,
             address,
             label: normalized_label,
-            mnemonic: Some(mnemonic_str),
+            mnemonic_secret: Some(mnemonic_str),
         })
     }
 

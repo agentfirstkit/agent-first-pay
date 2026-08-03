@@ -10,6 +10,7 @@ services:
     environment:
       AFPAY_MODE: "${AFPAY_MODE:-rest}"
       AFPAY_PORT: "${AFPAY_PORT:-9401}"
+      AFPAY_REST_API_KEY_SECRET: "${AFPAY_REST_API_KEY_SECRET:-}"
       AFPAY_REST_API_KEY: "${AFPAY_REST_API_KEY:-}"
       AFPAY_RPC_SECRET: "${AFPAY_RPC_SECRET:-}"
       ENABLE_PHOENIXD: "${ENABLE_PHOENIXD:-true}"

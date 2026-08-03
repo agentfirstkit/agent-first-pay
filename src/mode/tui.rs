@@ -474,7 +474,7 @@ impl TuiFormConfig {
     }
 }
 
-/// Map a network name to the clap subcommand path for "send".
+/// Map a network name to the registry command path for "send".
 fn send_subcommand_path(network: &str) -> Vec<&'static str> {
     match network {
         "cashu" => vec!["cashu", "send"],
@@ -486,7 +486,7 @@ fn send_subcommand_path(network: &str) -> Vec<&'static str> {
     }
 }
 
-/// Map a network name to the clap subcommand path for "receive".
+/// Map a network name to the registry command path for "receive".
 fn receive_subcommand_path(network: &str) -> Vec<&'static str> {
     match network {
         "cashu" => vec!["cashu", "receive-from-ln"],
@@ -498,7 +498,7 @@ fn receive_subcommand_path(network: &str) -> Vec<&'static str> {
     }
 }
 
-/// Convert clap ArgInfo into form fields.
+/// Convert registry ArgInfo into form fields.
 ///
 /// If `wallet_id` is `Some`, the `--wallet` field is prefilled and locked (not editable).
 /// If `wallet_id` is `None`, the `--wallet` field is omitted entirely (handler auto-selects).
@@ -993,7 +993,7 @@ fn inject_limit_add_extra_fields(
 }
 
 fn make_limit_add_form() -> TuiFormConfig {
-    // All network/wallet variants use the same clap path for field extraction;
+    // All network/wallet variants use the same registry path for field extraction;
     // the actual command path is built dynamically based on the "network" and
     // "wallet" text fields added manually below.
     let variants = vec![
@@ -1118,7 +1118,7 @@ fn build_form_command_from_variant(form: &TuiFormConfig) -> Result<String, Strin
     Ok(cmd)
 }
 
-/// Build a CLI command string from form values, matching fields to clap ArgInfo by long name.
+/// Build a CLI command string from form values, matching fields to registry ArgInfo by long name.
 fn build_command_from_form(
     form: &TuiFormConfig,
     path: &[&str],
@@ -4497,7 +4497,7 @@ pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
                             Some(app.data_backup_output.clone())
                         };
                         let handle = tokio::task::spawn_blocking(move || {
-                            let stamp = crate::mode::data::utc_stamp();
+                            let stamp = crate::mode::data::utc_archive_stamp();
                             let archive_path = output_path
                                 .unwrap_or_else(|| format!("./afpay-global-{stamp}.tar.zst"));
                             crate::mode::data::do_global_backup(
@@ -4684,7 +4684,9 @@ mod tests {
     fn send_form_ln_builds_command() {
         let mut form = make_send_form("ln", None);
         set_field(&mut form, "to", "lnbc123");
-        set_field(&mut form, "onchain memo", "coffee beans");
+        // Lightning carries no on-chain memo, so the form offers only the
+        // local bookkeeping annotation.
+        set_field(&mut form, "local memo", "coffee beans");
 
         let command = build_form_command_from_variant(&form).expect("should build");
         assert!(command.starts_with("ln send"));
@@ -4763,10 +4765,10 @@ mod tests {
     }
 
     #[test]
-    fn send_form_fields_match_clap_args() {
+    fn send_form_fields_match_registry_args() {
         for net in NETWORK_OPTIONS {
             let form = make_send_form(net, None);
-            // Check each variant's fields match clap args
+            // Check each variant's fields match the registry
             for (vi, variant) in form.variants.iter().enumerate() {
                 let fields = build_form_fields(&form.variants, vi, None);
                 let args = crate::args::subcommand_args(&variant.path);
@@ -4780,7 +4782,7 @@ mod tests {
                     .collect();
                 assert_eq!(
                     form_labels, arg_labels,
-                    "send form for {net} variant '{}' should match clap args",
+                    "send form for {net} variant '{}' should match the registry",
                     variant.label
                 );
             }
@@ -4788,7 +4790,7 @@ mod tests {
     }
 
     #[test]
-    fn receive_form_fields_match_clap_args() {
+    fn receive_form_fields_match_registry_args() {
         for net in NETWORK_OPTIONS {
             let form = make_receive_form(net, None);
             for (vi, variant) in form.variants.iter().enumerate() {
@@ -4803,7 +4805,7 @@ mod tests {
                     .collect();
                 assert_eq!(
                     form_labels, arg_labels,
-                    "receive form for {net} variant '{}' should match clap args",
+                    "receive form for {net} variant '{}' should match the registry",
                     variant.label
                 );
             }
@@ -4844,7 +4846,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_create_form_fields_match_clap_args() {
+    fn wallet_create_form_fields_match_registry_args() {
         for net in NETWORK_OPTIONS {
             let form = make_wallet_create_form(net);
             for (vi, variant) in form.variants.iter().enumerate() {
@@ -4856,13 +4858,13 @@ mod tests {
                 let arg_labels: Vec<String> = if variant.keep_fields.is_some()
                     || !variant.locked_values.is_empty()
                 {
-                    // Form shows filtered/locked subset — just verify each form field exists in clap args
+                    // Form shows filtered/locked subset — just verify each form field exists in the registry
                     let all_arg_longs: Vec<&str> = args.iter().map(|a| a.long.as_str()).collect();
                     for label in &form_labels {
                         let long = label.replace(' ', "-");
                         assert!(
                             all_arg_longs.contains(&long.as_str()),
-                            "form field '{label}' not found in clap args for {net} variant '{}'",
+                            "form field '{label}' not found in the registry for {net} variant '{}'",
                             variant.label
                         );
                     }
@@ -4872,7 +4874,7 @@ mod tests {
                 };
                 assert_eq!(
                     form_labels, arg_labels,
-                    "wallet create form for {net} variant '{}' should match clap args",
+                    "wallet create form for {net} variant '{}' should match the registry",
                     variant.label
                 );
             }
@@ -4880,7 +4882,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_close_form_fields_match_clap_args() {
+    fn wallet_close_form_fields_match_registry_args() {
         for net in NETWORK_OPTIONS {
             let form = make_wallet_close_form(net, "w_test");
             for (vi, variant) in form.variants.iter().enumerate() {
@@ -4892,7 +4894,7 @@ mod tests {
                     args.iter().map(|a| a.long.replace('-', " ")).collect();
                 assert_eq!(
                     form_labels, arg_labels,
-                    "wallet close form for {net} variant '{}' should match clap args",
+                    "wallet close form for {net} variant '{}' should match the registry",
                     variant.label
                 );
             }
@@ -4900,7 +4902,7 @@ mod tests {
     }
 
     #[test]
-    fn wallet_show_seed_form_fields_match_clap_args() {
+    fn wallet_show_seed_form_fields_match_registry_args() {
         for net in NETWORK_OPTIONS {
             let form = make_wallet_show_seed_form(net, "w_test");
             for (vi, variant) in form.variants.iter().enumerate() {
@@ -4912,7 +4914,7 @@ mod tests {
                     args.iter().map(|a| a.long.replace('-', " ")).collect();
                 assert_eq!(
                     form_labels, arg_labels,
-                    "wallet show-seed form for {net} variant '{}' should match clap args",
+                    "wallet show-seed form for {net} variant '{}' should match the registry",
                     variant.label
                 );
             }
