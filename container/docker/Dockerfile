@@ -18,7 +18,7 @@
 ARG AFPAY_BIN_FROM=builder
 
 # ── Source stage A: compile from a checkout (default) ──
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
 ARG FEATURES="btc-esplora,cashu,ln-phoenixd,redb,rest,exchange-rate,backup"
 
@@ -43,7 +43,7 @@ RUN cargo build --release --no-default-features --features "${FEATURES}" \
     && cp target/release/afpay /usr/local/bin/afpay
 
 # ── Source stage B: download the matching prebuilt release ──
-FROM debian:bookworm-slim AS downloader
+FROM debian:trixie-slim AS downloader
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 # Hard-pinned by the driver: its own version + the linux triple for the image
@@ -65,7 +65,7 @@ RUN set -eu; \
 FROM ${AFPAY_BIN_FROM} AS afpay_bin
 
 # ── Runtime stage ──
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ARG INSTALL_PHOENIXD=false
 ARG INSTALL_BITCOIND=false

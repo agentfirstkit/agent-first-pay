@@ -12,10 +12,14 @@ use crate::mode::rest::RestInit;
 use crate::mode::rpc::RpcInit;
 use crate::types::*;
 use agent_first_data::{
-    ArgSpec, ArgSyntax, ArgValueType, BuiltCliSpec, CliOutcome, CliSpec, CliSpecError, CliValue,
+    ArgSpec, ArgSyntax, ArgValueType, BoundOutcome, BuiltCliSpec, CliSpec, CliSpecError, CliValue,
     Combination, CommandSpec, OutputFormat, OutputSpec, ResolvedInvocation, build_afdata_cli,
     cli_help_event, cli_parse_output, cli_version_event, render_cli_reference,
 };
+// The unbound registry still resolves to `CliOutcome`; only the parts of this
+// file that reuse it without a handler binding need the name.
+#[cfg(any(feature = "interactive", test))]
+use agent_first_data::CliOutcome;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -1759,6 +1763,11 @@ fn opt_str(invocation: &ResolvedInvocation, id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A value the matched shape declares as required or fixed.
+///
+/// Reading it cannot fail: the shape that matched supplies every id it
+/// declares. Asking for an id it does not declare is a defect in this file, not
+/// a value the caller omitted.
 fn req_str(invocation: &ResolvedInvocation, id: &str) -> String {
     invocation
         .required(id)
@@ -2049,14 +2058,14 @@ pub fn parse_args() -> Result<Mode, CliError> {
     };
 
     match outcome {
-        CliOutcome::Run(invocation) => app.execute(&invocation),
+        BoundOutcome::Run(invocation) => invocation.run(),
         // `--docs` renders the whole registry as raw Markdown, so it carries no
         // format of its own and never becomes a protocol event.
-        CliOutcome::Docs(_) => {
+        BoundOutcome::Docs(_) => {
             write_or_exit(&render_cli_reference(cli));
             std::process::exit(0);
         }
-        CliOutcome::Help(help) => {
+        BoundOutcome::Help(help) => {
             if format_of_plan(help.output_plan()) == OutputFormat::Plain {
                 write_or_exit(&help.plain());
             } else {
@@ -2067,7 +2076,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
             }
             std::process::exit(0);
         }
-        CliOutcome::Version(version) => {
+        BoundOutcome::Version(version) => {
             emit_or_exit(
                 cli_version_event(&version).into(),
                 format_of_plan(version.output_plan()),
@@ -2888,6 +2897,24 @@ mod tests {
         }
     }
 
+    /// Every declared shape, run through `dispatch` with strict argument reads:
+    /// an arm that asks for an argument id its shape cannot supply names itself
+    /// here rather than silently degrading to an empty string in production.
+    ///
+    /// Safe to run because `dispatch` only projects — it opens no wallet, binds
+    /// no listener, and reaches no network.
+    #[test]
+    fn every_combination_reads_only_ids_its_shape_declares() {
+        let handlers = action_ids()
+            .into_iter()
+            .map(|id| (id, dispatch as ModeHandler));
+        let app = match built().bind_actions(handlers) {
+            Ok(app) => app,
+            Err(error) => panic!("action coverage must match the registry: {error}"),
+        };
+        app.call_every_combination();
+    }
+
     // The old code accepted `--wait` on `evm receive` and then rejected every
     // use of it at runtime. The argument is simply not part of the command now.
     #[test]
@@ -3574,7 +3601,13 @@ mod tests {
     fn parse_sol_wallet_legacy_show_seed_rejected() {
         let error = rejection(&["afpay", "sol", "wallet", "show-seed", "--wallet", "w_sol"]);
         assert_eq!(error.rule, CliErrorRule::UnknownCommand);
-        assert!(error.message.contains("show-seed"));
+        // The rejection does not quote the token back; what points the caller
+        // at the mistake is the hint naming the command it was written under.
+        assert_eq!(error.message, "unknown command");
+        assert_eq!(
+            error.hint,
+            "run `afpay sol wallet --help` and choose one registered combination"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control.",
@@ -11,22 +11,17 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Compile the entire CLI from a closed-world registry: one root, 27 command groups, 89 leaves and about 118 legal combinations across 54 action ids, generated from a single table instead of written out once per mode.",
-    "Express per-backend credential requirements as keyed command shapes, so a rule that used to surface only as a runtime error (endpoint required for the phoenixd backend) is visible in the help and the illegal request cannot be spelled.",
-    "Make the five long-lived session modes five distinct shapes, each accepting only the listener flags that serve it, and stop treating bare afpay as an implicit --mode cli.",
-    "Close previously free-string arguments into enums: --with, --btc-network, --sol-cluster, --runtime and the container --mode.",
-    "Serve structured discovery: --help renders a scoped cli-help-v2 document, with --recursive for the whole tree and --output plain for humans, and bare --version answers a version event.",
-    "Breaking: arguments are now command-local, so flags that used to precede the command move after it; -f, --rest-api-key and --agent claude are removed, the Lightning --endpoint becomes --endpoint-url, global backup --output becomes --archive-out, and the sol/evm config set RPC endpoint flags gain network prefixes.",
-    "Replace the generic cli_error with about 25 named errors so every failure identifies itself.",
-    "Take wincode 0.6 and delete the five exact Solana version pins, now that the dependency graph resolves to a single wincode.",
-    "Move onto agent-first-data 0.29.2, using write_raw for raw process output and index-only addressing for config paths.",
-    "Upgrade the container image third-party pins, phoenixd 0.7.2 to 0.9.0 and Bitcoin Core 28.1 to 31.1, and add a gate check that fails when either drifts behind upstream latest.",
-    "Fix the containerized bitcoind on signet, where the generated bitcoin.conf put rpcbind and rpcallowip in the global section and bitcoind refused to start, and make --btc-rpc-port reach the config instead of being ignored."
+    "Upgrade to Agent-First Data 0.31.0 and adopt its bound-action outcome, so a resolved invocation carries its own handler and runs itself instead of being routed through a separate dispatch call",
+    "Add a coverage test that drives every registered command shape through its handler, so an arm reading an argument id its shape cannot supply fails the test suite instead of silently degrading to an empty value at runtime",
+    "Stop echoing the offending token in CLI rejection messages — the message now names the failure category and the hint names the command to run — so a logged rejection never carries a value the caller supplied",
+    "Document the two exit-1 codes that describe a defect in the tool rather than the call: cli_invocation_invalid for a resolved invocation the program cannot read back, and output_setup_failed for an output sink that could not be established",
+    "Rebase the container images on Debian trixie across the builder, downloader, and runtime stages",
+    "Update alloy to 2.3"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.DybgBCZQ6YRTrjjif59swyURbRsA47mnfM3hyc37KMR7",
+      "uri": "cmn://agentfirstkit.com/b3.7Kf6i6HNpFxooXKQTCzfugkqq89rPCuM1mekg8hsKAQC",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions and output formats"
     }
