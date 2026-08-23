@@ -1,0 +1,38 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/wallet-created-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "address": {
+      "description": "Receiving address, or the backend node identity for Lightning.",
+      "type": "string"
+    },
+    "mnemonic_secret": {
+      "description": "Redacted on this transport. A generated mnemonic is readable only\nthrough the local CLI, never over HTTP.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "network": {
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc"
+      ],
+      "type": "string"
+    },
+    "wallet": {
+      "description": "Wallet id afpay assigned; address every other route by it.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet",
+    "network",
+    "address"
+  ],
+  "title": "WalletCreatedResult",
+  "type": "object"
+}

@@ -1,0 +1,62 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/cashu-token-plan-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "amount": {
+      "description": "Amount to move into the token.",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "token"
+      ],
+      "type": "object"
+    },
+    "local_memo": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "mints": {
+      "description": "Restrict wallet selection to these mints, tried in order.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "onchain_memo": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wallet": {
+      "description": "Source wallet; omit to let afpay select one. The plan names the wallet\nit actually picked.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "amount"
+  ],
+  "title": "CashuTokenPlanRequest",
+  "type": "object"
+}

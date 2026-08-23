@@ -26,6 +26,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 ## Commands
 
 - [`afpay`](#afpay) — Run a long-lived afpay session instead of a single command
+- [`afpay api export`](#afpay-api-export) — Write the OpenAPI document and standalone JSON Schemas to a directory
 - [`afpay balance`](#afpay-balance) — Balance across every network
 - [`afpay btc backup`](#afpay-btc-backup) — Back up Bitcoin wallet data to a .tar.zst archive
 - [`afpay btc balance`](#afpay-btc-balance) — Bitcoin balance
@@ -96,6 +97,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afpay ln wallet create`](#afpay-ln-wallet-create) — Create a Lightning wallet
 - [`afpay ln wallet dangerously-show-seed`](#afpay-ln-wallet-dangerously-show-seed) — Reveal the Lightning wallet seed; output is deliberately unredacted
 - [`afpay ln wallet list`](#afpay-ln-wallet-list) — List Lightning wallets
+- [`afpay pay confirm`](#afpay-pay-confirm) — Pay by confirming a plan a `send` resolved — the only command that moves money
 - [`afpay skill install`](#afpay-skill-install) — Install or refresh the Agent-First Pay skill
 - [`afpay skill status`](#afpay-skill-status) — Show whether the Agent-First Pay skill is installed, valid, and up to date
 - [`afpay skill uninstall`](#afpay-skill-uninstall) — Remove an afpay-managed Agent-First Pay skill
@@ -113,6 +115,9 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afpay sol wallet create`](#afpay-sol-wallet-create) — Create a Solana wallet
 - [`afpay sol wallet dangerously-show-seed`](#afpay-sol-wallet-dangerously-show-seed) — Reveal the Solana wallet seed; output is deliberately unredacted
 - [`afpay sol wallet list`](#afpay-sol-wallet-list) — List Solana wallets
+- [`afpay ui receive`](#afpay-ui-receive) — Open a panel showing the receive address or invoice as a code to scan
+- [`afpay ui send`](#afpay-ui-send) — Open a panel showing a resolved payment and wait for a person to approve it
+- [`afpay ui wallet`](#afpay-ui-wallet) — Open a panel showing every wallet and its balance
 - [`afpay wallet list`](#afpay-wallet-list) — List wallets across every network
 
 ### `afpay`
@@ -128,25 +133,19 @@ afpay --mode pipe [--data-dir <DIR>] [--log <FILTER>...] [--public-listen]
 #### `session-interactive` — Human REPL with completion and QR helpers
 
 ```
-afpay --mode interactive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>]
+afpay --mode interactive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>]
 ```
 
 #### `session-tui` — Full-screen terminal workflow over the same command interface
 
 ```
-afpay --mode tui [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>]
-```
-
-#### `session-rpc` — Encrypted gRPC daemon; only this shape accepts --rpc-listen
-
-```
-afpay --mode rpc [--data-dir <DIR>] [--log <FILTER>...] [--rpc-secret <SECRET>] [--rpc-listen <HOST:PORT>] [--public-listen]
+afpay --mode tui [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>]
 ```
 
 #### `session-rest` — HTTP API server; only this shape accepts --rest-listen
 
 ```
-afpay --mode rest [--data-dir <DIR>] [--log <FILTER>...] [--public-listen] [--rest-listen <HOST:PORT>] [--rest-api-key-secret <KEY>]
+afpay --mode rest [--data-dir <DIR>] [--log <FILTER>...] [--public-listen] [--rest-listen <HOST:PORT>] [--rest-api-key-secret <SOURCE>]
 ```
 
 Arguments across every shape above:
@@ -156,27 +155,39 @@ Arguments across every shape above:
 | `--mode` | Long-lived session to run instead of a single command |
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Drive a remote afpay RPC daemon from this session |
-| `--rpc-secret` | Shared secret for the RPC channel |
-| `--rpc-listen` | Listen address for the RPC daemon |
+| `--peer-url` | Drive another afpay node from this session |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--public-listen` | Allow binding to a non-loopback address; use only behind TLS or a firewall |
 | `--rest-listen` | Listen address for the REST server |
-| `--rest-api-key-secret` | Bearer API key the REST server requires |
+| `--rest-api-key-secret` | Bearer API key the REST server requires (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
+
+### `afpay api export`
+
+Write the OpenAPI document and standalone JSON Schemas to a directory
+
+```
+afpay api export [--directory <DIR>] [--force]
+```
+
+| Argument | Meaning |
+|---|---|
+| `--directory` | Destination directory |
+| `--force` | Replace generated files that are already there |
 
 ### `afpay balance`
 
 Balance across every network
 
 ```
-afpay balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--network <cashu|ln|sol|evm|btc>] [--cashu-check]
+afpay balance [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--network <cashu|ln|sol|evm|btc>] [--cashu-check]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (omit to show every wallet) |
 | `--network` | Restrict to one network |
@@ -201,15 +212,15 @@ afpay btc backup [--data-dir <DIR>] [--archive-out <PATH>] [--wallet <WALLET_ID>
 Bitcoin balance
 
 ```
-afpay btc balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>]
+afpay btc balance [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (omit to show every Bitcoin wallet) |
 
@@ -218,15 +229,15 @@ afpay btc balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:P
 Update one Bitcoin wallet's settings
 
 ```
-afpay btc config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>]
+afpay btc config set [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--label` | New wallet label |
@@ -236,15 +247,15 @@ afpay btc config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOS
 Show one Bitcoin wallet's configuration
 
 ```
-afpay btc config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay btc config show [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -253,15 +264,15 @@ afpay btc config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HO
 Add a Bitcoin network or wallet spend limit
 
 ```
-afpay btc limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT>
+afpay btc limit add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID; omit for a limit covering the whole network |
 | `--window` | Rolling window, e.g. 30m, 1h, 24h, 7d |
@@ -274,13 +285,13 @@ Show the wallet's receive address
 #### `btc-receive` — Return the receive address or invoice and exit
 
 ```
-afpay btc receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file]
+afpay btc receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file] [--idempotency-key <KEY>]
 ```
 
 #### `btc-receive-wait` — Block until a matching payment settles; only this shape describes the wait
 
 ```
-afpay btc receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--wait-sync-limit <N>]
+afpay btc receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--idempotency-key <KEY>] [--wait-sync-limit <N>]
 ```
 
 Arguments across every shape above:
@@ -289,14 +300,15 @@ Arguments across every shape above:
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (auto-selected if omitted) |
 | `--wait` | Block until a matching payment settles |
 | `--wait-timeout-s` | Give up waiting after N seconds |
 | `--wait-poll-interval-ms` | Poll interval while waiting |
 | `--qr-svg-file` | Write the receive QR payload to an SVG file |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body returns the receive already placed instead of minting a second invoice |
 | `--wait-sync-limit` | Max history records scanned per poll while resolving the tx id |
 
 ### `afpay btc restore`
@@ -304,7 +316,7 @@ Arguments across every shape above:
 Restore Bitcoin wallet data from a .tar.zst archive
 
 ```
-afpay btc restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <URL>]
+afpay btc restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
@@ -312,44 +324,43 @@ afpay btc restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-u
 | `ARCHIVE` | Path to the backup archive |
 | `--data-dir` | Wallet and data directory |
 | `--dangerously-overwrite` | Clear existing data before restoring instead of merging |
-| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step |
+| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 
 ### `afpay btc send`
 
 Send BTC on-chain
 
 ```
-afpay btc send [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --to <ADDRESS> --amount-sats <SATS> [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...] [--idempotency-key <KEY>]
+afpay btc send [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --to <ADDRESS> --amount-sats <SATS> [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--to` | Recipient Bitcoin address (bc1… / tb1…) |
 | `--amount-sats` | Amount in satoshis |
 | `--wallet` | Source wallet ID (auto-selected if omitted) |
 | `--onchain-memo` | On-chain memo, sent with the transaction |
 | `--local-memo` | Local bookkeeping annotation; bare text is stored as note=<text> |
-| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body replays the first response instead of re-broadcasting |
 
 ### `afpay btc wallet close`
 
 Close a Bitcoin wallet
 
 ```
-afpay btc wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
+afpay btc wallet close [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--dangerously-skip-balance-check-and-may-lose-money` | Close even if the wallet still holds funds |
@@ -361,19 +372,19 @@ Create a Bitcoin wallet
 #### `btc-wallet-create-esplora` — Esplora chain source; only this shape accepts --btc-esplora-url
 
 ```
-afpay btc wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--btc-network <mainnet|signet>] [--btc-address-type <taproot|segwit>] [--btc-backend esplora] [--btc-esplora-url <URL>] [--mnemonic-secret <WORDS>] [--label <LABEL>]
+afpay btc wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--idempotency-key <KEY>] [--btc-network <mainnet|signet>] [--btc-address-type <taproot|segwit>] [--btc-backend esplora] [--btc-esplora-url <URL>] [--mnemonic-secret <SOURCE>] [--label <LABEL>]
 ```
 
 #### `btc-wallet-create-core-rpc` — Bitcoin Core RPC chain source; requires --btc-core-url
 
 ```
-afpay btc wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--btc-network <mainnet|signet>] [--btc-address-type <taproot|segwit>] --btc-backend core-rpc --btc-core-url <URL> [--btc-core-auth-secret <USER:PASS>] [--mnemonic-secret <WORDS>] [--label <LABEL>]
+afpay btc wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--idempotency-key <KEY>] [--btc-network <mainnet|signet>] [--btc-address-type <taproot|segwit>] --btc-backend core-rpc --btc-core-url <URL> [--btc-core-auth-secret <SOURCE>] [--mnemonic-secret <SOURCE>] [--label <LABEL>]
 ```
 
 #### `btc-wallet-create-electrum` — Electrum chain source; requires --btc-electrum-url
 
 ```
-afpay btc wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--btc-network <mainnet|signet>] [--btc-address-type <taproot|segwit>] --btc-backend electrum --btc-electrum-url <URL> [--mnemonic-secret <WORDS>] [--label <LABEL>]
+afpay btc wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--idempotency-key <KEY>] [--btc-network <mainnet|signet>] [--btc-address-type <taproot|segwit>] --btc-backend electrum --btc-electrum-url <URL> [--mnemonic-secret <SOURCE>] [--label <LABEL>]
 ```
 
 Arguments across every shape above:
@@ -382,17 +393,18 @@ Arguments across every shape above:
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body reports the wallet the first call created instead of generating a second key |
 | `--btc-network` | Bitcoin sub-network |
 | `--btc-address-type` | Address type |
 | `--btc-backend` | Chain-source backend |
 | `--btc-esplora-url` | Custom Esplora API URL |
 | `--btc-core-url` | Bitcoin Core RPC URL |
-| `--btc-core-auth-secret` | Bitcoin Core RPC credentials |
+| `--btc-core-auth-secret` | Bitcoin Core RPC credentials as USER:PASS (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--btc-electrum-url` | Electrum server URL |
-| `--mnemonic-secret` | Existing BIP39 mnemonic to restore this wallet from |
+| `--mnemonic-secret` | Existing BIP39 mnemonic to restore this wallet from (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--label` | Optional wallet label |
 
 ### `afpay btc wallet dangerously-show-seed`
@@ -400,15 +412,15 @@ Arguments across every shape above:
 Reveal the Bitcoin wallet seed; output is deliberately unredacted
 
 ```
-afpay btc wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay btc wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -417,15 +429,15 @@ afpay btc wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [-
 List Bitcoin wallets
 
 ```
-afpay btc wallet list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run]
+afpay btc wallet list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 
 ### `afpay cashu backup`
@@ -447,15 +459,15 @@ afpay cashu backup [--data-dir <DIR>] [--archive-out <PATH>] [--wallet <WALLET_I
 Cashu balance
 
 ```
-afpay cashu balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--check]
+afpay cashu balance [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--check]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (omit to show every Cashu wallet) |
 | `--check` | Verify proofs against the mint; slower but authoritative |
@@ -465,15 +477,15 @@ afpay cashu balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST
 Update one Cashu wallet's settings
 
 ```
-afpay cashu config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>]
+afpay cashu config set [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--label` | New wallet label |
@@ -483,15 +495,15 @@ afpay cashu config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <H
 Show one Cashu wallet's configuration
 
 ```
-afpay cashu config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay cashu config show [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -500,15 +512,15 @@ afpay cashu config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <
 Add a Cashu network or wallet spend limit
 
 ```
-afpay cashu limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT>
+afpay cashu limit add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID; omit for a limit covering the whole network |
 | `--window` | Rolling window, e.g. 30m, 1h, 24h, 7d |
@@ -519,15 +531,15 @@ afpay cashu limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HO
 Redeem a Cashu token into a wallet
 
 ```
-afpay cashu receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] <TOKEN> [--wallet <WALLET_ID>]
+afpay cashu receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] <TOKEN> [--wallet <WALLET_ID>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `TOKEN` | Cashu token string |
 | `--wallet` | Wallet ID (auto-matched from the token if omitted) |
@@ -539,13 +551,13 @@ Create a Lightning invoice that mints Cashu proofs when paid
 #### `cashu-receive` — Return the receive address or invoice and exit
 
 ```
-afpay cashu receive-from-ln [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file] [--amount-sats <SATS>] [--onchain-memo <TEXT>]
+afpay cashu receive-from-ln [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file] [--idempotency-key <KEY>] [--amount-sats <SATS>] [--onchain-memo <TEXT>]
 ```
 
 #### `cashu-receive-wait` — Block until a matching payment settles; only this shape describes the wait
 
 ```
-afpay cashu receive-from-ln [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--amount-sats <SATS>] [--onchain-memo <TEXT>]
+afpay cashu receive-from-ln [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--idempotency-key <KEY>] [--amount-sats <SATS>] [--onchain-memo <TEXT>]
 ```
 
 Arguments across every shape above:
@@ -554,14 +566,15 @@ Arguments across every shape above:
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (auto-selected if omitted) |
 | `--wait` | Block until a matching payment settles |
 | `--wait-timeout-s` | Give up waiting after N seconds |
 | `--wait-poll-interval-ms` | Poll interval while waiting |
 | `--qr-svg-file` | Write the receive QR payload to an SVG file |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body returns the receive already placed instead of minting a second invoice |
 | `--amount-sats` | Amount in sats |
 | `--onchain-memo` | Invoice description |
 
@@ -570,15 +583,15 @@ Arguments across every shape above:
 Claim the proofs minted by a settled receive-from-ln quote
 
 ```
-afpay cashu receive-from-ln-claim [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> --ln-quote-id <QUOTE_ID>
+afpay cashu receive-from-ln-claim [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> --ln-quote-id <QUOTE_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--ln-quote-id` | Quote ID or payment hash from the deposit |
@@ -588,7 +601,7 @@ afpay cashu receive-from-ln-claim [--data-dir <DIR>] [--log <FILTER>...] [--rpc-
 Restore Cashu wallet data from a .tar.zst archive
 
 ```
-afpay cashu restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <URL>]
+afpay cashu restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
@@ -596,65 +609,63 @@ afpay cashu restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg
 | `ARCHIVE` | Path to the backup archive |
 | `--data-dir` | Wallet and data directory |
 | `--dangerously-overwrite` | Clear existing data before restoring instead of merging |
-| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step |
+| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 
 ### `afpay cashu send`
 
 Mint a P2P Cashu token; to pay a Lightning invoice use `cashu send-to-ln`
 
 ```
-afpay cashu send [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --amount-sats <SATS> [--cashu-mint <URL>...] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...] [--idempotency-key <KEY>]
+afpay cashu send [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --amount-sats <SATS> [--cashu-mint <URL>...] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--amount-sats` | Amount in sats |
 | `--cashu-mint` | Restrict to wallets on these mints, tried in order |
 | `--wallet` | Source wallet ID (auto-selected if omitted) |
 | `--onchain-memo` | On-chain memo, sent with the transaction |
 | `--local-memo` | Local bookkeeping annotation; bare text is stored as note=<text> |
-| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body replays the first response instead of re-broadcasting |
 
 ### `afpay cashu send-to-ln`
 
 Melt Cashu proofs to pay a Lightning invoice
 
 ```
-afpay cashu send-to-ln [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --to <BOLT11> [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...] [--idempotency-key <KEY>]
+afpay cashu send-to-ln [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --to <BOLT11> [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--to` | Lightning invoice to pay |
 | `--wallet` | Source wallet ID (auto-selected if omitted) |
 | `--onchain-memo` | On-chain memo, sent with the transaction |
 | `--local-memo` | Local bookkeeping annotation; bare text is stored as note=<text> |
-| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body replays the first response instead of re-broadcasting |
 
 ### `afpay cashu wallet close`
 
 Close a Cashu wallet
 
 ```
-afpay cashu wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
+afpay cashu wallet close [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--dangerously-skip-balance-check-and-may-lose-money` | Close even if the wallet still holds funds |
@@ -664,34 +675,35 @@ afpay cashu wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint 
 Create a Cashu wallet on one mint
 
 ```
-afpay cashu wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --cashu-mint <URL> [--label <LABEL>] [--mnemonic-secret <WORDS>]
+afpay cashu wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --cashu-mint <URL> [--label <LABEL>] [--mnemonic-secret <SOURCE>] [--idempotency-key <KEY>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--cashu-mint` | Cashu mint URL |
 | `--label` | Optional wallet label |
-| `--mnemonic-secret` | Existing BIP39 mnemonic to restore this wallet from |
+| `--mnemonic-secret` | Existing BIP39 mnemonic to restore this wallet from (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body reports the wallet the first call created instead of generating a second key |
 
 ### `afpay cashu wallet dangerously-show-seed`
 
 Reveal the Cashu wallet seed; output is deliberately unredacted
 
 ```
-afpay cashu wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay cashu wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -700,15 +712,15 @@ afpay cashu wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] 
 List Cashu wallets
 
 ```
-afpay cashu wallet list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run]
+afpay cashu wallet list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 
 ### `afpay cashu wallet restore`
@@ -716,15 +728,15 @@ afpay cashu wallet list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <
 Restore lost proofs from the mint, repairing counter or proof drift
 
 ```
-afpay cashu wallet restore [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay cashu wallet restore [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -735,13 +747,13 @@ Build the image if missing, run the daemon, and print the client command
 #### `container-install-release` — Download the prebuilt release image pinned to this binary
 
 ```
-afpay container install [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--mode <rest|rpc>] [--with <phoenixd|bitcoind>...] [--allow <CATEGORY=URL>...] [--btc-network <mainnet|signet>] [--btc-rpc-port <PORT>] [--btc-prune-mb <MB>] [--rebuild] [--reveal-daemon-secret]
+afpay container install [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--with <phoenixd|bitcoind>...] [--allow <CATEGORY=URL>...] [--btc-network <mainnet|signet>] [--btc-rpc-port <PORT>] [--btc-prune-mb <MB>] [--rebuild] [--reveal-daemon-secret]
 ```
 
 #### `container-install-from-source` — Compile from a checkout; only this shape accepts --features and --context
 
 ```
-afpay container install [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--mode <rest|rpc>] [--with <phoenixd|bitcoind>...] [--allow <CATEGORY=URL>...] [--btc-network <mainnet|signet>] [--btc-rpc-port <PORT>] [--btc-prune-mb <MB>] --from-source [--features <FEATURES>] [--context <DIR>] [--reveal-daemon-secret]
+afpay container install [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--with <phoenixd|bitcoind>...] [--allow <CATEGORY=URL>...] [--btc-network <mainnet|signet>] [--btc-rpc-port <PORT>] [--btc-prune-mb <MB>] --from-source [--features <FEATURES>] [--context <DIR>] [--reveal-daemon-secret]
 ```
 
 Arguments across every shape above:
@@ -751,7 +763,6 @@ Arguments across every shape above:
 | `--runtime` | Container runtime; auto-detected when omitted |
 | `--name` | Container name |
 | `--port` | Daemon port, published on 127.0.0.1 |
-| `--mode` | Server mode: rest (HTTP + bearer key) or rpc (gRPC + PSK) |
 | `--with` | Bundled daemon to install and enable |
 | `--allow` | Operator allowlist entry; a public listener refuses to start without one. Categories: mint, esplora, sol-rpc, evm-rpc, btc-core, btc-electrum, ln |
 | `--btc-network` | Bitcoin network when --with bitcoind |
@@ -784,7 +795,7 @@ Output: raw bytes on success; rejects `--output` and `--output-to`; redirect wit
 Report whether the daemon is running, with its endpoint and client command
 
 ```
-afpay container status [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--mode <rest|rpc>] [--reveal-daemon-secret]
+afpay container status [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--reveal-daemon-secret]
 ```
 
 | Argument | Meaning |
@@ -792,7 +803,6 @@ afpay container status [--runtime <docker|podman|apple>] [--name <NAME>] [--port
 | `--runtime` | Container runtime; auto-detected when omitted |
 | `--name` | Container name |
 | `--port` | Daemon port, published on 127.0.0.1 |
-| `--mode` | Server mode: rest (HTTP + bearer key) or rpc (gRPC + PSK) |
 | `--reveal-daemon-secret` | Print the generated daemon credential and the credential-bearing client command |
 
 ### `afpay container uninstall`
@@ -828,15 +838,15 @@ afpay evm backup [--data-dir <DIR>] [--archive-out <PATH>] [--wallet <WALLET_ID>
 EVM balance
 
 ```
-afpay evm balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>]
+afpay evm balance [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (omit to show every EVM wallet) |
 
@@ -845,15 +855,15 @@ afpay evm balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:P
 Update one EVM wallet's settings
 
 ```
-afpay evm config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>] [--evm-rpc-endpoint <URL>...] [--chain-id <ID>]
+afpay evm config set [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>] [--evm-rpc-endpoint <URL>...] [--chain-id <ID>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--label` | New wallet label |
@@ -865,15 +875,15 @@ afpay evm config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOS
 Show one EVM wallet's configuration
 
 ```
-afpay evm config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay evm config show [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -882,15 +892,15 @@ afpay evm config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HO
 Register a custom EVM token for balance tracking
 
 ```
-afpay evm config token-add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL> --address <ADDRESS> [--decimals <N>]
+afpay evm config token-add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL> --address <ADDRESS> [--decimals <N>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--symbol` | Token symbol, e.g. dai |
@@ -902,15 +912,15 @@ afpay evm config token-add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoin
 Unregister a custom EVM token
 
 ```
-afpay evm config token-remove [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL>
+afpay evm config token-remove [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--symbol` | Token symbol to remove |
@@ -920,15 +930,15 @@ afpay evm config token-remove [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endp
 Add a EVM network or wallet spend limit
 
 ```
-afpay evm limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT> [--token <TOKEN>]
+afpay evm limit add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT> [--token <TOKEN>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID; omit for a limit covering the whole network |
 | `--window` | Rolling window, e.g. 30m, 1h, 24h, 7d |
@@ -940,15 +950,15 @@ afpay evm limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST
 Show the wallet's receive address
 
 ```
-afpay evm receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>]
+afpay evm receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (auto-selected if omitted) |
 | `--onchain-memo` | Memo recorded with the request |
@@ -958,7 +968,7 @@ afpay evm receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:P
 Restore EVM wallet data from a .tar.zst archive
 
 ```
-afpay evm restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <URL>]
+afpay evm restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
@@ -966,22 +976,22 @@ afpay evm restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-u
 | `ARCHIVE` | Path to the backup archive |
 | `--data-dir` | Wallet and data directory |
 | `--dangerously-overwrite` | Clear existing data before restoring instead of merging |
-| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step |
+| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 
 ### `afpay evm send`
 
 Send the chain's native token or an ERC-20
 
 ```
-afpay evm send [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --to <ADDRESS> --amount <BASE_UNITS> --token <TOKEN> [--chain-id <ID>] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...] [--idempotency-key <KEY>]
+afpay evm send [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --to <ADDRESS> --amount <BASE_UNITS> --token <TOKEN> [--chain-id <ID>] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--to` | Recipient address (0x…) |
 | `--amount` | Amount in base units (wei for ETH) |
@@ -990,22 +1000,21 @@ afpay evm send [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT
 | `--wallet` | Source wallet ID (auto-selected if omitted) |
 | `--onchain-memo` | On-chain memo, sent with the transaction |
 | `--local-memo` | Local bookkeeping annotation; bare text is stored as note=<text> |
-| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body replays the first response instead of re-broadcasting |
 
 ### `afpay evm wallet close`
 
 Close a EVM wallet
 
 ```
-afpay evm wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
+afpay evm wallet close [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--dangerously-skip-balance-check-and-may-lose-money` | Close even if the wallet still holds funds |
@@ -1015,34 +1024,35 @@ afpay evm wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <H
 Create an EVM chain wallet
 
 ```
-afpay evm wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --evm-rpc-endpoint <URL>... [--chain-id <ID>] [--label <LABEL>]
+afpay evm wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --evm-rpc-endpoint <URL>... [--chain-id <ID>] [--label <LABEL>] [--idempotency-key <KEY>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--evm-rpc-endpoint` | EVM JSON-RPC endpoint; repeat to set the failover order |
 | `--chain-id` | EVM chain ID |
 | `--label` | Optional wallet label |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body reports the wallet the first call created instead of generating a second key |
 
 ### `afpay evm wallet dangerously-show-seed`
 
 Reveal the EVM wallet seed; output is deliberately unredacted
 
 ```
-afpay evm wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay evm wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -1051,15 +1061,15 @@ afpay evm wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [-
 List EVM wallets
 
 ```
-afpay evm wallet list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run]
+afpay evm wallet list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 
 ### `afpay global backup`
@@ -1081,15 +1091,15 @@ afpay global backup [--data-dir <DIR>] [--archive-out <PATH>] [--extra-dir <LABE
 Read the runtime configuration, or one value by dot-path
 
 ```
-afpay global config get [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [<KEY>]
+afpay global config get [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [<KEY>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `KEY` | Dot-path key, e.g. log or exchange_rate.ttl_s; omit to show everything |
 
@@ -1098,15 +1108,15 @@ afpay global config get [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <
 Set one runtime configuration value
 
 ```
-afpay global config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] <KEY> [<VALUE>...]
+afpay global config set [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] <KEY> [<VALUE>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `KEY` | Dot-path key |
 | `VALUE` | Value, or repeated values for a list-valued key |
@@ -1116,15 +1126,15 @@ afpay global config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <
 Add a global spend limit, in USD cents
 
 ```
-afpay global limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --window <DURATION> --max-spend <CENTS>
+afpay global limit add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --window <DURATION> --max-spend <CENTS>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--window` | Rolling window, e.g. 30m, 1h, 24h, 7d |
 | `--max-spend` | Maximum spend in USD cents |
@@ -1134,7 +1144,7 @@ afpay global limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <H
 Restore every network's data from a .tar.zst archive
 
 ```
-afpay global restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <URL>] [--extra-dir <LABEL=/path>...]
+afpay global restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <SOURCE>] [--extra-dir <LABEL=/path>...]
 ```
 
 | Argument | Meaning |
@@ -1142,7 +1152,7 @@ afpay global restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--p
 | `ARCHIVE` | Path to the backup archive |
 | `--data-dir` | Wallet and data directory |
 | `--dangerously-overwrite` | Clear existing data before restoring instead of merging |
-| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step |
+| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--extra-dir` | Also restore this directory from LABEL |
 
 ### `afpay history list`
@@ -1150,15 +1160,15 @@ afpay global restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--p
 List history records from the local store
 
 ```
-afpay history list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--network <cashu|ln|sol|evm|btc>] [--onchain-memo <TEXT>] [--limit <N>] [--offset <N>] [--since-epoch-s <EPOCH>] [--until-epoch-s <EPOCH>]
+afpay history list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--network <cashu|ln|sol|evm|btc>] [--onchain-memo <TEXT>] [--limit <N>] [--offset <N>] [--since-epoch-s <EPOCH>] [--until-epoch-s <EPOCH>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Filter by wallet ID |
 | `--network` | Restrict to one network |
@@ -1173,15 +1183,15 @@ afpay history list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:
 Report one transaction's current status
 
 ```
-afpay history status [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --transaction-id <TX_ID>
+afpay history status [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --transaction-id <TX_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--transaction-id` | Transaction ID |
 
@@ -1190,15 +1200,15 @@ afpay history status [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOS
 Incrementally sync backend history into the local store
 
 ```
-afpay history update [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--network <cashu|ln|sol|evm|btc>] [--limit <N>]
+afpay history update [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--network <cashu|ln|sol|evm|btc>] [--limit <N>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Sync one wallet (default: every wallet in scope) |
 | `--network` | Restrict to one network |
@@ -1209,15 +1219,15 @@ afpay history update [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOS
 Show every spend-limit rule and its usage
 
 ```
-afpay limit list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run]
+afpay limit list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 
 ### `afpay limit reconcile`
@@ -1227,13 +1237,13 @@ Force a stuck spend-ledger reservation to a terminal state (operator-only)
 #### `limit-reconcile-confirm` — Record the spend: the payment actually succeeded
 
 ```
-afpay limit reconcile [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --reservation-id <ID> --confirm --reason <TEXT>
+afpay limit reconcile [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --reservation-id <ID> --confirm --reason <TEXT>
 ```
 
 #### `limit-reconcile-cancel` — Release the reservation: the payment did not happen
 
 ```
-afpay limit reconcile [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --reservation-id <ID> --cancel --reason <TEXT>
+afpay limit reconcile [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --reservation-id <ID> --cancel --reason <TEXT>
 ```
 
 Arguments across every shape above:
@@ -1242,8 +1252,8 @@ Arguments across every shape above:
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--reservation-id` | Reservation ID |
 | `--confirm` | The payment did settle |
@@ -1255,15 +1265,15 @@ Arguments across every shape above:
 Remove a spend-limit rule by ID
 
 ```
-afpay limit remove [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --rule-id <RULE_ID>
+afpay limit remove [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --rule-id <RULE_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--rule-id` | Rule ID, e.g. r_1a2b3c4d |
 
@@ -1286,15 +1296,15 @@ afpay ln backup [--data-dir <DIR>] [--archive-out <PATH>] [--wallet <WALLET_ID>]
 Lightning balance
 
 ```
-afpay ln balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>]
+afpay ln balance [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (omit to show every Lightning wallet) |
 
@@ -1303,15 +1313,15 @@ afpay ln balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PO
 Update one Lightning wallet's settings
 
 ```
-afpay ln config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>]
+afpay ln config set [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--label` | New wallet label |
@@ -1321,15 +1331,15 @@ afpay ln config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST
 Show one Lightning wallet's configuration
 
 ```
-afpay ln config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay ln config show [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -1338,15 +1348,15 @@ afpay ln config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOS
 Add a Lightning network or wallet spend limit
 
 ```
-afpay ln limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT>
+afpay ln limit add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID; omit for a limit covering the whole network |
 | `--window` | Rolling window, e.g. 30m, 1h, 24h, 7d |
@@ -1359,13 +1369,13 @@ Create a BOLT11 invoice, or return the reusable BOLT12 offer
 #### `ln-receive` — Return the receive address or invoice and exit
 
 ```
-afpay ln receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file] [--amount-sats <SATS>]
+afpay ln receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file] [--idempotency-key <KEY>] [--amount-sats <SATS>]
 ```
 
 #### `ln-receive-wait` — Block until a matching payment settles; only this shape describes the wait
 
 ```
-afpay ln receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--amount-sats <SATS>]
+afpay ln receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--idempotency-key <KEY>] [--amount-sats <SATS>]
 ```
 
 Arguments across every shape above:
@@ -1374,14 +1384,15 @@ Arguments across every shape above:
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (auto-selected if omitted) |
 | `--wait` | Block until a matching payment settles |
 | `--wait-timeout-s` | Give up waiting after N seconds |
 | `--wait-poll-interval-ms` | Poll interval while waiting |
 | `--qr-svg-file` | Write the receive QR payload to an SVG file |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body returns the receive already placed instead of minting a second invoice |
 | `--amount-sats` | Amount in sats; omit for a BOLT12 offer |
 
 ### `afpay ln restore`
@@ -1389,7 +1400,7 @@ Arguments across every shape above:
 Restore Lightning wallet data from a .tar.zst archive
 
 ```
-afpay ln restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <URL>]
+afpay ln restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
@@ -1397,43 +1408,42 @@ afpay ln restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-ur
 | `ARCHIVE` | Path to the backup archive |
 | `--data-dir` | Wallet and data directory |
 | `--dangerously-overwrite` | Clear existing data before restoring instead of merging |
-| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step |
+| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 
 ### `afpay ln send`
 
 Pay a BOLT11 invoice or a BOLT12 offer. Lightning carries no on-chain memo, so annotate with --local-memo
 
 ```
-afpay ln send [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --to <INVOICE> [--amount-sats <SATS>] [--wallet <WALLET_ID>] [--local-memo <KEY=VALUE>...] [--idempotency-key <KEY>]
+afpay ln send [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --to <INVOICE> [--amount-sats <SATS>] [--wallet <WALLET_ID>] [--local-memo <KEY=VALUE>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--to` | BOLT11 invoice or BOLT12 offer (lno1…) |
 | `--amount-sats` | Amount in sats; required for a BOLT12 offer, rejected for BOLT11 |
 | `--wallet` | Source wallet ID (auto-selected if omitted) |
 | `--local-memo` | Local bookkeeping annotation; bare text is stored as note=<text> |
-| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body replays the first response instead of re-broadcasting |
 
 ### `afpay ln wallet close`
 
 Close a Lightning wallet
 
 ```
-afpay ln wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
+afpay ln wallet close [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--dangerously-skip-balance-check-and-may-lose-money` | Close even if the wallet still holds funds |
@@ -1445,19 +1455,19 @@ Create a Lightning wallet
 #### `ln-wallet-create-nwc` — Nostr Wallet Connect; authenticates with a connection URI
 
 ```
-afpay ln wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --backend nwc --nwc-uri-secret <URI> [--label <LABEL>]
+afpay ln wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --backend nwc --nwc-uri-secret <SOURCE> [--label <LABEL>] [--idempotency-key <KEY>]
 ```
 
 #### `ln-wallet-create-phoenixd` — phoenixd; authenticates with an endpoint and HTTP password
 
 ```
-afpay ln wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --backend phoenixd --endpoint-url <URL> --password-secret <PASSWORD> [--label <LABEL>]
+afpay ln wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --backend phoenixd --endpoint-url <URL> --password-secret <SOURCE> [--label <LABEL>] [--idempotency-key <KEY>]
 ```
 
 #### `ln-wallet-create-lnbits` — LNbits; authenticates with an endpoint and admin API key
 
 ```
-afpay ln wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --backend lnbits --endpoint-url <URL> --admin-key-secret <KEY> [--label <LABEL>]
+afpay ln wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --backend lnbits --endpoint-url <URL> --admin-key-secret <SOURCE> [--label <LABEL>] [--idempotency-key <KEY>]
 ```
 
 Arguments across every shape above:
@@ -1466,30 +1476,31 @@ Arguments across every shape above:
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--backend` | Lightning backend this wallet talks to |
-| `--nwc-uri-secret` | NWC connection URI |
+| `--nwc-uri-secret` | NWC connection URI (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--endpoint-url` | Backend HTTP endpoint |
-| `--password-secret` | phoenixd HTTP password |
-| `--admin-key-secret` | LNbits admin API key |
+| `--password-secret` | phoenixd HTTP password (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
+| `--admin-key-secret` | LNbits admin API key (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--label` | Optional wallet label |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body reports the wallet the first call created instead of generating a second key |
 
 ### `afpay ln wallet dangerously-show-seed`
 
 Reveal the Lightning wallet seed; output is deliberately unredacted
 
 ```
-afpay ln wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay ln wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -1498,16 +1509,34 @@ afpay ln wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--
 List Lightning wallets
 
 ```
-afpay ln wallet list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run]
+afpay ln wallet list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
+
+### `afpay pay confirm`
+
+Pay by confirming a plan a `send` resolved — the only command that moves money
+
+```
+afpay pay confirm [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --plan-id <PLAN_ID> [--idempotency-key <KEY>]
+```
+
+| Argument | Meaning |
+|---|---|
+| `--data-dir` | Wallet and data directory |
+| `--log` | Log filter to enable; repeat, or pass a comma-separated list |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
+| `--dry-run` | Preview the command without executing it |
+| `--plan-id` | The plan_id a `send` returned. Single-use, and refused once it expires or the terms it was resolved against change |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and plan replays the first response instead of paying twice |
 
 ### `afpay skill install`
 
@@ -1602,15 +1631,15 @@ afpay sol backup [--data-dir <DIR>] [--archive-out <PATH>] [--wallet <WALLET_ID>
 Solana balance
 
 ```
-afpay sol balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>]
+afpay sol balance [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (omit to show every Solana wallet) |
 
@@ -1619,15 +1648,15 @@ afpay sol balance [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:P
 Update one Solana wallet's settings
 
 ```
-afpay sol config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>] [--sol-rpc-endpoint <URL>...]
+afpay sol config set [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--label <LABEL>] [--sol-rpc-endpoint <URL>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--label` | New wallet label |
@@ -1638,15 +1667,15 @@ afpay sol config set [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOS
 Show one Solana wallet's configuration
 
 ```
-afpay sol config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay sol config show [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -1655,15 +1684,15 @@ afpay sol config show [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HO
 Register a custom Solana token for balance tracking
 
 ```
-afpay sol config token-add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL> --address <ADDRESS> [--decimals <N>]
+afpay sol config token-add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL> --address <ADDRESS> [--decimals <N>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--symbol` | Token symbol, e.g. dai |
@@ -1675,15 +1704,15 @@ afpay sol config token-add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoin
 Unregister a custom Solana token
 
 ```
-afpay sol config token-remove [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL>
+afpay sol config token-remove [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> --symbol <SYMBOL>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--symbol` | Token symbol to remove |
@@ -1693,15 +1722,15 @@ afpay sol config token-remove [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endp
 Add a Solana network or wallet spend limit
 
 ```
-afpay sol limit add [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT> [--token <TOKEN>]
+afpay sol limit add [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --window <DURATION> --max-spend <AMOUNT> [--token <TOKEN>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID; omit for a limit covering the whole network |
 | `--window` | Rolling window, e.g. 30m, 1h, 24h, 7d |
@@ -1715,13 +1744,13 @@ Show the wallet's receive address
 #### `sol-receive` — Return the receive address or invoice and exit
 
 ```
-afpay sol receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file]
+afpay sol receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] [--qr-svg-file] [--idempotency-key <KEY>]
 ```
 
 #### `sol-receive-wait` — Block until a matching payment settles; only this shape describes the wait
 
 ```
-afpay sol receive [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--onchain-memo <TEXT>] [--min-confirmations <N>] [--reference <KEY>]
+afpay sol receive [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--wallet <WALLET_ID>] --wait [--wait-timeout-s <SECONDS>] [--wait-poll-interval-ms <MS>] [--qr-svg-file] [--idempotency-key <KEY>] [--onchain-memo <TEXT>] [--min-confirmations <N>] [--reference <KEY>]
 ```
 
 Arguments across every shape above:
@@ -1730,14 +1759,15 @@ Arguments across every shape above:
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID (auto-selected if omitted) |
 | `--wait` | Block until a matching payment settles |
 | `--wait-timeout-s` | Give up waiting after N seconds |
 | `--wait-poll-interval-ms` | Poll interval while waiting |
 | `--qr-svg-file` | Write the receive QR payload to an SVG file |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body returns the receive already placed instead of minting a second invoice |
 | `--onchain-memo` | On-chain memo to watch for |
 | `--min-confirmations` | Confirmation depth before the payment counts as settled |
 | `--reference` | Reference key to watch for (base58) |
@@ -1747,7 +1777,7 @@ Arguments across every shape above:
 Restore Solana wallet data from a .tar.zst archive
 
 ```
-afpay sol restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <URL>]
+afpay sol restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-url-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
@@ -1755,22 +1785,22 @@ afpay sol restore <ARCHIVE> [--data-dir <DIR>] [--dangerously-overwrite] [--pg-u
 | `ARCHIVE` | Path to the backup archive |
 | `--data-dir` | Wallet and data directory |
 | `--dangerously-overwrite` | Clear existing data before restoring instead of merging |
-| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step |
+| `--pg-url-secret` | Override the PostgreSQL connection URL for the pg restore step (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 
 ### `afpay sol send`
 
 Send SOL or an SPL token
 
 ```
-afpay sol send [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --to <ADDRESS> --amount <BASE_UNITS> --token <TOKEN> [--reference <KEY>] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...] [--idempotency-key <KEY>]
+afpay sol send [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --to <ADDRESS> --amount <BASE_UNITS> --token <TOKEN> [--reference <KEY>] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--to` | Recipient Solana address (base58) |
 | `--amount` | Amount in base units (lamports for SOL) |
@@ -1779,22 +1809,21 @@ afpay sol send [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT
 | `--wallet` | Source wallet ID (auto-selected if omitted) |
 | `--onchain-memo` | On-chain memo, sent with the transaction |
 | `--local-memo` | Local bookkeeping annotation; bare text is stored as note=<text> |
-| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body replays the first response instead of re-broadcasting |
 
 ### `afpay sol wallet close`
 
 Close a Solana wallet
 
 ```
-afpay sol wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
+afpay sol wallet close [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID> [--dangerously-skip-balance-check-and-may-lose-money]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 | `--dangerously-skip-balance-check-and-may-lose-money` | Close even if the wallet still holds funds |
@@ -1804,34 +1833,35 @@ afpay sol wallet close [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <H
 Create a Solana wallet
 
 ```
-afpay sol wallet create [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --sol-rpc-endpoint <URL>... [--label <LABEL>] [--sol-cluster <mainnet-beta|devnet|testnet>]
+afpay sol wallet create [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --sol-rpc-endpoint <URL>... [--label <LABEL>] [--sol-cluster <mainnet-beta|devnet|testnet>] [--idempotency-key <KEY>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--sol-rpc-endpoint` | Solana JSON-RPC endpoint; repeat to set the failover order |
 | `--label` | Optional wallet label |
-| `--sol-cluster` | Cluster pinned to this wallet; sends elsewhere are rejected |
+| `--sol-cluster` | Intended cluster; plans warn when RPC hostname evidence differs |
+| `--idempotency-key` | Opaque key (≤128 chars); a repeat with the same key and body reports the wallet the first call created instead of generating a second key |
 
 ### `afpay sol wallet dangerously-show-seed`
 
 Reveal the Solana wallet seed; output is deliberately unredacted
 
 ```
-afpay sol wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] --wallet <WALLET_ID>
+afpay sol wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] --wallet <WALLET_ID>
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--wallet` | Wallet ID |
 
@@ -1840,31 +1870,146 @@ afpay sol wallet dangerously-show-seed [--data-dir <DIR>] [--log <FILTER>...] [-
 List Solana wallets
 
 ```
-afpay sol wallet list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run]
+afpay sol wallet list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
+
+### `afpay ui receive`
+
+Open a panel showing the receive address or invoice as a code to scan
+
+#### `ui-receive-cashu` — A Lightning invoice that mints Cashu proofs when paid
+
+```
+afpay ui receive [--data-dir <DIR>] [--log <FILTER>...] --network cashu [--mode <window|link|session>] [--wallet <WALLET_ID>] [--amount-sats <SATS>] [--onchain-memo <TEXT>]
+```
+
+#### `ui-receive-ln` — A BOLT11 invoice, or the reusable BOLT12 offer
+
+```
+afpay ui receive [--data-dir <DIR>] [--log <FILTER>...] --network ln [--mode <window|link|session>] [--wallet <WALLET_ID>] [--amount-sats <SATS>]
+```
+
+#### `ui-receive-sol` — The wallet's Solana receive address
+
+```
+afpay ui receive [--data-dir <DIR>] [--log <FILTER>...] --network sol [--mode <window|link|session>] [--wallet <WALLET_ID>]
+```
+
+#### `ui-receive-evm` — The wallet's EVM receive address
+
+```
+afpay ui receive [--data-dir <DIR>] [--log <FILTER>...] --network evm [--mode <window|link|session>] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>]
+```
+
+#### `ui-receive-btc` — The wallet's Bitcoin receive address
+
+```
+afpay ui receive [--data-dir <DIR>] [--log <FILTER>...] --network btc [--mode <window|link|session>] [--wallet <WALLET_ID>]
+```
+
+Arguments across every shape above:
+
+| Argument | Meaning |
+|---|---|
+| `--data-dir` | Wallet and data directory |
+| `--log` | Log filter to enable; repeat, or pass a comma-separated list |
+| `--network` | Network to be paid on |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
+| `--wallet` | Wallet ID (auto-selected if omitted) |
+| `--amount-sats` | Amount in sats |
+| `--onchain-memo` | Memo recorded with the request |
+
+### `afpay ui send`
+
+Open a panel showing a resolved payment and wait for a person to approve it
+
+#### `ui-send-cashu` — Melt Cashu proofs to pay a Lightning invoice
+
+```
+afpay ui send [--data-dir <DIR>] [--log <FILTER>...] --network cashu [--mode <window|session>] --to <DESTINATION> [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
+```
+
+#### `ui-send-ln` — Pay a BOLT11 invoice or a BOLT12 offer
+
+```
+afpay ui send [--data-dir <DIR>] [--log <FILTER>...] --network ln [--mode <window|session>] --to <DESTINATION> [--amount-sats <SATS>] [--wallet <WALLET_ID>] [--local-memo <KEY=VALUE>...]
+```
+
+#### `ui-send-sol` — Send SOL or an SPL token
+
+```
+afpay ui send [--data-dir <DIR>] [--log <FILTER>...] --network sol [--mode <window|session>] --to <DESTINATION> --amount <BASE_UNITS> --token <TOKEN> [--reference <KEY>] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
+```
+
+#### `ui-send-evm` — Send the chain's native token or an ERC-20
+
+```
+afpay ui send [--data-dir <DIR>] [--log <FILTER>...] --network evm [--mode <window|session>] --to <DESTINATION> --amount <BASE_UNITS> --token <TOKEN> [--chain-id <ID>] [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
+```
+
+#### `ui-send-btc` — Send BTC on-chain
+
+```
+afpay ui send [--data-dir <DIR>] [--log <FILTER>...] --network btc [--mode <window|session>] --to <DESTINATION> --amount-sats <SATS> [--wallet <WALLET_ID>] [--onchain-memo <TEXT>] [--local-memo <KEY=VALUE>...]
+```
+
+Arguments across every shape above:
+
+| Argument | Meaning |
+|---|---|
+| `--data-dir` | Wallet and data directory |
+| `--log` | Log filter to enable; repeat, or pass a comma-separated list |
+| `--network` | Network the payment leaves on |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
+| `--to` | Recipient address, BOLT11 invoice, or BOLT12 offer |
+| `--amount` | Amount in base units (lamports for SOL, wei for ETH) |
+| `--amount-sats` | Amount in satoshis |
+| `--token` | `native`, or a registered token symbol |
+| `--reference` | Reference key for order binding (base58-encoded 32 bytes) |
+| `--chain-id` | Pin the chain; a mismatched wallet returns wrong_chain |
+| `--wallet` | Source wallet ID (auto-selected if omitted) |
+| `--onchain-memo` | On-chain memo, sent with the transaction |
+| `--local-memo` | Local bookkeeping annotation; bare text is stored as note=<text> |
+
+### `afpay ui wallet`
+
+Open a panel showing every wallet and its balance
+
+```
+afpay ui wallet [--data-dir <DIR>] [--log <FILTER>...] [--wallet <WALLET_ID>] [--network <cashu|ln|sol|evm|btc>] [--cashu-check] [--mode <window|link|session>]
+```
+
+| Argument | Meaning |
+|---|---|
+| `--data-dir` | Wallet and data directory |
+| `--log` | Log filter to enable; repeat, or pass a comma-separated list |
+| `--wallet` | Wallet ID (omit to show every wallet) |
+| `--network` | Restrict to one network |
+| `--cashu-check` | Verify Cashu proofs against the mint; slower but authoritative |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
 
 ### `afpay wallet list`
 
 List wallets across every network
 
 ```
-afpay wallet list [--data-dir <DIR>] [--log <FILTER>...] [--rpc-endpoint <HOST:PORT>] [--rpc-secret <SECRET>] [--dry-run] [--network <cashu|ln|sol|evm|btc>]
+afpay wallet list [--data-dir <DIR>] [--log <FILTER>...] [--peer-url <URL>] [--peer-api-key-secret <SOURCE>] [--dry-run] [--network <cashu|ln|sol|evm|btc>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--data-dir` | Wallet and data directory |
 | `--log` | Log filter to enable; repeat, or pass a comma-separated list |
-| `--rpc-endpoint` | Forward the command to a remote afpay RPC daemon instead of running locally |
-| `--rpc-secret` | Shared secret for --rpc-endpoint |
+| `--peer-url` | Run this command on another afpay node instead of locally |
+| `--peer-api-key-secret` | The peer's --rest-api-key-secret; required with --peer-url (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, literal:VALUE) |
 | `--dry-run` | Preview the command without executing it |
 | `--network` | Restrict to one network |
 
@@ -1884,4 +2029,4 @@ Every structural failure emits one strict JSON `kind:"error"` event on stderr, l
 
 Two exit-1 codes describe the tool itself rather than the call: `cli_invocation_invalid` means the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce — and `output_setup_failed` means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established. Both are defects to report, not inputs to correct; retrying the same command cannot help.
 
-Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. No error message quotes a raw value it was given — an error event is routinely logged, and the input may hold secrets.
+Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. Error events are routinely logged, so a message never quotes a value that came from an argument able to carry a credential — a header, a cookie, a token, a password, a proxy URL, an environment value, a form field. Such an error names the argument and the shape that was wrong, and stops there. A value that cannot be a secret — a path, a dot-path, a session name — is quoted, because an error that cannot say which one it means is not worth logging either.

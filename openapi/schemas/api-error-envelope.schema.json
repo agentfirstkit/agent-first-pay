@@ -1,0 +1,72 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/api-error-envelope.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "properties": {
+        "code": {
+          "description": "Stable machine code; the HTTP status narrows it to a class.",
+          "type": "string"
+        },
+        "details": {
+          "description": "Typed conflict/recovery detail. Present on `limit_exceeded` and\n`accounting_inconsistent`, whose refusals carry ledger state the\ncaller needs in order to act."
+        },
+        "hint": {
+          "description": "A safe recovery step, when one exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "description": "Minimum delay before retrying, on transient failures that name one.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retryable": {
+          "description": "Whether an identical retry can succeed without operator action.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "description": "Always `error`.",
+      "type": "string"
+    },
+    "trace": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "duration_ms"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "kind",
+    "error",
+    "trace"
+  ],
+  "title": "ApiErrorEnvelope",
+  "type": "object"
+}

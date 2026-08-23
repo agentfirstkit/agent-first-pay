@@ -1,0 +1,25 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/wallet-list-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "network": {
+      "default": null,
+      "description": "Restrict the listing to wallets on one network.",
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "WalletListQuery",
+  "type": "object"
+}

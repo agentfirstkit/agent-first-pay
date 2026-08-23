@@ -6,7 +6,7 @@ if [ $# -lt 1 ]; then
     exit 1
 fi
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 RUNTIME="${CONTAINER_RUNTIME:-docker}"
 COMPOSE="${COMPOSE_CMD:-$RUNTIME compose}"
 ARCHIVE_PATH=$1

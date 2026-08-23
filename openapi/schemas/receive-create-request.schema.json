@@ -1,0 +1,115 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/receive-create-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "amount": {
+      "description": "Amount to request. Required for Lightning invoices; on-chain\naddresses may omit it.",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "token"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "min_confirmations": {
+      "description": "Confirmations required before the receive counts as paid.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "network": {
+      "description": "Network of the wallet, when its id is ambiguous.",
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "onchain_memo": {
+      "description": "Memo carried on-chain or in the invoice.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reference": {
+      "description": "Base58 reference key to bind an order to this receive (Solana).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wait": {
+      "additionalProperties": false,
+      "description": "Present to wait for payment before responding.",
+      "properties": {
+        "poll_interval_ms": {
+          "default": null,
+          "description": "Delay between polls.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sync_limit": {
+          "default": null,
+          "description": "Cap on transactions scanned per poll for chain-scanning backends.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timeout_s": {
+          "default": null,
+          "description": "Give up after this many seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "wallet": {
+      "description": "Wallet that will receive the funds.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet"
+  ],
+  "title": "ReceiveCreateRequest",
+  "type": "object"
+}

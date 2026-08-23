@@ -1,23 +1,31 @@
 #!/bin/sh
 set -e
+# Written into the container at run time by the compose entry point, so there
+# is nothing for a static checker to read here.
+# shellcheck source=/dev/null
 . /tmp/afpay-env.sh
 
-AFPAY_URL="http://127.0.0.1:${AFPAY_REST_PORT}/v1/afpay"
+AFPAY_BASE="http://127.0.0.1:${AFPAY_REST_PORT}"
 AUTH_HEADER="Authorization: Bearer ${AFPAY_REST_API_KEY_SECRET}"
 
-# Helper: call afpay REST API
-afpay_call() {
-    curl -s -X POST "$AFPAY_URL" \
-        -H "$AUTH_HEADER" \
-        -H "Content-Type: application/json" \
-        -d "$1"
+# GET a domain resource.
+afpay_get() {
+    curl -s "${AFPAY_BASE}$1" -H "$AUTH_HEADER"
 }
 
-# Wait for afpay REST to be ready
-until afpay_call '{"code":"version"}' 2>/dev/null | grep -q '"version"'; do
+# POST a JSON body to a domain resource.
+afpay_post() {
+    curl -s -X POST "${AFPAY_BASE}$1" \
+        -H "$AUTH_HEADER" \
+        -H "Content-Type: application/json" \
+        -d "$2"
+}
+
+# Readiness is the public discovery face: no credential, no domain state.
+until curl -sf "${AFPAY_BASE}/health" 2>/dev/null | grep -q '"status":"ready"'; do
     sleep 1
 done
-echo "afpay REST is ready"
+echo "afpay HTTP API is ready"
 
 # ── bitcoind wallet ──
 if [ -n "$BTC_RPC_PASS" ]; then
@@ -26,11 +34,11 @@ if [ -n "$BTC_RPC_PASS" ]; then
         sleep 2
     done
     # Create btc wallet if not exists
-    EXISTING=$(afpay_call '{"code":"wallet_list","id":"setup_btc","network":"btc"}' 2>/dev/null || true)
+    EXISTING=$(afpay_get "/v1/wallets?network=btc" 2>/dev/null || true)
     if echo "$EXISTING" | grep -q '"network":"btc"'; then
         echo "btc wallet already exists, skipping"
     else
-        afpay_call "{\"code\":\"wallet_create\",\"id\":\"setup_btc_create\",\"network\":\"btc\",\"label\":\"btc-local\",\"btc_backend\":\"core-rpc\",\"btc_core_url\":\"http://127.0.0.1:${BTC_RPC_PORT}\",\"btc_core_auth_secret\":\"${BTC_RPC_USER}:${BTC_RPC_PASS}\",\"btc_network\":\"${BTC_NETWORK:-mainnet}\"}"
+        afpay_post /v1/wallets "{\"network\":\"btc\",\"label\":\"btc-local\",\"backend\":\"core-rpc\",\"core_url\":\"http://127.0.0.1:${BTC_RPC_PORT}\",\"core_auth_secret\":\"${BTC_RPC_USER}:${BTC_RPC_PASS}\",\"btc_network\":\"${BTC_NETWORK:-mainnet}\"}"
         echo "btc wallet created"
     fi
 fi
@@ -57,19 +65,19 @@ if [ "${ENABLE_PHOENIXD}" = "true" ]; then
     done
 
     # Create ln wallet if not exists
-    EXISTING=$(afpay_call '{"code":"wallet_list","id":"setup_ln","network":"ln"}' 2>/dev/null || true)
+    EXISTING=$(afpay_get "/v1/wallets?network=ln" 2>/dev/null || true)
     if echo "$EXISTING" | grep -q '"network":"ln"'; then
         echo "ln wallet already exists, skipping"
     else
         while :; do
             CREATE_RESPONSE=$(
-                afpay_call "{\"code\":\"ln_wallet_create\",\"id\":\"setup_ln_create\",\"backend\":\"phoenixd\",\"endpoint\":\"http://127.0.0.1:9740\",\"password_secret\":\"${PHOENIXD_PASS}\",\"label\":\"ln-local\"}" 2>/dev/null || true
+                afpay_post /v1/wallets "{\"network\":\"ln\",\"backend\":\"phoenixd\",\"endpoint_url\":\"http://127.0.0.1:9740\",\"password_secret\":\"${PHOENIXD_PASS}\",\"label\":\"ln-local\"}" 2>/dev/null || true
             )
-            if echo "$CREATE_RESPONSE" | grep -q '"code":"wallet_created"'; then
+            if echo "$CREATE_RESPONSE" | grep -q '"kind":"result"'; then
                 echo "ln-phoenixd wallet created"
                 break
             fi
-            if echo "$CREATE_RESPONSE" | grep -q '"error_code":"network_error"'; then
+            if echo "$CREATE_RESPONSE" | grep -q '"code":"network_error"'; then
                 sleep 2
                 continue
             fi

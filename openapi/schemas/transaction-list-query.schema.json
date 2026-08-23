@@ -1,0 +1,77 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/transaction-list-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "limit": {
+      "default": null,
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "network": {
+      "default": null,
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "offset": {
+      "default": null,
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "onchain_memo": {
+      "default": null,
+      "description": "Exact on-chain memo to filter by.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "since_epoch_s": {
+      "default": null,
+      "description": "Include records created at or after this epoch second.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "until_epoch_s": {
+      "default": null,
+      "description": "Include records created before this epoch second.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "wallet": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "TransactionListQuery",
+  "type": "object"
+}

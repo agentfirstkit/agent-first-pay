@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for LnProvider (lnbits backend) against a local LNbits FakeWallet instance.
 //!
-//! Prerequisites — start LNbits with FakeWallet in Docker:
+//! Prerequisites — start LNbits with FakeWallet in Apple container:
 //!
-//!   docker run -d -p 5001:5000 --name lnbits-test \
+//!   container run -d --rm -p 127.0.0.1:5001:5000 --name lnbits-test \
 //!     -e LNBITS_BACKEND_WALLET_CLASS=FakeWallet \
 //!     -e FAKE_WALLET_SECRET=testing \
 //!     lnbits/lnbits:0.12.8

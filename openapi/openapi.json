@@ -1,0 +1,5840 @@
+{
+  "$self": "/openapi.json",
+  "components": {
+    "parameters": {
+      "IdempotencyKey": {
+        "description": "Stable caller-generated key for this exact request. afpay persists it with a canonical hash of the body for 24 hours: the same key with the same body replays the first terminal outcome instead of doing the work twice, and the same key with a different body is refused with `idempotency_conflict`. Required on every operation a retry could duplicate — a payment, a wallet whose key material would be generated again, a receive whose invoice a payer may already hold.",
+        "in": "header",
+        "name": "Idempotency-Key",
+        "required": true,
+        "schema": {
+          "maxLength": 128,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "ApiErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "description": "Stable machine code; the HTTP status narrows it to a class.",
+                "type": "string"
+              },
+              "details": {
+                "description": "Typed conflict/recovery detail. Present on `limit_exceeded` and\n`accounting_inconsistent`, whose refusals carry ledger state the\ncaller needs in order to act."
+              },
+              "hint": {
+                "description": "A safe recovery step, when one exists.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "retry_after_ms": {
+                "description": "Minimum delay before retrying, on transient failures that name one.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "retryable": {
+                "description": "Whether an identical retry can succeed without operator action.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "type": "object"
+          },
+          "kind": {
+            "description": "Always `error`.",
+            "type": "string"
+          },
+          "trace": {
+            "additionalProperties": false,
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "kind",
+          "error",
+          "trace"
+        ],
+        "title": "ApiErrorEnvelope",
+        "type": "object"
+      },
+      "BalanceListQuery": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "default": false,
+            "description": "Verify balances against the source of truth (Cashu proof check)\ninstead of trusting local state. Slower and authoritative.",
+            "type": "boolean"
+          },
+          "network": {
+            "default": null,
+            "description": "Restrict to one network.",
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet": {
+            "default": null,
+            "description": "One wallet; omit to read every wallet.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "BalanceListQuery",
+        "type": "object"
+      },
+      "BalanceListResult": {
+        "properties": {
+          "summary": {
+            "default": [],
+            "description": "Totals grouped by network and unit.",
+            "items": {
+              "description": "Per-network balance summary aggregated from individual wallets.",
+              "properties": {
+                "confirmed": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "errors": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network": {
+                  "enum": [
+                    "ln",
+                    "sol",
+                    "evm",
+                    "cashu",
+                    "btc"
+                  ],
+                  "type": "string"
+                },
+                "pending": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "unit": {
+                  "type": "string"
+                },
+                "wallet_count": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "network",
+                "wallet_count",
+                "confirmed",
+                "pending",
+                "unit",
+                "errors"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "wallets": {
+            "description": "One self-describing entry per wallet; a wallet whose provider failed\ncarries its own `error` rather than dropping out of the list.",
+            "items": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "balance": {
+                  "additionalProperties": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "properties": {
+                    "confirmed": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "pending": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "unit": {
+                      "description": "Native unit name: \"sats\", \"lamports\", \"gwei\", \"token-units\".",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "confirmed",
+                    "pending",
+                    "unit"
+                  ],
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "chain_id": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "created_at_epoch_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "mint_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "network": {
+                  "enum": [
+                    "ln",
+                    "sol",
+                    "evm",
+                    "cashu",
+                    "btc"
+                  ],
+                  "type": "string"
+                },
+                "rpc_endpoints": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "network",
+                "address",
+                "created_at_epoch_s"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "wallets"
+        ],
+        "title": "BalanceListResult",
+        "type": "object"
+      },
+      "CashuRedemptionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "description": "The bearer token to redeem.",
+            "type": "string"
+          },
+          "wallet": {
+            "description": "Destination wallet; omit to let afpay select one on the token's mint.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "CashuRedemptionRequest",
+        "type": "object"
+      },
+      "CashuRedemptionResult": {
+        "properties": {
+          "amount": {
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": "object"
+          },
+          "memo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet",
+          "amount"
+        ],
+        "title": "CashuRedemptionResult",
+        "type": "object"
+      },
+      "CashuTokenPlanRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "description": "Amount to move into the token.",
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": "object"
+          },
+          "local_memo": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "mints": {
+            "description": "Restrict wallet selection to these mints, tried in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "onchain_memo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet": {
+            "description": "Source wallet; omit to let afpay select one. The plan names the wallet\nit actually picked.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "amount"
+        ],
+        "title": "CashuTokenPlanRequest",
+        "type": "object"
+      },
+      "CashuTokenResult": {
+        "properties": {
+          "fee": {
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "reservation_ids": {
+            "default": [],
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "confirmed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "token": {
+            "description": "The bearer token. Whoever holds this string holds the funds.",
+            "type": "string"
+          },
+          "transaction_id": {
+            "type": "string"
+          },
+          "wallet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet",
+          "transaction_id",
+          "status",
+          "token"
+        ],
+        "title": "CashuTokenResult",
+        "type": "object"
+      },
+      "HealthResult": {
+        "properties": {
+          "protocol_version": {
+            "description": "Version of the JSON domain protocol the payloads below follow.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "service": {
+            "description": "Always `afpay`.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Always `ready`; the process answers this route only once it is serving.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Crate version of the process answering this request.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "version",
+          "protocol_version",
+          "status"
+        ],
+        "title": "HealthResult",
+        "type": "object"
+      },
+      "PayConfirmRequest": {
+        "additionalProperties": false,
+        "description": "The whole body of a confirm: the id of the plan that was reviewed.\n\nThe payment itself is not repeated here, and cannot be. What executes is\nread out of the stored plan, so a caller cannot approve one payment and\nsubmit another.",
+        "properties": {
+          "plan_id": {
+            "description": "The `plan_id` returned by the matching plan operation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "title": "PayConfirmRequest",
+        "type": "object"
+      },
+      "PayPlanResult": {
+        "description": "A payment resolved down to what it would actually do, and the id that\nsubmits it. Nothing has moved.",
+        "properties": {
+          "amount_native": {
+            "description": "What leaves the wallet, in the network's base unit.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expires_at_epoch_ms": {
+            "description": "After this the plan is refused and the payment must be re-planned.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fee_estimate_native": {
+            "description": "What the network is expected to charge on top. An estimate: the chain\ncharges what it charges, and the reservation is taken against this.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fee_unit": {
+            "description": "Unit both amounts are quoted in (`sats`, `lamports`, `gwei`).",
+            "type": "string"
+          },
+          "network": {
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc"
+            ],
+            "type": "string"
+          },
+          "operation": {
+            "description": "`send` or `cashu_send` — which confirm route accepts this plan.",
+            "type": "string"
+          },
+          "plan_id": {
+            "description": "Submit this to the matching confirm operation. Single-use.",
+            "type": "string"
+          },
+          "spend_debits": {
+            "default": [],
+            "description": "The spend-limit budgets confirming this plan would debit.",
+            "items": {
+              "properties": {
+                "amount_native": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "token": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "amount_native"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "to": {
+            "description": "The destination exactly as the payment will use it, normalised. Absent\nfor a Cashu token mint.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet": {
+            "description": "The wallet afpay picked, which may differ from the one requested when\nthe request left it open.",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "description": "Safety signals that must be considered before confirming the plan.",
+            "items": {
+              "description": "A review-time warning attached to a resolved payment plan.\n\nWarnings are part of the plan result rather than diagnostic logs, so a\ncaller cannot hide a safety signal by disabling log categories.",
+              "properties": {
+                "code": {
+                  "description": "Stable machine-readable warning code.",
+                  "type": "string"
+                },
+                "hint": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "plan_id",
+          "operation",
+          "network",
+          "wallet",
+          "amount_native",
+          "fee_estimate_native",
+          "fee_unit",
+          "expires_at_epoch_ms"
+        ],
+        "title": "PayPlanResult",
+        "type": "object"
+      },
+      "ReceiveClaimRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "wallet": {
+            "description": "Wallet the quote was created against.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet"
+        ],
+        "title": "ReceiveClaimRequest",
+        "type": "object"
+      },
+      "ReceiveClaimedResult": {
+        "properties": {
+          "amount": {
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": "object"
+          },
+          "wallet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet",
+          "amount"
+        ],
+        "title": "ReceiveClaimedResult",
+        "type": "object"
+      },
+      "ReceiveCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "description": "Amount to request. Required for Lightning invoices; on-chain\naddresses may omit it.",
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "min_confirmations": {
+            "description": "Confirmations required before the receive counts as paid.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network": {
+            "description": "Network of the wallet, when its id is ambiguous.",
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "onchain_memo": {
+            "description": "Memo carried on-chain or in the invoice.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "description": "Base58 reference key to bind an order to this receive (Solana).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wait": {
+            "additionalProperties": false,
+            "description": "Present to wait for payment before responding.",
+            "properties": {
+              "poll_interval_ms": {
+                "default": null,
+                "description": "Delay between polls.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "sync_limit": {
+                "default": null,
+                "description": "Cap on transactions scanned per poll for chain-scanning backends.",
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "timeout_s": {
+                "default": null,
+                "description": "Give up after this many seconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "wallet": {
+            "description": "Wallet that will receive the funds.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet"
+        ],
+        "title": "ReceiveCreateRequest",
+        "type": "object"
+      },
+      "ReceiveResult": {
+        "properties": {
+          "receive_info": {
+            "description": "The address, invoice, and/or mint quote id to hand to the payer.",
+            "properties": {
+              "address": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "invoice": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "quote_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "wallet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet",
+          "receive_info"
+        ],
+        "title": "ReceiveResult",
+        "type": "object"
+      },
+      "SendPlanRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "description": "Amount in the network's base unit. Optional only when `to` already\ncarries one.",
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "chain_id": {
+            "description": "Pin the EVM chain. A wallet on a different chain refuses with\n`forbidden` (`wrong_chain`) at plan time instead of broadcasting.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "local_memo": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Local-only bookkeeping annotation; never sent to the network.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "mints": {
+            "description": "Restrict Cashu wallet selection to these mints, tried in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "network": {
+            "description": "Network to send on, when the target is ambiguous.",
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "onchain_memo": {
+            "description": "Memo carried with the transaction.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "description": "Address, BOLT11 invoice, BOLT12 offer, or payment URI.",
+            "type": "string"
+          },
+          "wallet": {
+            "description": "Source wallet; omit to let afpay select one. The plan names the wallet\nit actually picked.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "to"
+        ],
+        "title": "SendPlanRequest",
+        "type": "object"
+      },
+      "SendResult": {
+        "properties": {
+          "amount": {
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": "object"
+          },
+          "fee": {
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "token"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "preimage": {
+            "description": "Lightning payment preimage, when the backend returned one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reservation_ids": {
+            "default": [],
+            "description": "Spend-ledger reservations this payment consumed. Empty when no spend\nlimit applied.",
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "transaction_id": {
+            "description": "Network transaction id, or the Cashu melt id.",
+            "type": "string"
+          },
+          "wallet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet",
+          "transaction_id",
+          "amount"
+        ],
+        "title": "SendResult",
+        "type": "object"
+      },
+      "SpendLimitListResult": {
+        "$defs": {
+          "DownstreamLimitNode": {
+            "properties": {
+              "downstream": {
+                "items": {
+                  "$ref": "#/$defs/DownstreamLimitNode"
+                },
+                "type": "array"
+              },
+              "endpoint": {
+                "type": "string"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "limits": {
+                "items": {
+                  "properties": {
+                    "max_spend": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "network": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "remaining": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "rule_id": {
+                      "type": "string"
+                    },
+                    "scope": {
+                      "enum": [
+                        "global_usd_cents",
+                        "network",
+                        "wallet"
+                      ],
+                      "type": "string"
+                    },
+                    "spent": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "token": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "wallet": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "window_reset_s": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "window_s": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "rule_id",
+                    "scope",
+                    "window_s",
+                    "max_spend",
+                    "spent",
+                    "remaining",
+                    "window_reset_s"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "endpoint"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "downstream": {
+            "default": [],
+            "description": "Limits enforced by afpay nodes this one forwards to.",
+            "items": {
+              "properties": {
+                "downstream": {
+                  "items": {
+                    "$ref": "#/$defs/DownstreamLimitNode"
+                  },
+                  "type": "array"
+                },
+                "endpoint": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "limits": {
+                  "items": {
+                    "properties": {
+                      "max_spend": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "network": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "remaining": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "rule_id": {
+                        "type": "string"
+                      },
+                      "scope": {
+                        "enum": [
+                          "global_usd_cents",
+                          "network",
+                          "wallet"
+                        ],
+                        "type": "string"
+                      },
+                      "spent": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "token": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "wallet": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "window_reset_s": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "window_s": {
+                        "format": "uint64",
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "rule_id",
+                      "scope",
+                      "window_s",
+                      "max_spend",
+                      "spent",
+                      "remaining",
+                      "window_reset_s"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "endpoint"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "limits": {
+            "description": "Every rule this node enforces, with the spend already consumed in the\ncurrent window.",
+            "items": {
+              "properties": {
+                "max_spend": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "remaining": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "rule_id": {
+                  "type": "string"
+                },
+                "scope": {
+                  "enum": [
+                    "global_usd_cents",
+                    "network",
+                    "wallet"
+                  ],
+                  "type": "string"
+                },
+                "spent": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "token": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "wallet": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "window_reset_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "window_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "rule_id",
+                "scope",
+                "window_s",
+                "max_spend",
+                "spent",
+                "remaining",
+                "window_reset_s"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "limits"
+        ],
+        "title": "SpendLimitListResult",
+        "type": "object"
+      },
+      "TransactionListQuery": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": null,
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network": {
+            "default": null,
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "onchain_memo": {
+            "default": null,
+            "description": "Exact on-chain memo to filter by.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "since_epoch_s": {
+            "default": null,
+            "description": "Include records created at or after this epoch second.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "until_epoch_s": {
+            "default": null,
+            "description": "Include records created before this epoch second.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wallet": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "TransactionListQuery",
+        "type": "object"
+      },
+      "TransactionListResult": {
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "amount": {
+                  "properties": {
+                    "token": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "token"
+                  ],
+                  "type": "object"
+                },
+                "confirmed_at_epoch_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "created_at_epoch_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "direction": {
+                  "enum": [
+                    "send",
+                    "receive"
+                  ],
+                  "type": "string"
+                },
+                "fee": {
+                  "properties": {
+                    "token": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "token"
+                  ],
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "local_memo": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "network": {
+                  "enum": [
+                    "ln",
+                    "sol",
+                    "evm",
+                    "cashu",
+                    "btc"
+                  ],
+                  "type": "string"
+                },
+                "onchain_memo": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "preimage": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reference_keys": {
+                  "description": "Reference keys found in the transaction (sol only, per strain-payment-method-solana).",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
+                "remote_addr": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reservation_ids": {
+                  "description": "Spend-ledger reservation ids debited for this payment. Cross-link so\n`history list` / `history status` can show which spend-limit budgets\nthis transaction consumed, and so an operator reconciling\n`AccountingInconsistent` can trace either way.",
+                  "items": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "enum": [
+                    "pending",
+                    "confirmed",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "transaction_id": {
+                  "type": "string"
+                },
+                "wallet": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "transaction_id",
+                "wallet",
+                "network",
+                "direction",
+                "amount",
+                "status",
+                "created_at_epoch_s"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "TransactionListResult",
+        "type": "object"
+      },
+      "TransactionStatusResult": {
+        "properties": {
+          "confirmations": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "item": {
+            "description": "The stored record, when afpay holds one for this transaction.",
+            "properties": {
+              "amount": {
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "value",
+                  "token"
+                ],
+                "type": "object"
+              },
+              "confirmed_at_epoch_s": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "created_at_epoch_s": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "direction": {
+                "enum": [
+                  "send",
+                  "receive"
+                ],
+                "type": "string"
+              },
+              "fee": {
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "value",
+                  "token"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "local_memo": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "network": {
+                "enum": [
+                  "ln",
+                  "sol",
+                  "evm",
+                  "cashu",
+                  "btc"
+                ],
+                "type": "string"
+              },
+              "onchain_memo": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "preimage": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reference_keys": {
+                "description": "Reference keys found in the transaction (sol only, per strain-payment-method-solana).",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "remote_addr": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reservation_ids": {
+                "description": "Spend-ledger reservation ids debited for this payment. Cross-link so\n`history list` / `history status` can show which spend-limit budgets\nthis transaction consumed, and so an operator reconciling\n`AccountingInconsistent` can trace either way.",
+                "items": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "confirmed",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "transaction_id": {
+                "type": "string"
+              },
+              "wallet": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "transaction_id",
+              "wallet",
+              "network",
+              "direction",
+              "amount",
+              "status",
+              "created_at_epoch_s"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "preimage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "confirmed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "transaction_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "status"
+        ],
+        "title": "TransactionStatusResult",
+        "type": "object"
+      },
+      "TransactionSyncRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": null,
+            "description": "Cap on records pulled from each provider.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "network": {
+            "default": null,
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "TransactionSyncRequest",
+        "type": "object"
+      },
+      "TransactionSyncResult": {
+        "properties": {
+          "records_added": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records_scanned": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "records_updated": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "wallets_synced": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "wallets_synced",
+          "records_scanned",
+          "records_added",
+          "records_updated"
+        ],
+        "title": "TransactionSyncResult",
+        "type": "object"
+      },
+      "WalletClosedResult": {
+        "properties": {
+          "wallet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet"
+        ],
+        "title": "WalletClosedResult",
+        "type": "object"
+      },
+      "WalletCreateRequest": {
+        "description": "Closed tagged union: the `network` decides which settings object is legal.\nEvery variant rejects unknown fields, so a Solana setting sent to a\nBitcoin wallet is refused instead of dropped.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "An eCash wallet held against one Cashu mint.",
+            "properties": {
+              "label": {
+                "description": "Human label; wallets are addressed by the id afpay assigns.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mint_url": {
+                "description": "Mint this wallet holds proofs against. Subject to\n`allowed_mint_urls` when the operator configured an allowlist.",
+                "type": "string"
+              },
+              "mnemonic_secret": {
+                "description": "Restore an existing wallet from its BIP39 mnemonic instead of\ngenerating one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "network": {
+                "const": "cashu",
+                "type": "string"
+              }
+            },
+            "required": [
+              "network",
+              "mint_url"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A Lightning wallet backed by NWC, phoenixd, or lnbits.",
+            "properties": {
+              "admin_key_secret": {
+                "description": "Admin key (lnbits).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "backend": {
+                "enum": [
+                  "nwc",
+                  "phoenixd",
+                  "lnbits"
+                ],
+                "type": "string"
+              },
+              "endpoint_url": {
+                "description": "Backend HTTP endpoint (phoenixd, lnbits).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "network": {
+                "const": "ln",
+                "type": "string"
+              },
+              "nwc_uri_secret": {
+                "description": "`nostr+walletconnect://…` URI (nwc).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "password_secret": {
+                "description": "HTTP password (phoenixd).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "network",
+              "backend"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A Solana wallet.",
+            "properties": {
+              "cluster": {
+                "description": "Pin the wallet to a cluster: `mainnet-beta`, `devnet`, or\n`testnet`. Sends refuse when the active endpoint resolves to a\ndifferent cluster.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mnemonic_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "network": {
+                "const": "sol",
+                "type": "string"
+              },
+              "rpc_endpoints": {
+                "default": [],
+                "description": "RPC endpoints tried in order.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "network"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An EVM wallet.",
+            "properties": {
+              "chain_id": {
+                "description": "Chain the wallet lives on; defaults to 8453 (Base).",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mnemonic_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "network": {
+                "const": "evm",
+                "type": "string"
+              },
+              "rpc_endpoints": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "network"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A Bitcoin on-chain wallet.",
+            "properties": {
+              "address_type": {
+                "description": "`taproot` or `segwit`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "backend": {
+                "description": "Chain-source backend; defaults to `esplora`.",
+                "enum": [
+                  "esplora",
+                  "core-rpc",
+                  "electrum",
+                  null
+                ],
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "btc_network": {
+                "description": "`mainnet` or `signet`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "core_auth_secret": {
+                "description": "Bitcoin Core RPC `user:pass` (core-rpc backend).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "core_url": {
+                "description": "Bitcoin Core RPC URL (core-rpc backend).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "electrum_url": {
+                "description": "Electrum server URL (electrum backend).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "esplora_url": {
+                "description": "Esplora API URL (esplora backend).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mnemonic_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "network": {
+                "const": "btc",
+                "type": "string"
+              }
+            },
+            "required": [
+              "network"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WalletCreateRequest"
+      },
+      "WalletCreatedResult": {
+        "properties": {
+          "address": {
+            "description": "Receiving address, or the backend node identity for Lightning.",
+            "type": "string"
+          },
+          "mnemonic_secret": {
+            "description": "Redacted on this transport. A generated mnemonic is readable only\nthrough the local CLI, never over HTTP.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network": {
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc"
+            ],
+            "type": "string"
+          },
+          "wallet": {
+            "description": "Wallet id afpay assigned; address every other route by it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet",
+          "network",
+          "address"
+        ],
+        "title": "WalletCreatedResult",
+        "type": "object"
+      },
+      "WalletDetailResult": {
+        "properties": {
+          "config": {
+            "description": "Stored configuration. Secret-suffixed members are redacted.",
+            "properties": {
+              "backend": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "btc_address_type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "btc_core_auth_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "btc_core_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "btc_electrum_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "btc_esplora_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "btc_network": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "created_at_epoch_s": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "custom_tokens": {
+                "items": {
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "decimals": {
+                      "format": "uint8",
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "symbol": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "symbol",
+                    "address",
+                    "decimals"
+                  ],
+                  "type": "object"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evm_chain_id": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "evm_rpc_endpoints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mint_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "network": {
+                "enum": [
+                  "ln",
+                  "sol",
+                  "evm",
+                  "cashu",
+                  "btc"
+                ],
+                "type": "string"
+              },
+              "seed_secret": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sol_cluster": {
+                "description": "Solana cluster the wallet was created on: `\"mainnet-beta\"`, `\"devnet\"`,\nor `\"testnet\"`. Pre-cluster-tagging wallets serialize without this\nfield; on load they remain `None` and payment plans surface an\nunpinned-cluster warning.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sol_rpc_endpoints": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "network"
+            ],
+            "type": "object"
+          },
+          "wallet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "wallet",
+          "config"
+        ],
+        "title": "WalletDetailResult",
+        "type": "object"
+      },
+      "WalletListQuery": {
+        "additionalProperties": false,
+        "properties": {
+          "network": {
+            "default": null,
+            "description": "Restrict the listing to wallets on one network.",
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "WalletListQuery",
+        "type": "object"
+      },
+      "WalletListResult": {
+        "properties": {
+          "wallets": {
+            "items": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "chain_id": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "created_at_epoch_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "mint_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "network": {
+                  "enum": [
+                    "ln",
+                    "sol",
+                    "evm",
+                    "cashu",
+                    "btc"
+                  ],
+                  "type": "string"
+                },
+                "rpc_endpoints": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "network",
+                "address",
+                "created_at_epoch_s"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "wallets"
+        ],
+        "title": "WalletListResult",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "Pass the API key in Authorization. Credentials in the query string are rejected.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "The HTTP domain API of an afpay daemon: wallets, balances, receives, sends, transactions, and the spend limits every payment is checked against. Sends move money and require an Idempotency-Key, which afpay persists for 24 hours and replays rather than re-broadcasting. Operations that read or write key material, spend-limit rules, or daemon config are deliberately absent from this transport: they exist only on the local CLI.",
+    "title": "Agent-First Pay API",
+    "version": "0.10.0"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "openapi": "3.2.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "get_health",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/HealthResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "security": [],
+        "summary": "Check daemon health and version",
+        "tags": [
+          "discovery"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "get_openapi_document",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/vnd.oai.openapi+json;version=3.2": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Document"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          }
+        },
+        "security": [],
+        "summary": "Read the served OpenAPI contract",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/schemas/index.json": {
+      "get": {
+        "operationId": "list_json_schemas",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Document"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          }
+        },
+        "security": [],
+        "summary": "List standalone JSON Schemas",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/schemas/{schema_file}": {
+      "get": {
+        "operationId": "get_json_schema",
+        "parameters": [
+          {
+            "description": "Schema filename ending in .schema.json",
+            "in": "path",
+            "name": "schema_file",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/schema+json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Document"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          }
+        },
+        "security": [],
+        "summary": "Read one standalone JSON Schema",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/v1/balances": {
+      "get": {
+        "operationId": "list_balances",
+        "parameters": [
+          {
+            "description": "Verify balances against the source of truth (Cashu proof check)\ninstead of trusting local state. Slower and authoritative.",
+            "in": "query",
+            "name": "check",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Verify balances against the source of truth (Cashu proof check)\ninstead of trusting local state. Slower and authoritative.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Restrict to one network.",
+            "in": "query",
+            "name": "network",
+            "required": false,
+            "schema": {
+              "description": "Restrict to one network.",
+              "enum": [
+                "ln",
+                "sol",
+                "evm",
+                "cashu",
+                "btc",
+                null
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "One wallet; omit to read every wallet.",
+            "in": "query",
+            "name": "wallet",
+            "required": false,
+            "schema": {
+              "description": "One wallet; omit to read every wallet.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/BalanceListResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Read balances across wallets",
+        "tags": [
+          "balances"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/cashu/redemptions": {
+      "post": {
+        "operationId": "redeem_cashu_token",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CashuRedemptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/CashuRedemptionResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Redeem a Cashu bearer token into a wallet. Naturally idempotent: the mint accepts each proof once, so a replayed token is refused at the source.",
+        "tags": [
+          "receives"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/cashu/token-plans": {
+      "post": {
+        "operationId": "plan_cashu_token",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CashuTokenPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/PayPlanResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Resolve a Cashu bearer-token mint into a reviewable plan. Nothing is minted and no proofs move — POST /v1/cashu/tokens with the returned plan_id is what mints. Repeating this call resolves another plan; nothing has moved, so there is no outcome to replay.",
+        "tags": [
+          "sends"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/cashu/tokens": {
+      "post": {
+        "operationId": "mint_cashu_token",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PayConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/CashuTokenResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Mint the bearer token a reviewed plan describes. The response carries the token; whoever holds that string holds the funds. A plan resolved for a send is refused here, and the same staleness, expiry and single-use rules as POST /v1/sends apply.",
+        "tags": [
+          "sends"
+        ],
+        "x-afpay-moves-money": true
+      }
+    },
+    "/v1/receives": {
+      "post": {
+        "operationId": "create_receive",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReceiveCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/ReceiveResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Create a receiving address, invoice, or mint quote. Not naturally idempotent for Lightning or Cashu — a repeat mints a second invoice while a payer may already be holding the first, and the caller then watches the wrong one. The Idempotency-Key is therefore required, and a replay returns the receive already handed out. A request that also waits for settlement holds its key Pending until it settles, so a retry gets `idempotency_in_progress` rather than a second invoice.",
+        "tags": [
+          "receives"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/receives/{quote_id}/claim": {
+      "post": {
+        "operationId": "claim_receive",
+        "parameters": [
+          {
+            "description": "Quote id returned by create_receive",
+            "in": "path",
+            "name": "quote_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReceiveClaimRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/ReceiveClaimedResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Claim a paid mint quote into the wallet. Naturally idempotent: the mint issues proofs for a quote once.",
+        "tags": [
+          "receives"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/send-plans": {
+      "post": {
+        "operationId": "plan_send",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendPlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/PayPlanResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Resolve a payment into a reviewable plan: the wallet afpay would use, what leaves it, what the network charges, and the spend budgets it debits. Nothing is broadcast and no value moves — POST /v1/sends with the returned plan_id is what pays. Repeating this call resolves another plan against current network conditions; nothing has moved, so there is no outcome to replay.",
+        "tags": [
+          "sends"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/sends": {
+      "post": {
+        "operationId": "create_send",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PayConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SendResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Pay by confirming a plan that was reviewed. The body carries only the plan_id: what executes is read from the stored plan, so an approved payment and the payment made cannot differ. The plan is refused if it expired, if it was already confirmed, or if the workspace, daemon configuration, wallet or spend rules changed since it was resolved. Checked against every spend limit before it is broadcast; the reservation is confirmed only after the network accepts it.",
+        "tags": [
+          "sends"
+        ],
+        "x-afpay-moves-money": true
+      }
+    },
+    "/v1/spend-limits": {
+      "get": {
+        "operationId": "list_spend_limits",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/SpendLimitListResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Read every spend-limit rule this daemon enforces and the spend already consumed in each window. The rules themselves are edited only on the machine that holds the ledger.",
+        "tags": [
+          "spend-limits"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/transactions": {
+      "get": {
+        "operationId": "list_transactions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "network",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ln",
+                "sol",
+                "evm",
+                "cashu",
+                "btc",
+                null
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Exact on-chain memo to filter by.",
+            "in": "query",
+            "name": "onchain_memo",
+            "required": false,
+            "schema": {
+              "description": "Exact on-chain memo to filter by.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include records created at or after this epoch second.",
+            "in": "query",
+            "name": "since_epoch_s",
+            "required": false,
+            "schema": {
+              "description": "Include records created at or after this epoch second.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include records created before this epoch second.",
+            "in": "query",
+            "name": "until_epoch_s",
+            "required": false,
+            "schema": {
+              "description": "Include records created before this epoch second.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "wallet",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/TransactionListResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "List recorded payments",
+        "tags": [
+          "transactions"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/transactions/sync": {
+      "post": {
+        "operationId": "sync_transactions",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransactionSyncRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/TransactionSyncResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Re-read recent activity from the configured providers into local history. Naturally idempotent: records reconcile by stable network transaction id, so repeating a sync updates the same rows instead of duplicating them.",
+        "tags": [
+          "transactions"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/transactions/{transaction_id}": {
+      "get": {
+        "operationId": "get_transaction",
+        "parameters": [
+          {
+            "description": "Network transaction id",
+            "in": "path",
+            "name": "transaction_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/TransactionStatusResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Read one payment's current settlement status",
+        "tags": [
+          "transactions"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/wallets": {
+      "get": {
+        "operationId": "list_wallets",
+        "parameters": [
+          {
+            "description": "Restrict the listing to wallets on one network.",
+            "in": "query",
+            "name": "network",
+            "required": false,
+            "schema": {
+              "description": "Restrict the listing to wallets on one network.",
+              "enum": [
+                "ln",
+                "sol",
+                "evm",
+                "cashu",
+                "btc",
+                null
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/WalletListResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "List wallets this daemon holds",
+        "tags": [
+          "wallets"
+        ],
+        "x-afpay-moves-money": false
+      },
+      "post": {
+        "operationId": "create_wallet",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WalletCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/WalletCreatedResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Create a wallet on one network. Not naturally idempotent — without a supplied mnemonic the daemon generates one, so a repeat derives a different id and leaves the caller holding two wallets it cannot tell apart. The Idempotency-Key is therefore required, and a replay reports the wallet the first call created. A replay never re-emits a generated mnemonic: read it on the machine that holds the wallet.",
+        "tags": [
+          "wallets"
+        ],
+        "x-afpay-moves-money": false
+      }
+    },
+    "/v1/wallets/{wallet}": {
+      "delete": {
+        "operationId": "close_wallet",
+        "parameters": [
+          {
+            "description": "Wallet id or label",
+            "in": "path",
+            "name": "wallet",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/WalletClosedResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Close a wallet. Refuses while the balance is non-zero. Naturally idempotent: a second call reports the wallet is gone.",
+        "tags": [
+          "wallets"
+        ],
+        "x-afpay-moves-money": false
+      },
+      "get": {
+        "operationId": "get_wallet",
+        "parameters": [
+          {
+            "description": "Wallet id or label",
+            "in": "path",
+            "name": "wallet",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "const": "result"
+                    },
+                    "result": {
+                      "$ref": "#/components/schemas/WalletDetailResult"
+                    },
+                    "trace": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "duration_ms": {
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "duration_ms"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "result",
+                    "trace"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful AFDATA result envelope"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer credential",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Operator policy refused the request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Method not allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Idempotency conflict, or a key whose first request is still in flight"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body exceeds the documented limit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request was valid but cannot be applied; a spend limit refusal lands here"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal contract, storage, or ledger failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            },
+            "description": "A provider or upstream node was unreachable"
+          }
+        },
+        "summary": "Read one wallet's stored configuration",
+        "tags": [
+          "wallets"
+        ],
+        "x-afpay-moves-money": false
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "The afpay daemon that served this document",
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "discovery"
+    },
+    {
+      "name": "wallets"
+    },
+    {
+      "name": "balances"
+    },
+    {
+      "name": "receives"
+    },
+    {
+      "name": "sends"
+    },
+    {
+      "name": "transactions"
+    },
+    {
+      "name": "spend-limits"
+    }
+  ]
+}

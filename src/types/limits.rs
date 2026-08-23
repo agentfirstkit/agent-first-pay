@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct SpendDebit {
     pub amount_native: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9,6 +10,7 @@ pub struct SpendDebit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub enum SpendScope {
     #[serde(alias = "all")]
     GlobalUsdCents,
@@ -37,6 +39,7 @@ pub struct SpendLimit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct SpendLimitStatus {
     pub rule_id: String,
     pub scope: SpendScope,
@@ -54,6 +57,7 @@ pub struct SpendLimitStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct DownstreamLimitNode {
     pub name: String,
     pub endpoint: String,

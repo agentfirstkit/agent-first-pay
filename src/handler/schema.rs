@@ -1,20 +1,21 @@
 /// Self-describing wire schema for the JSON Input/Output protocol.
 ///
-/// Returned by the REST `/v1/schema` endpoint and by `Input::Schema` in every
-/// other mode (pipe / rpc / cli) so an agent in any mode can discover the
-/// operation set, field shapes, and error codes without scraping `--help`
-/// or the source tree.
+/// Returned by `Input::Schema` in pipe and CLI mode so an agent on those
+/// transports can discover the operation set, field shapes, and error codes
+/// without scraping `--help` or the source tree. The HTTP API describes itself
+/// through OpenAPI instead — see `crate::api` — because a resource model has
+/// per-operation schemas this flat operation list cannot express.
 ///
-/// This builder is hand-maintained and intentionally minimal — there is no
-/// schemars dependency. The
-/// `wire_protocol_schema_listed_inputs_match_protocol_rs` test in
-/// `mode/rest.rs` catches drift between this map and the `Input` enum.
+/// This builder is hand-maintained and intentionally minimal. The
+/// `schema_includes_every_expected_input_code` test below catches drift
+/// between this map and the `Input` enum.
 pub fn wire_protocol_schema() -> serde_json::Value {
     serde_json::json!({
         "version": "v1",
         // Bump on every Input/Output/ErrorCode shape change so agents can pin
         // against a known set without re-fetching and diffing the whole doc.
-        "schema_version": "2026-07-28.1",
+        "schema_version": "2026-08-21.1",
+        "git_sha": env!("GIT_SHA"),
         "envelope": {
             "description": "Every request is wrapped in a Request envelope. Plain Input JSON also works (dry_run defaults to false).",
             "shape": {
@@ -23,11 +24,9 @@ pub fn wire_protocol_schema() -> serde_json::Value {
             }
         },
         "endpoints": {
-            "POST /v1/afpay": "Submit a Request. Returns a JSON array of strict AFDATA events.",
-            "GET /v1/schema": "This document.",
-            "Input::Schema (pipe/rpc/cli)": "Same document, returned as Output::Schema."
+            "Input::Schema (pipe/cli)": "This document, returned as Output::Schema.",
+            "GET /openapi.json": "The HTTP transport is described by its own OpenAPI document, not by this one. This document describes the pipe and CLI wire protocol; the HTTP API is a resource model over the same dispatcher, and `afpay api export` writes its contract without needing a daemon."
         },
-        "auth": "x-api-key header must match the --rest-api-key-secret the daemon was started with.",
         "inputs": [
             {"code": "version", "description": "Daemon version + uptime.", "fields": []},
             {"code": "schema", "description": "Return this self-describing wire schema.", "fields": []},
@@ -40,9 +39,10 @@ pub fn wire_protocol_schema() -> serde_json::Value {
             {"code": "balance", "description": "Get a wallet's balance.", "fields": ["id", "wallet?", "network?", "check"]},
             {"code": "receive", "description": "Generate a receive invoice/address; optionally wait for funds.", "fields": ["id", "wallet", "network?", "amount?", "onchain_memo?", "wait_until_paid", "wait_timeout_s?", "wait_poll_interval_ms?", "min_confirmations?", "reference?"]},
             {"code": "receive_claim", "description": "Claim a previously-quoted Lightning receive.", "fields": ["id", "wallet", "quote_id"]},
-            {"code": "cashu_send", "description": "Mint a Cashu token to send out-of-band.", "fields": ["id", "wallet?", "amount", "onchain_memo?", "local_memo?", "mints?", "idempotency_key?"]},
+            {"code": "cashu_send_plan", "description": "Resolve a Cashu bearer-token mint into a reviewable plan. Nothing is minted; `pay_confirm` with the returned plan_id is what mints.", "fields": ["id", "wallet?", "amount", "onchain_memo?", "local_memo?", "mints?"]},
             {"code": "cashu_receive", "description": "Redeem a Cashu token.", "fields": ["id", "wallet?", "token"]},
-            {"code": "send", "description": "Pay to an address or invoice. Amount may be in the URI or in the explicit `amount` field.", "fields": ["id", "wallet?", "network?", "to", "amount?", "onchain_memo?", "local_memo?", "mints?", "chain_id?", "idempotency_key?"]},
+            {"code": "send_plan", "description": "Resolve a payment to an address or invoice into a reviewable plan: the wallet afpay would use, what leaves it, the fee, and the spend budgets it debits. Amount may be in the URI or in the explicit `amount` field. Nothing is broadcast; `pay_confirm` with the returned plan_id is what pays.", "fields": ["id", "wallet?", "network?", "to", "amount?", "onchain_memo?", "local_memo?", "mints?", "chain_id?"]},
+            {"code": "pay_confirm", "description": "Execute a plan that was reviewed. The only operation that moves money. Carries the plan id and nothing else: what runs is read from the stored plan. Single-use, expires, and is refused when the workspace, configuration, wallet or spend rules changed since it was resolved.", "fields": ["id", "plan_id", "expect?", "idempotency_key?"]},
             {"code": "restore", "description": "Rescan a wallet from its mnemonic.", "fields": ["id", "wallet"]},
             {"code": "history", "description": "List wallet history.", "fields": ["id", "wallet?", "network?", "onchain_memo?", "limit?", "offset?", "since_epoch_s?", "until_epoch_s?"]},
             {"code": "history_status", "description": "Look up a single transaction status.", "fields": ["id", "transaction_id"]},
@@ -71,6 +71,7 @@ pub fn wire_protocol_schema() -> serde_json::Value {
             {"code": "balance", "fields": ["id", "wallet", "network", "balance", "address?", "trace"]},
             {"code": "receive", "fields": ["id", "wallet", "info", "trace"]},
             {"code": "receive_claimed", "fields": ["id", "wallet", "amount", "trace"]},
+            {"code": "pay_planned", "fields": ["id", "plan_id", "operation", "network", "wallet", "to?", "amount_native", "fee_estimate_native", "fee_unit", "onchain_memo?", "local_memo?", "spend_debits?", "warnings?", "expires_at_epoch_ms", "trace"], "description": "A resolved payment waiting to be confirmed. Nothing has moved; warnings are part of the result and cannot be hidden by log filters."},
             {"code": "cashu_sent", "fields": ["id", "wallet", "transaction_id", "status", "fee?", "token", "reservation_ids?", "trace"]},
             {"code": "cashu_received", "fields": ["id", "wallet", "amount", "memo?", "trace"]},
             {"code": "sent", "fields": ["id", "wallet", "transaction_id", "amount", "fee?", "preimage?", "reservation_ids?", "trace"]},
@@ -93,19 +94,154 @@ pub fn wire_protocol_schema() -> serde_json::Value {
             {"code": "internal_error", "retryable": false, "description": "Internal failure; check daemon logs."},
             {"code": "limit_exceeded", "retryable": false, "description": "A spend-limit rule rejected this debit. See limit_exceeded output."},
             {"code": "configure_on_daemon", "retryable": false, "description": "Mutating limits requires running on the daemon, not the client."},
-            {"code": "remote_protocol_error", "retryable": false, "description": "Upstream daemon returned malformed payload."},
-            {"code": "forbidden", "retryable": false, "description": "Operator policy (e.g. URL allowlist, --public-listen, wrong_chain, wrong_cluster, reservation_terminal) rejected the request."},
+            {"code": "remote_protocol_error", "retryable": false, "description": "An afpay peer returned a malformed payload."},
+            {"code": "peer_mismatch", "retryable": false, "description": "The node named by --peer-url is not this afpay: another service, another version, a route it does not serve, or a credential it refused. Read <peer-url>/health."},
+            {"code": "forbidden", "retryable": false, "description": "Operator policy (e.g. URL allowlist, --public-listen, wrong_chain, reservation_terminal) rejected the request."},
             {"code": "idempotency_conflict", "retryable": false, "description": "Same idempotency_key was used with a different body. Pick a new key or re-submit the exact original body."},
-            {"code": "idempotency_in_progress", "retryable": true, "description": "Another request with this idempotency_key is still running. Retry after retry_after_ms; the original response will replay."}
+            {"code": "idempotency_in_progress", "retryable": true, "description": "Another request with this idempotency_key is still running. Retry after retry_after_ms; the original response will replay."},
+            {"code": "busy", "retryable": true, "description": "Another operation holds the workspace write lock. Retry the identical request; reuse the same idempotency_key when it moves money."},
+            {"code": "plan_not_found", "retryable": false, "description": "No confirmable plan with that id: never issued here, already confirmed, already refused, or expired. Plans are single-use — to retry a confirm that may already have run, resend the original idempotency_key instead of the plan."},
+            {"code": "plan_expired", "retryable": false, "description": "The plan's window closed. Resolve the payment again; the new plan quotes a current fee."},
+            {"code": "plan_stale", "retryable": false, "description": "The workspace, daemon configuration, wallet metadata or spend-limit rules changed after this plan was resolved, so the reviewed terms no longer describe what would happen. `drifted` names which. Resolve the payment again and review the new plan."}
         ],
         "notes": [
-            "Local-only inputs (e.g. local_wallet_show_seed, limit_add) are rejected over REST/RPC with 403.",
+            "Local-only inputs (e.g. local_wallet_show_seed, limit_add) have no route in the HTTP API, and the federation client (--peer-url) refuses them before sending. There is one machine face and it withholds them.",
             "Pass `dry_run: true` to validate a request without side effects.",
             "Errors with `retryable: true` should be retried with exponential backoff.",
-            "Input::Send `chain_id` is opt-in pinning: when supplied, a mismatch refuses with `forbidden` (`wrong_chain`); when omitted, the send proceeds against the wallet's recorded chain and the daemon emits an `evm_chain_unpinned` log so observant agents can detect accidental cross-chain sends.",
-            "Input::WalletCreate `sol_cluster` enables Solana cluster pinning. The check is hostname-based heuristic — unknown / private / proxied RPC hosts yield no opinion and the check is skipped; matched mismatches refuse with `forbidden` (`wrong_cluster`).",
+            "Every operation that moves value out of a wallet is two steps: `send_plan` / `cashu_send_plan` resolve it and record a plan, and `pay_confirm` executes exactly that plan. No remote effect begins before the confirm, and no transport — CLI, pipe, HTTP, the confirm window, or federation — has a route that skips it.",
+            "Input::SendPlan `chain_id` is opt-in pinning: when supplied, a mismatch refuses with `forbidden` (`wrong_chain`) at plan time; when omitted, `pay_planned.warnings` includes `evm_chain_unpinned`.",
+            "Input::WalletCreate `sol_cluster` records intent. Hostname classification is best-effort, never a hard guarantee: unpinned, unclassifiable, or apparently mismatched plans carry a structured warning that log filters cannot hide.",
+            "A send whose network side effect succeeded but whose spend ledger could not confirm emits exactly one terminal `accounting_inconsistent` result. It never follows that result with `sent` or `cashu_sent`, and an idempotent retry replays the same inconsistency.",
             "URL allowlists (operator config): `allowed_mint_urls`, `allowed_esplora_urls`, `allowed_sol_rpc_endpoints`, `allowed_evm_rpc_endpoints`, `allowed_btc_core_urls`, `allowed_btc_electrum_urls`, `allowed_ln_endpoints`. Each defaults empty (no restriction). When `--public-listen` is set the daemon refuses to start unless at least one is non-empty.",
-            "Input::Send / Input::CashuSend accept an opaque `idempotency_key` (≤128 chars, 24h TTL). Two requests with the same key replay the first terminal output instead of re-broadcasting; mismatched bodies return idempotency_conflict.",
+            "Input::PayConfirm accepts an opaque `idempotency_key` (≤128 chars, 24h TTL). Two confirms with the same key and plan replay the first terminal output instead of paying twice; the same key aimed at a different plan returns idempotency_conflict. The plan itself is single-use regardless, so a second confirm without a key is refused with plan_not_found rather than paying again.",
         ]
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::wire_protocol_schema;
+
+    /// Every Input variant that goes over a wire must appear in the schema.
+    /// Add a new variant and forget this map, and the test names the code you
+    /// left out. Codes here are the serde-rename strings from
+    /// `src/types/protocol.rs`.
+    const EXPECTED_INPUT_CODES: &[&str] = &[
+        "version",
+        "schema",
+        "config_get",
+        "config_set",
+        "wallet_create",
+        "ln_wallet_create",
+        "wallet_close",
+        "wallet_list",
+        "balance",
+        "receive",
+        "receive_claim",
+        "cashu_send_plan",
+        "cashu_receive",
+        "send_plan",
+        "pay_confirm",
+        "restore",
+        "history",
+        "history_status",
+        "history_update",
+        "limit_add",
+        "limit_remove",
+        "limit_list",
+        "limit_set",
+        "reconcile_reservation",
+        "wallet_config_show",
+        "wallet_config_set",
+        "wallet_config_token_add",
+        "wallet_config_token_remove",
+        "close",
+    ];
+
+    #[test]
+    fn schema_includes_every_expected_input_code() {
+        let schema = wire_protocol_schema();
+        assert!(
+            schema
+                .get("git_sha")
+                .and_then(|value| value.as_str())
+                .is_some(),
+            "wire schema must identify the build that emitted it"
+        );
+        let inputs = schema
+            .get("inputs")
+            .and_then(|value| value.as_array())
+            .unwrap();
+        let listed: std::collections::HashSet<&str> = inputs
+            .iter()
+            .filter_map(|entry| entry.get("code").and_then(|value| value.as_str()))
+            .collect();
+        for expected in EXPECTED_INPUT_CODES {
+            assert!(
+                listed.contains(expected),
+                "wire_protocol_schema is missing input code `{expected}`; \
+                 add it to the inputs[] array in src/handler/schema.rs"
+            );
+        }
+    }
+
+    /// This document describes the pipe/CLI wire protocol. It must not claim
+    /// an HTTP route: the HTTP API is a resource model with its own OpenAPI
+    /// contract, and a stale endpoint map here is how an agent ends up POSTing
+    /// a command envelope at a route that no longer exists.
+    #[test]
+    fn schema_does_not_advertise_http_routes_of_its_own() {
+        let schema = wire_protocol_schema();
+        let endpoints = schema
+            .get("endpoints")
+            .and_then(|value| value.as_object())
+            .unwrap();
+        for key in endpoints.keys() {
+            assert!(
+                !key.starts_with("POST ")
+                    && !key.starts_with("PUT ")
+                    && !key.starts_with("DELETE "),
+                "wire_protocol_schema advertises the HTTP route `{key}`; the HTTP API \
+                 describes itself through GET /openapi.json"
+            );
+        }
+        assert!(endpoints.contains_key("GET /openapi.json"));
+    }
+
+    #[test]
+    fn schema_documents_all_pay_error_codes() {
+        let schema = wire_protocol_schema();
+        let errors = schema
+            .get("error_codes")
+            .and_then(|value| value.as_array())
+            .unwrap();
+        let listed: std::collections::HashSet<&str> = errors
+            .iter()
+            .filter_map(|entry| entry.get("code").and_then(|value| value.as_str()))
+            .collect();
+        // Mirror of PayError::error_code() in src/provider/mod.rs.
+        for expected in &[
+            "not_implemented",
+            "wallet_not_found",
+            "invalid_amount",
+            "network_error",
+            "internal_error",
+            "limit_exceeded",
+            "configure_on_daemon",
+            "remote_protocol_error",
+            "peer_mismatch",
+            "forbidden",
+            "busy",
+            "plan_not_found",
+            "plan_expired",
+            "plan_stale",
+        ] {
+            assert!(
+                listed.contains(expected),
+                "wire_protocol_schema error_codes missing `{expected}` — \
+                 keep in sync with PayError::error_code()"
+            );
+        }
+    }
 }

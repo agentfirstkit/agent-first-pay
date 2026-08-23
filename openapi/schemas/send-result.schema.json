@@ -1,0 +1,74 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/send-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "amount": {
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "token"
+      ],
+      "type": "object"
+    },
+    "fee": {
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "token"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "preimage": {
+      "description": "Lightning payment preimage, when the backend returned one.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reservation_ids": {
+      "default": [],
+      "description": "Spend-ledger reservations this payment consumed. Empty when no spend\nlimit applied.",
+      "items": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "transaction_id": {
+      "description": "Network transaction id, or the Cashu melt id.",
+      "type": "string"
+    },
+    "wallet": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet",
+    "transaction_id",
+    "amount"
+  ],
+  "title": "SendResult",
+  "type": "object"
+}

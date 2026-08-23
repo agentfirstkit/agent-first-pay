@@ -7,7 +7,7 @@ use crate::args::{InteractiveFrontend, InteractiveInit};
 use crate::config::VERSION;
 #[cfg(feature = "interactive")]
 use crate::handler::{self, App};
-#[cfg(all(feature = "interactive", feature = "rpc"))]
+#[cfg(all(feature = "interactive", feature = "federation"))]
 use crate::provider::remote;
 #[cfg(feature = "interactive")]
 use crate::types::*;
@@ -24,14 +24,16 @@ mod data;
 #[cfg(feature = "interactive")]
 mod interactive;
 mod pipe;
+#[cfg(any(feature = "interactive", feature = "ui"))]
+mod qr;
 #[cfg(feature = "rest")]
 pub mod rest;
-#[cfg(feature = "rpc")]
-pub mod rpc;
 #[cfg(feature = "interactive")]
 mod session;
 #[cfg(feature = "interactive")]
 mod tui;
+#[cfg(feature = "ui")]
+mod ui;
 
 #[cfg(feature = "interactive")]
 use session::{
@@ -39,9 +41,13 @@ use session::{
     mode_name, render_output,
 };
 
+/// What both interactive frontends are handed.
+///
+/// Not the frontend itself: `run` picks the entry point by that value, so a
+/// copy in here would only let one of them ask a question it has already been
+/// answered by being called.
 #[cfg(feature = "interactive")]
 struct InteractiveSessionRuntime {
-    frontend: InteractiveFrontend,
     state: SessionState,
     backend: SessionBackend,
     completer: CommandCompleter,
@@ -52,16 +58,16 @@ struct InteractiveSessionRuntime {
 pub async fn run(mode: Mode) {
     match mode {
         Mode::Cli(req) => {
-            if req.rpc_endpoint.is_some() {
-                #[cfg(feature = "rpc")]
+            if req.peer_url.is_some() {
+                #[cfg(feature = "federation")]
                 {
                     cli::run_remote(*req).await;
                 }
-                #[cfg(not(feature = "rpc"))]
+                #[cfg(not(feature = "federation"))]
                 {
                     cli::emit_cli_error(
                         "feature_unavailable",
-                        "--rpc-endpoint requires feature 'rpc'; rebuild with: cargo build --features rpc",
+                        "--peer-url requires feature 'federation'; rebuild with: cargo build --features federation",
                         req.output,
                     );
                     std::process::exit(1);
@@ -86,23 +92,25 @@ pub async fn run(mode: Mode) {
                 std::process::exit(1);
             }
         }
-        Mode::Rpc(_init) => {
-            #[cfg(feature = "rpc")]
+        #[cfg(feature = "rest")]
+        Mode::Rest(init) => rest::run_rest(init).await,
+        #[cfg(feature = "rest")]
+        Mode::ApiExport(request) => std::process::exit(run_api_export(request)),
+        Mode::Ui(_init) => {
+            #[cfg(feature = "ui")]
             {
-                rpc::run_rpc(_init).await;
+                ui::run(*_init).await;
             }
-            #[cfg(not(feature = "rpc"))]
+            #[cfg(not(feature = "ui"))]
             {
                 cli::emit_cli_error(
                     "feature_unavailable",
-                    "rpc mode requires feature 'rpc'; rebuild with: cargo build --features rpc",
-                    OutputFormat::Json,
+                    "ui panels require feature 'ui'; rebuild with: cargo build --features ui",
+                    _init.output,
                 );
                 std::process::exit(1);
             }
         }
-        #[cfg(feature = "rest")]
-        Mode::Rest(init) => rest::run_rest(init).await,
         Mode::SkillAdmin(req) => std::process::exit(crate::skill_admin::run(req)),
         Mode::Container(req) => std::process::exit(crate::container::run(req)),
         Mode::Data(_op) => {
@@ -123,6 +131,29 @@ pub async fn run(mode: Mode) {
     }
 }
 
+#[cfg(feature = "rest")]
+fn run_api_export(request: crate::args::ApiExportRequest) -> i32 {
+    match crate::api::export_contract(std::path::Path::new(&request.directory), request.force) {
+        Ok(result) => {
+            let event = agent_first_data::json_result(result)
+                .trace(serde_json::json!({"duration_ms": 0}))
+                .build();
+            if crate::output_fmt::emit_process_event(event.into(), request.output).is_err() {
+                return 4;
+            }
+            0
+        }
+        Err(error) => {
+            let event =
+                crate::output_fmt::coded_error_event(error.code(), &error.message(), error.hint());
+            if crate::output_fmt::emit_process_event(event, request.output).is_err() {
+                return 4;
+            }
+            1
+        }
+    }
+}
+
 #[cfg(feature = "interactive")]
 async fn run_interactive(init: InteractiveInit) {
     let InteractiveInit {
@@ -130,29 +161,29 @@ async fn run_interactive(init: InteractiveInit) {
         output,
         log,
         data_dir,
-        rpc_endpoint,
-        rpc_secret,
+        peer_url,
+        peer_api_key_secret,
     } = init;
 
-    let runtime = if let Some(endpoint) = rpc_endpoint {
-        #[cfg(feature = "rpc")]
+    let runtime = if let Some(peer_url) = peer_url {
+        #[cfg(feature = "federation")]
         {
             bootstrap_remote_session(
                 frontend,
                 output,
                 log.as_slice(),
                 data_dir.as_deref(),
-                &endpoint,
-                rpc_secret.as_deref(),
+                &peer_url,
+                peer_api_key_secret.as_deref(),
             )
             .await
         }
-        #[cfg(not(feature = "rpc"))]
+        #[cfg(not(feature = "federation"))]
         {
-            let _ = (endpoint, rpc_secret);
+            let _ = (peer_url, peer_api_key_secret);
             cli::emit_cli_error(
                 "feature_unavailable",
-                "--rpc-endpoint requires feature 'rpc'; rebuild with: cargo build --features rpc",
+                "--peer-url requires feature 'federation'; rebuild with: cargo build --features federation",
                 output,
             );
             return;
@@ -233,7 +264,6 @@ async fn bootstrap_local_session(
     intro_messages.push(banner_hint(frontend).to_string());
 
     Some(InteractiveSessionRuntime {
-        frontend,
         state,
         backend: SessionBackend::Local { app, rx },
         completer,
@@ -242,16 +272,17 @@ async fn bootstrap_local_session(
     })
 }
 
-#[cfg(all(feature = "interactive", feature = "rpc"))]
+#[cfg(all(feature = "interactive", feature = "federation"))]
 async fn bootstrap_remote_session(
     frontend: InteractiveFrontend,
     output: OutputFormat,
     log: &[String],
     data_dir: Option<&str>,
-    endpoint: &str,
-    rpc_secret: Option<&str>,
+    peer_url: &str,
+    peer_api_key_secret: Option<&str>,
 ) -> Option<InteractiveSessionRuntime> {
-    let (endpoint, secret) = remote::require_remote_args(Some(endpoint), rpc_secret, output);
+    let (peer_url, api_key_secret) =
+        remote::require_peer_args(Some(peer_url), peer_api_key_secret, output);
     let resolved_dir = data_dir
         .map(ToString::to_string)
         .unwrap_or_else(|| RuntimeConfig::default().data_dir);
@@ -273,22 +304,22 @@ async fn bootstrap_remote_session(
         Some(&local_config),
         serde_json::json!({
             "mode": mode_name(frontend),
-            "backend": "remote",
-            "rpc_endpoint": endpoint,
+            "backend": "peer",
+            "peer_url": peer_url,
             "data_dir": local_config.data_dir,
         }),
     ) {
         intro_messages.push(render_output(&startup, output));
     }
 
-    let ping_outputs = remote::rpc_call(endpoint, secret, &Input::Version).await;
+    let ping_outputs = remote::peer_call(peer_url, api_key_secret, &Input::Version).await;
     for value in &ping_outputs {
         if value.get("code").and_then(|v| v.as_str()) == Some("error") {
             let error = Output::Error {
                 id: None,
                 error_code: "provider_unreachable".to_string(),
                 error: format!(
-                    "remote version check failed: {}",
+                    "peer identity check failed: {}",
                     value
                         .get("error")
                         .and_then(|v| v.as_str())
@@ -313,9 +344,11 @@ async fn bootstrap_remote_session(
             if remote_version != VERSION {
                 let error = Output::Error {
                     id: None,
-                    error_code: "version_mismatch".to_string(),
-                    error: format!("version mismatch: local v{VERSION}, remote v{remote_version}"),
-                    hint: Some("upgrade both client and server to the same version".to_string()),
+                    error_code: "peer_mismatch".to_string(),
+                    error: format!(
+                        "afpay version mismatch: this node is v{VERSION}, the peer at {peer_url} is v{remote_version}"
+                    ),
+                    hint: Some("run the same afpay version on both nodes".to_string()),
                     retryable: false,
                     retry_after_ms: None,
                     trace: Trace::from_duration(0),
@@ -336,17 +369,16 @@ async fn bootstrap_remote_session(
     let completer = CommandCompleter::new(local_config.data_dir.clone(), store_ref);
 
     intro_messages.push(format!(
-        "afpay v{VERSION} {} mode (remote: {endpoint})",
+        "afpay v{VERSION} {} mode (peer: {peer_url})",
         mode_name(frontend)
     ));
     intro_messages.push(banner_hint(frontend).to_string());
 
     Some(InteractiveSessionRuntime {
-        frontend,
         state,
         backend: SessionBackend::Remote {
-            endpoint: endpoint.to_string(),
-            secret: secret.to_string(),
+            peer_url: peer_url.to_string(),
+            api_key_secret: api_key_secret.to_string(),
         },
         completer,
         history_path: format!("{}/.afpay_history", local_config.data_dir),

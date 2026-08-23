@@ -1,0 +1,38 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/balance-list-query.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "check": {
+      "default": false,
+      "description": "Verify balances against the source of truth (Cashu proof check)\ninstead of trusting local state. Slower and authoritative.",
+      "type": "boolean"
+    },
+    "network": {
+      "default": null,
+      "description": "Restrict to one network.",
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wallet": {
+      "default": null,
+      "description": "One wallet; omit to read every wallet.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "BalanceListQuery",
+  "type": "object"
+}

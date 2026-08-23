@@ -1,0 +1,34 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/transaction-sync-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "records_added": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "records_scanned": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "records_updated": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "wallets_synced": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "wallets_synced",
+    "records_scanned",
+    "records_added",
+    "records_updated"
+  ],
+  "title": "TransactionSyncResult",
+  "type": "object"
+}

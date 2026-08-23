@@ -239,6 +239,7 @@ async fn btc_receive_wait_routes_to_btc_polling_branch() {
             write_qr_svg_file: false,
             min_confirmations: None,
             reference: None,
+            idempotency_key: None,
         }),
     )
     .await;

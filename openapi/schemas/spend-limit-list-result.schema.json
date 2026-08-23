@@ -1,0 +1,286 @@
+{
+  "$defs": {
+    "DownstreamLimitNode": {
+      "properties": {
+        "downstream": {
+          "items": {
+            "$ref": "#/$defs/DownstreamLimitNode"
+          },
+          "type": "array"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "items": {
+            "properties": {
+              "max_spend": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "network": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rule_id": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "global_usd_cents",
+                  "network",
+                  "wallet"
+                ],
+                "type": "string"
+              },
+              "spent": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "token": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "wallet": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "window_reset_s": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "window_s": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "rule_id",
+              "scope",
+              "window_s",
+              "max_spend",
+              "spent",
+              "remaining",
+              "window_reset_s"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "endpoint"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/spend-limit-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "downstream": {
+      "default": [],
+      "description": "Limits enforced by afpay nodes this one forwards to.",
+      "items": {
+        "properties": {
+          "downstream": {
+            "items": {
+              "$ref": "#/$defs/DownstreamLimitNode"
+            },
+            "type": "array"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limits": {
+            "items": {
+              "properties": {
+                "max_spend": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "network": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "remaining": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "rule_id": {
+                  "type": "string"
+                },
+                "scope": {
+                  "enum": [
+                    "global_usd_cents",
+                    "network",
+                    "wallet"
+                  ],
+                  "type": "string"
+                },
+                "spent": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "token": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "wallet": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "window_reset_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "window_s": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "rule_id",
+                "scope",
+                "window_s",
+                "max_spend",
+                "spent",
+                "remaining",
+                "window_reset_s"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "endpoint"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "limits": {
+      "description": "Every rule this node enforces, with the spend already consumed in the\ncurrent window.",
+      "items": {
+        "properties": {
+          "max_spend": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "network": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remaining": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global_usd_cents",
+              "network",
+              "wallet"
+            ],
+            "type": "string"
+          },
+          "spent": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "window_reset_s": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "window_s": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rule_id",
+          "scope",
+          "window_s",
+          "max_spend",
+          "spent",
+          "remaining",
+          "window_reset_s"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "limits"
+  ],
+  "title": "SpendLimitListResult",
+  "type": "object"
+}

@@ -211,6 +211,7 @@ async fn sol_receive_wait_min_confirmations_accepts_finalized_without_depth_valu
             write_qr_svg_file: false,
             min_confirmations: Some(6),
             reference: None,
+            idempotency_key: None,
         }),
     )
     .await;

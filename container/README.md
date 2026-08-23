@@ -19,7 +19,6 @@ tail, and `uninstall` (`--purge` also drops the image + cache) to tear down.
 ```bash
 afpay container install --allow mint=https://mint.example   # see allowlist note below
 afpay container install --with phoenixd --allow ln=http://127.0.0.1:9740
-afpay container install --mode rpc             # RPC (gRPC + PSK) instead of REST
 afpay container install --from-source          # compile from this checkout
 ```
 
@@ -44,7 +43,7 @@ docker compose -f container/docker/compose.yaml up --build   # or: podman compos
 podman build -t afpay -f container/docker/Dockerfile .
 ```
 
-The entrypoint stores the REST API key or RPC PSK under the afpay data volume
+The entrypoint stores the HTTP API key under the afpay data volume
 with private file permissions and passes it via environment variable. It does not
 print secret values or include them in the `afpay` process arguments.
 

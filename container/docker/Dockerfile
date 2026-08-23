@@ -22,15 +22,10 @@ FROM rust:1-trixie AS builder
 
 ARG FEATURES="btc-esplora,cashu,ln-phoenixd,redb,rest,exchange-rate,backup"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /src
 # NOT .cargo/ (its dev path override to ../agent-first-data is absent here,
 # so agent-first-data resolves from crates.io per Cargo.lock).
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY proto/ proto/
 COPY src/ src/
 COPY tests/ tests/
 # Embedded at compile time via include_str!: the skill (skill_admin.rs) and the
@@ -117,8 +112,7 @@ COPY container/docker/entrypoint.sh /entrypoint.sh
 COPY container/docker/container-setup.sh /container-setup.sh
 RUN chmod +x /entrypoint.sh /container-setup.sh
 
-ENV AFPAY_MODE=rest \
-    AFPAY_DATA_DIR=/data/afpay \
+ENV AFPAY_DATA_DIR=/data/afpay \
     BITCOIND_DATADIR=/data/bitcoind \
     PHOENIXD_DATADIR=/data/phoenixd \
     AFPAY_PORT=9401

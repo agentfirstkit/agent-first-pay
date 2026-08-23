@@ -132,6 +132,18 @@ pub fn emit_process_value_with_policy(
     emitter.emit_validated_value(value)
 }
 
+/// Redact a value afpay computed rather than emitted.
+///
+/// `protocol_event` is the seam for afpay's own `Output`s, and everything a
+/// panel renders should cross it. A fee quote a panel asked a provider for is
+/// the one thing that has no `Output` to cross it through, so it crosses here —
+/// through the same redactor, on the same `_secret` convention. The alternative
+/// is a panel deciding for itself which provider fields are sensitive, which is
+/// how a second, laxer rule gets written.
+pub fn redacted_value(value: &Value) -> Value {
+    agent_first_data::redacted_value(value)
+}
+
 pub fn protocol_event(output: &Output) -> Result<Value, String> {
     let value = serde_json::to_value(output)
         .map_err(|error| format!("output serialization failed: {error}"))?;

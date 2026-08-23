@@ -1,0 +1,262 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/wallet-create-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Closed tagged union: the `network` decides which settings object is legal.\nEvery variant rejects unknown fields, so a Solana setting sent to a\nBitcoin wallet is refused instead of dropped.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "An eCash wallet held against one Cashu mint.",
+      "properties": {
+        "label": {
+          "description": "Human label; wallets are addressed by the id afpay assigns.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mint_url": {
+          "description": "Mint this wallet holds proofs against. Subject to\n`allowed_mint_urls` when the operator configured an allowlist.",
+          "type": "string"
+        },
+        "mnemonic_secret": {
+          "description": "Restore an existing wallet from its BIP39 mnemonic instead of\ngenerating one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "const": "cashu",
+          "type": "string"
+        }
+      },
+      "required": [
+        "network",
+        "mint_url"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "A Lightning wallet backed by NWC, phoenixd, or lnbits.",
+      "properties": {
+        "admin_key_secret": {
+          "description": "Admin key (lnbits).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "enum": [
+            "nwc",
+            "phoenixd",
+            "lnbits"
+          ],
+          "type": "string"
+        },
+        "endpoint_url": {
+          "description": "Backend HTTP endpoint (phoenixd, lnbits).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "const": "ln",
+          "type": "string"
+        },
+        "nwc_uri_secret": {
+          "description": "`nostr+walletconnect://…` URI (nwc).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password_secret": {
+          "description": "HTTP password (phoenixd).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "network",
+        "backend"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "A Solana wallet.",
+      "properties": {
+        "cluster": {
+          "description": "Pin the wallet to a cluster: `mainnet-beta`, `devnet`, or\n`testnet`. Sends refuse when the active endpoint resolves to a\ndifferent cluster.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mnemonic_secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "const": "sol",
+          "type": "string"
+        },
+        "rpc_endpoints": {
+          "default": [],
+          "description": "RPC endpoints tried in order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "An EVM wallet.",
+      "properties": {
+        "chain_id": {
+          "description": "Chain the wallet lives on; defaults to 8453 (Base).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mnemonic_secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "const": "evm",
+          "type": "string"
+        },
+        "rpc_endpoints": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "A Bitcoin on-chain wallet.",
+      "properties": {
+        "address_type": {
+          "description": "`taproot` or `segwit`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "description": "Chain-source backend; defaults to `esplora`.",
+          "enum": [
+            "esplora",
+            "core-rpc",
+            "electrum",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "btc_network": {
+          "description": "`mainnet` or `signet`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "core_auth_secret": {
+          "description": "Bitcoin Core RPC `user:pass` (core-rpc backend).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "core_url": {
+          "description": "Bitcoin Core RPC URL (core-rpc backend).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "electrum_url": {
+          "description": "Electrum server URL (electrum backend).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "esplora_url": {
+          "description": "Esplora API URL (esplora backend).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mnemonic_secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "const": "btc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "network"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "WalletCreateRequest"
+}

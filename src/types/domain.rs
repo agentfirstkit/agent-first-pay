@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub enum Network {
     Ln,
     Sol,
@@ -105,6 +106,7 @@ impl std::fmt::Debug for WalletCreateRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub enum Direction {
     Send,
     Receive,
@@ -112,6 +114,7 @@ pub enum Direction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub enum TxStatus {
     Pending,
     Confirmed,
@@ -123,6 +126,7 @@ pub enum TxStatus {
 // ═══════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct Amount {
     pub value: u64,
     pub token: String,
@@ -130,6 +134,7 @@ pub struct Amount {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub enum LnWalletBackend {
     Nwc,
     Phoenixd,
@@ -152,6 +157,7 @@ impl LnWalletBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub enum BtcBackend {
     Esplora,
     CoreRpc,
@@ -227,6 +233,7 @@ pub struct WalletInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct WalletSummary {
     pub id: String,
     pub network: Network,
@@ -245,6 +252,7 @@ pub struct WalletSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct BalanceInfo {
     pub confirmed: u64,
     pub pending: u64,
@@ -301,6 +309,7 @@ impl BalanceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct WalletBalanceItem {
     #[serde(flatten)]
     pub wallet: WalletSummary,
@@ -312,6 +321,7 @@ pub struct WalletBalanceItem {
 
 /// Per-network balance summary aggregated from individual wallets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct NetworkBalanceSummary {
     pub network: Network,
     pub wallet_count: usize,
@@ -354,6 +364,7 @@ impl NetworkBalanceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct ReceiveInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
@@ -364,6 +375,7 @@ pub struct ReceiveInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct HistoryRecord {
     pub transaction_id: String,
     pub wallet: String,
@@ -424,15 +436,63 @@ pub struct RestoreResult {
     pub unit: String,
 }
 
-#[cfg(feature = "interactive")]
-#[derive(Debug, Clone, Serialize)]
+/// Which money-moving operation a plan authorises.
+///
+/// The two arms are exactly the operations afpay marks `x-afpay-moves-money`
+/// on its HTTP face — the ones §9 of the Provider OpenAPI baseline puts behind
+/// plan/confirm. Confirming a plan through the route belonging to the other
+/// one is refused: an id alone never decides what happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
+pub enum PayPlanOperation {
+    /// Pay an address, invoice, or offer.
+    Send,
+    /// Move funds into a Cashu bearer token.
+    CashuSend,
+}
+
+impl PayPlanOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Send => "send",
+            Self::CashuSend => "cashu_send",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CashuSendQuoteInfo {
     pub wallet: String,
     pub amount_native: u64,
     pub fee_native: u64,
     pub fee_unit: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<PlanWarning>,
+    /// See [`SendQuoteInfo::upstream_plan_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_plan_id: Option<String>,
 }
 
+/// A review-time warning attached to a resolved payment plan.
+///
+/// Warnings are part of the plan result rather than diagnostic logs, so a
+/// caller cannot hide a safety signal by disabling log categories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
+pub struct PlanWarning {
+    /// Stable machine-readable warning code.
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// What a provider resolved about a payment before anyone agreed to make it.
+///
+/// This is the content of an afpay plan: the wallet the provider picked, the
+/// amount it read out of the destination, the fee it expects, and the spend
+/// budgets the payment would debit. Producing one moves nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendQuoteInfo {
     pub wallet: String,
@@ -441,6 +501,15 @@ pub struct SendQuoteInfo {
     pub fee_unit: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spend_debits: Vec<SpendDebit>,
+    /// Safety signals the reviewer must see before confirming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<PlanWarning>,
+    /// When the wallet lives on another afpay node, the plan that node opened
+    /// while resolving this one. The confirm submits it rather than opening a
+    /// second plan there, so the payment the peer makes is the payment this
+    /// node reviewed. `None` for every network-backed provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_plan_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

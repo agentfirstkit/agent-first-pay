@@ -2,26 +2,34 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-pay",
   "name": "Agent-First Pay",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control.",
   "intent": [
-    "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting, RPC daemon mode for multi-client sharing, and REST API mode for HTTP access — the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
+    "Give AI agents a persistent cryptocurrency payment client that supports Lightning (NWC, phoenixd, lnbits), Solana, EVM (Base, Arbitrum), eCash (Cashu), and Bitcoin on-chain (BDK + Esplora, SegWit/Taproot), with JSONL pipe mode for scripting and a single HTTP domain API — wallets, balances, receives, sends, transactions and spend limits as resources under /v1, described by an OpenAPI 3.2 contract the daemon serves at /openapi.json — which is also how one afpay node federates to another, so the agent sends payment requests as JSON and receives structured results without managing wallet connections or key material"
   ],
   "license": "MIT",
   "mutations": [
-    "Upgrade to Agent-First Data 0.31.0 and adopt its bound-action outcome, so a resolved invocation carries its own handler and runs itself instead of being routed through a separate dispatch call",
-    "Add a coverage test that drives every registered command shape through its handler, so an arm reading an argument id its shape cannot supply fails the test suite instead of silently degrading to an empty value at runtime",
-    "Stop echoing the offending token in CLI rejection messages — the message now names the failure category and the hint names the command to run — so a logged rejection never carries a value the caller supplied",
-    "Document the two exit-1 codes that describe a defect in the tool rather than the call: cli_invocation_invalid for a resolved invocation the program cannot read back, and output_setup_failed for an output sink that could not be established",
-    "Rebase the container images on Debian trixie across the builder, downloader, and runtime stages",
-    "Update alloy to 2.3"
+    "Ask for confirmation when every provider's send quote fails, instead of printing 'skipping confirmation' and returning true — an outage is not consent, so the payment now asks anyway and says the fee is unknown",
+    "Round a reservation's USD value up rather than to the nearest cent, closing the split-payment bypass where a 0.4999-cent send rounded to zero and never touched the global cap however many times it was repeated",
+    "Require every allowlist category to be decided under --public-listen — listed, or [\"*\"] to say out loud that it is open — instead of accepting one non-empty category and starting a public daemon whose other endpoints were unrestricted under a fail-closed banner",
+    "Replace POST /v1/afpay's opaque Input union with a resource model carrying a discovery face, AFDATA envelopes, redaction at the boundary and idempotency where money moves, with no route at all for anything marked local-only so a leaked bearer cannot raise its own spending limit",
+    "Ship an OpenAPI document and a JSON schema for every request and result",
+    "Drop gRPC and the encrypted RPC mode by making the federation client an HTTP client against those same routes, removing protoc as a build-time toolchain, eight direct dependencies and a hand-rolled AES-GCM layer keyed from a static secret; the README now says how to put WireGuard, an SSH tunnel or a TLS proxy in front",
+    "Let each panel choose how it reaches a person: the two watch panels offer window, link and session, while ui send withholds link because that URL is a bearer capability for moving money — answering from another device goes through session plus afui session serve",
+    "Reveal the link URL by name on the one event whose job is handing it over, with the rest of the event still redacted, and assert in a test that a link panel returns an http:// URL a person could paste",
+    "Register templates under the logical name an override author writes, keeping the file path separately, so a frontend extending layout.html.j2 resolves again instead of failing with template not found",
+    "Remove the unread TuiApp.frontend field, which had been failing this spore's own static gate under -D warnings and hiding six failing frontend tests",
+    "Take the reserved icon route from AFUI now that the page goes through UiPage, removing the last template literal in production code",
+    "Say in the skill that a limit holds the planned amount plus an estimated fee rather than the final charge, so the contract stops promising what the code does not do",
+    "Give this spore its own CI workflow, run the pinned ShellCheck there, and verify the release job builds the tag it was asked for",
+    "Upgrade Agent-First Data to 0.34.0 and Agent-First UI to 0.5.0"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.7Kf6i6HNpFxooXKQTCzfugkqq89rPCuM1mekg8hsKAQC",
+      "uri": "cmn://agentfirstkit.com/b3.BmXjdNCjzm7ChFXVQ6FeKzfhuSjt3HvfGRbfCepefMUR",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions and output formats"
     }

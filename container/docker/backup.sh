@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 RUNTIME="${CONTAINER_RUNTIME:-docker}"
 COMPOSE="${COMPOSE_CMD:-$RUNTIME compose}"
 STAMP=$(date -u +"%Y%m%dT%H%M%SZ")

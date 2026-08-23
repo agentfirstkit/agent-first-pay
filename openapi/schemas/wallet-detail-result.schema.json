@@ -1,0 +1,171 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/wallet-detail-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "config": {
+      "description": "Stored configuration. Secret-suffixed members are redacted.",
+      "properties": {
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "btc_address_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "btc_core_auth_secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "btc_core_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "btc_electrum_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "btc_esplora_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "btc_network": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at_epoch_s": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "custom_tokens": {
+          "items": {
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "decimals": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "symbol": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "address",
+              "decimals"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evm_chain_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "evm_rpc_endpoints": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mint_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "enum": [
+            "ln",
+            "sol",
+            "evm",
+            "cashu",
+            "btc"
+          ],
+          "type": "string"
+        },
+        "seed_secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sol_cluster": {
+          "description": "Solana cluster the wallet was created on: `\"mainnet-beta\"`, `\"devnet\"`,\nor `\"testnet\"`. Pre-cluster-tagging wallets serialize without this\nfield; on load they remain `None` and payment plans surface an\nunpinned-cluster warning.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sol_rpc_endpoints": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "network"
+      ],
+      "type": "object"
+    },
+    "wallet": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet",
+    "config"
+  ],
+  "title": "WalletDetailResult",
+  "type": "object"
+}

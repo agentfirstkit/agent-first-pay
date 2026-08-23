@@ -1,7 +1,6 @@
 #!/bin/sh
 set -e
 
-AFPAY_MODE="${AFPAY_MODE:-rest}"
 ENABLE_PHOENIXD="${ENABLE_PHOENIXD:-false}"
 ENABLE_BITCOIND="${ENABLE_BITCOIND:-false}"
 AFPAY_DATA_DIR="${AFPAY_DATA_DIR:-/data/afpay}"
@@ -30,67 +29,36 @@ emit_allowlist() {
 mkdir -p "$AFPAY_DATA_DIR" "$BITCOIND_DATADIR" "$PHOENIXD_DATADIR"
 chmod 700 "$AFPAY_DATA_DIR" "$BITCOIND_DATADIR" "$PHOENIXD_DATADIR" 2>/dev/null || true
 
-# ── 0. Generate secret/key per mode, persist to file ──
-case "$AFPAY_MODE" in
-    rest)
-        SECRET_FILE="${AFPAY_DATA_DIR}/rest-api-key-secret"
-        LEGACY_SECRET_FILE="${AFPAY_DATA_DIR}/rest-api-key"
-        SECRET_ENV="AFPAY_REST_API_KEY_SECRET"
-        SECRET_VAL="${AFPAY_REST_API_KEY_SECRET:-${AFPAY_REST_API_KEY:-}}"
-        SECRET_LABEL="REST API key"
-        ;;
-    rpc)
-        SECRET_FILE="${AFPAY_DATA_DIR}/rpc-secret"
-        SECRET_ENV="AFPAY_RPC_SECRET"
-        SECRET_VAL="${AFPAY_RPC_SECRET}"
-        SECRET_LABEL="RPC secret"
-        ;;
-    *)
-        echo "ERROR: unsupported AFPAY_MODE=${AFPAY_MODE} (expected: rest, rpc)"
-        exit 1
-        ;;
-esac
+# ── 0. Generate the bearer API key, persist to file ──
+SECRET_FILE="${AFPAY_DATA_DIR}/rest-api-key-secret"
+LEGACY_SECRET_FILE="${AFPAY_DATA_DIR}/rest-api-key"
+SECRET_VAL="${AFPAY_REST_API_KEY_SECRET:-}"
 
-if [ -n "$SECRET_FILE" ]; then
-    if [ ! -f "$SECRET_FILE" ] && [ -n "${LEGACY_SECRET_FILE:-}" ] && [ -f "$LEGACY_SECRET_FILE" ]; then
-        cp "$LEGACY_SECRET_FILE" "$SECRET_FILE"
-    fi
-    if [ -n "$SECRET_VAL" ]; then
-        echo "$SECRET_VAL" > "$SECRET_FILE"
-    elif [ -f "$SECRET_FILE" ]; then
-        SECRET_VAL=$(cat "$SECRET_FILE")
-    else
-        SECRET_VAL="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-        echo "$SECRET_VAL" > "$SECRET_FILE"
-    fi
-    chmod 600 "$SECRET_FILE" 2>/dev/null || true
-    export "$SECRET_ENV"="$SECRET_VAL"
+if [ ! -f "$SECRET_FILE" ] && [ -f "$LEGACY_SECRET_FILE" ]; then
+    cp "$LEGACY_SECRET_FILE" "$SECRET_FILE"
 fi
+if [ -n "$SECRET_VAL" ]; then
+    echo "$SECRET_VAL" > "$SECRET_FILE"
+elif [ -f "$SECRET_FILE" ]; then
+    SECRET_VAL=$(cat "$SECRET_FILE")
+else
+    SECRET_VAL="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    echo "$SECRET_VAL" > "$SECRET_FILE"
+fi
+chmod 600 "$SECRET_FILE" 2>/dev/null || true
+export AFPAY_REST_API_KEY_SECRET="$SECRET_VAL"
 
-# ── 0b. Generate supervisor afpay.conf based on mode ──
-case "$AFPAY_MODE" in
-    rest)
-        AFPAY_CMD="afpay --mode rest --public-listen --rest-listen 0.0.0.0:${AFPAY_PORT} --data-dir ${AFPAY_DATA_DIR}"
-        echo "========================================="
-        echo "  afpay mode: rest"
-        echo "  afpay endpoint: 0.0.0.0:${AFPAY_PORT}"
-        echo "  afpay API key:  configured (stored at ${SECRET_FILE})"
-        echo ""
-        echo "  curl -X POST http://localhost:${AFPAY_PORT}/v1/afpay \\"
-        echo "    -H \"Authorization: Bearer \$(cat ${SECRET_FILE})\" \\"
-        echo "    -H 'Content-Type: application/json' \\"
-        echo "    -d '{\"code\":\"version\"}'"
-        echo "========================================="
-        ;;
-    rpc)
-        AFPAY_CMD="afpay --mode rpc --public-listen --rpc-listen 0.0.0.0:${AFPAY_PORT} --data-dir ${AFPAY_DATA_DIR}"
-        echo "========================================="
-        echo "  afpay mode: rpc"
-        echo "  afpay endpoint: 0.0.0.0:${AFPAY_PORT}"
-        echo "  afpay RPC secret: configured (stored at ${SECRET_FILE})"
-        echo "========================================="
-        ;;
-esac
+# ── 0b. Generate supervisor afpay.conf ──
+AFPAY_CMD="afpay --mode rest --public-listen --rest-listen 0.0.0.0:${AFPAY_PORT} --data-dir ${AFPAY_DATA_DIR}"
+echo "========================================="
+echo "  afpay endpoint: 0.0.0.0:${AFPAY_PORT}"
+echo "  afpay API key:  configured (stored at ${SECRET_FILE})"
+echo ""
+echo "  curl http://localhost:${AFPAY_PORT}/health"
+echo "  curl http://localhost:${AFPAY_PORT}/openapi.json"
+echo "  curl http://localhost:${AFPAY_PORT}/v1/wallets \\"
+echo "    -H \"Authorization: Bearer \$(cat ${SECRET_FILE})\""
+echo "========================================="
 
 cat > /etc/supervisor/conf.d/afpay.conf <<EOF
 [program:afpay]
@@ -103,11 +71,6 @@ stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
 EOF
-
-# ── 0c. Setup script only works with REST mode (uses curl) ──
-if [ "$AFPAY_MODE" != "rest" ]; then
-    rm -f /etc/supervisor/conf.d/afpay-setup.conf
-fi
 
 # ── 1. bitcoind: generate random RPC password, write bitcoin.conf ──
 if [ "$ENABLE_BITCOIND" = "true" ]; then

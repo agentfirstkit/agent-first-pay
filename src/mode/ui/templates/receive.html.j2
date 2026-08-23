@@ -1,0 +1,17 @@
+{#-
+  `receive_inspect`: what to point a paying device at.
+
+  The code is the page, so it comes first. afpay draws it and serves it at
+  `document.qr.url` — a template chooses where it goes and how big it is, never
+  what it encodes. When there is nothing payable yet, `document.warning` says so
+  in place of the code rather than leaving a blank frame someone would try to
+  scan.
+-#}
+{% extends "layout.html.j2" %}
+{% block panel %}
+{% if document.qr %}<figure class="qr" data-kind="{{ document.qr.kind }}"><img src="{{ document.qr.url }}" alt="{{ document.qr.alt }}">
+<figcaption>Scan this with the paying device.</figcaption></figure>
+{% endif %}{% if document.warning %}<p class="warn">{{ document.warning }}</p>
+{% endif %}{% with fields = document.payload, class = "payload" %}{% include "fields.html.j2" %}{% endwith %}
+{% with fields = document.details, class = "details" %}{% include "fields.html.j2" %}{% endwith %}
+{% endblock %}

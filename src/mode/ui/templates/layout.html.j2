@@ -1,0 +1,28 @@
+{#-
+  The frame every afpay panel sits in.
+
+  A frontend that only wants a different body overrides `page.html.j2` and
+  inherits this; one that wants a different frame overrides this file too. The
+  `<!-- afpay:trusted-runtime -->` comment is not decoration: afpay replaces it
+  with its own nonce-bound script, and the panel that moves money will not open
+  without it.
+-#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{ document.title }} — {{ document.subject }}</title>
+<link rel="icon" href="{{ afui.app_icon_path }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ afui.base_style_path }}">
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-ui-kind="{{ document.ui_kind }}">
+<header><h1>{{ document.heading }}</h1><p class="subject">{{ document.subject }}</p></header>
+<main>
+{% block panel %}{% endblock %}
+</main>
+{% if document.footer %}<footer>{{ document.footer }}</footer>{% endif %}
+<!-- afpay:trusted-runtime -->
+</body>
+</html>

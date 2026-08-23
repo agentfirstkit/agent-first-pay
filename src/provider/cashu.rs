@@ -542,6 +542,8 @@ impl PayProvider for CashuProvider {
             amount_native: amount.value,
             fee_native: fee_sats,
             fee_unit: "sats".to_string(),
+            warnings: Vec::new(),
+            upstream_plan_id: None,
         })
     }
 
@@ -793,6 +795,8 @@ impl PayProvider for CashuProvider {
                     .saturating_add(quote.fee_reserve.to_u64()),
                 token: None,
             }],
+            warnings: Vec::new(),
+            upstream_plan_id: None,
         })
     }
 

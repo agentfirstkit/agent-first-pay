@@ -1,3 +1,5 @@
+#[cfg(feature = "rest")]
+pub mod api;
 pub mod args;
 pub mod config;
 pub mod container;

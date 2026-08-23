@@ -1,0 +1,81 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/wallet-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "wallets": {
+      "items": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chain_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "created_at_epoch_s": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mint_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network": {
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc"
+            ],
+            "type": "string"
+          },
+          "rpc_endpoints": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "network",
+          "address",
+          "created_at_epoch_s"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "wallets"
+  ],
+  "title": "WalletListResult",
+  "type": "object"
+}

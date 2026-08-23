@@ -1,0 +1,148 @@
+{
+  "count": 28,
+  "json_schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "schema_name": "afpay_schema_index",
+  "schema_version": 1,
+  "schemas": [
+    {
+      "component_name": "ApiErrorEnvelope",
+      "schema_name": "api-error-envelope",
+      "schema_url": "/schemas/api-error-envelope.schema.json"
+    },
+    {
+      "component_name": "HealthResult",
+      "schema_name": "health-result",
+      "schema_url": "/schemas/health-result.schema.json"
+    },
+    {
+      "component_name": "WalletListQuery",
+      "schema_name": "wallet-list-query",
+      "schema_url": "/schemas/wallet-list-query.schema.json"
+    },
+    {
+      "component_name": "WalletListResult",
+      "schema_name": "wallet-list-result",
+      "schema_url": "/schemas/wallet-list-result.schema.json"
+    },
+    {
+      "component_name": "WalletCreateRequest",
+      "schema_name": "wallet-create-request",
+      "schema_url": "/schemas/wallet-create-request.schema.json"
+    },
+    {
+      "component_name": "WalletCreatedResult",
+      "schema_name": "wallet-created-result",
+      "schema_url": "/schemas/wallet-created-result.schema.json"
+    },
+    {
+      "component_name": "WalletDetailResult",
+      "schema_name": "wallet-detail-result",
+      "schema_url": "/schemas/wallet-detail-result.schema.json"
+    },
+    {
+      "component_name": "WalletClosedResult",
+      "schema_name": "wallet-closed-result",
+      "schema_url": "/schemas/wallet-closed-result.schema.json"
+    },
+    {
+      "component_name": "BalanceListQuery",
+      "schema_name": "balance-list-query",
+      "schema_url": "/schemas/balance-list-query.schema.json"
+    },
+    {
+      "component_name": "BalanceListResult",
+      "schema_name": "balance-list-result",
+      "schema_url": "/schemas/balance-list-result.schema.json"
+    },
+    {
+      "component_name": "ReceiveCreateRequest",
+      "schema_name": "receive-create-request",
+      "schema_url": "/schemas/receive-create-request.schema.json"
+    },
+    {
+      "component_name": "ReceiveResult",
+      "schema_name": "receive-result",
+      "schema_url": "/schemas/receive-result.schema.json"
+    },
+    {
+      "component_name": "ReceiveClaimRequest",
+      "schema_name": "receive-claim-request",
+      "schema_url": "/schemas/receive-claim-request.schema.json"
+    },
+    {
+      "component_name": "ReceiveClaimedResult",
+      "schema_name": "receive-claimed-result",
+      "schema_url": "/schemas/receive-claimed-result.schema.json"
+    },
+    {
+      "component_name": "SendPlanRequest",
+      "schema_name": "send-plan-request",
+      "schema_url": "/schemas/send-plan-request.schema.json"
+    },
+    {
+      "component_name": "PayPlanResult",
+      "schema_name": "pay-plan-result",
+      "schema_url": "/schemas/pay-plan-result.schema.json"
+    },
+    {
+      "component_name": "PayConfirmRequest",
+      "schema_name": "pay-confirm-request",
+      "schema_url": "/schemas/pay-confirm-request.schema.json"
+    },
+    {
+      "component_name": "SendResult",
+      "schema_name": "send-result",
+      "schema_url": "/schemas/send-result.schema.json"
+    },
+    {
+      "component_name": "CashuTokenPlanRequest",
+      "schema_name": "cashu-token-plan-request",
+      "schema_url": "/schemas/cashu-token-plan-request.schema.json"
+    },
+    {
+      "component_name": "CashuTokenResult",
+      "schema_name": "cashu-token-result",
+      "schema_url": "/schemas/cashu-token-result.schema.json"
+    },
+    {
+      "component_name": "CashuRedemptionRequest",
+      "schema_name": "cashu-redemption-request",
+      "schema_url": "/schemas/cashu-redemption-request.schema.json"
+    },
+    {
+      "component_name": "CashuRedemptionResult",
+      "schema_name": "cashu-redemption-result",
+      "schema_url": "/schemas/cashu-redemption-result.schema.json"
+    },
+    {
+      "component_name": "TransactionListQuery",
+      "schema_name": "transaction-list-query",
+      "schema_url": "/schemas/transaction-list-query.schema.json"
+    },
+    {
+      "component_name": "TransactionListResult",
+      "schema_name": "transaction-list-result",
+      "schema_url": "/schemas/transaction-list-result.schema.json"
+    },
+    {
+      "component_name": "TransactionStatusResult",
+      "schema_name": "transaction-status-result",
+      "schema_url": "/schemas/transaction-status-result.schema.json"
+    },
+    {
+      "component_name": "TransactionSyncRequest",
+      "schema_name": "transaction-sync-request",
+      "schema_url": "/schemas/transaction-sync-request.schema.json"
+    },
+    {
+      "component_name": "TransactionSyncResult",
+      "schema_name": "transaction-sync-result",
+      "schema_url": "/schemas/transaction-sync-result.schema.json"
+    },
+    {
+      "component_name": "SpendLimitListResult",
+      "schema_name": "spend-limit-list-result",
+      "schema_url": "/schemas/spend-limit-list-result.schema.json"
+    }
+  ]
+}

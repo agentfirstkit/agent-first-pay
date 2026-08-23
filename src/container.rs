@@ -15,8 +15,8 @@ use agent_first_data::json_result;
 use serde_json::{Value, json};
 
 use crate::args::{
-    ContainerCliAction, ContainerInstallArgs, ContainerLogsArgs, ContainerModeArg,
-    ContainerRequest, ContainerRuntimeArg, ContainerStatusArgs, ContainerUninstallArgs,
+    ContainerCliAction, ContainerInstallArgs, ContainerLogsArgs, ContainerRequest,
+    ContainerRuntimeArg, ContainerStatusArgs, ContainerUninstallArgs,
 };
 
 /// Build context embedded in the binary and written to the cache dir at
@@ -255,7 +255,7 @@ fn install(args: ContainerInstallArgs) -> Result<Value, Fail> {
     let run = run_args(&name, &image, &extras, &allowlists, &args);
     exec_inherit(runtime.bin(), &run)?;
 
-    let secret = read_secret(runtime, &name, args.mode);
+    let secret = read_secret(runtime, &name);
     // afpay refuses to start a public listener with an empty allowlist, so warn
     // when none was provided — the daemon will crash-loop until one is set.
     let hint = if allowlists.is_empty() {
@@ -273,11 +273,9 @@ fn install(args: ContainerInstallArgs) -> Result<Value, Fail> {
             "runtime": runtime.label(),
             "image": image,
             "container": name,
-            "mode": mode_str(args.mode),
             "extras": extras.iter().map(|e| e.name).collect::<Vec<_>>(),
             "hint": hint,
         }),
-        args.mode,
         args.port,
         secret,
     ))
@@ -321,7 +319,7 @@ fn status(args: ContainerStatusArgs) -> Result<Value, Fail> {
     let name = container_name(&args.common.name);
     let running = container_running(runtime, &name);
     let secret = if running {
-        read_secret(runtime, &name, args.mode)
+        read_secret(runtime, &name)
     } else {
         None
     };
@@ -331,9 +329,7 @@ fn status(args: ContainerStatusArgs) -> Result<Value, Fail> {
             "runtime": runtime.label(),
             "container": name,
             "running": running,
-            "mode": mode_str(args.mode),
         }),
-        args.mode,
         args.port,
         secret,
     ))
@@ -469,19 +465,14 @@ fn endpoint_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-fn with_connection_fields(
-    mut result: Value,
-    mode: ContainerModeArg,
-    port: u16,
-    daemon_secret: Option<String>,
-) -> Value {
+fn with_connection_fields(mut result: Value, port: u16, daemon_secret: Option<String>) -> Value {
     if let Some(fields) = result.as_object_mut() {
         fields.insert("endpoint_url".to_string(), endpoint_url(port).into());
         fields.insert(
             "client_command_secret".to_string(),
             daemon_secret
                 .as_deref()
-                .map(|secret| client_command(mode, port, secret))
+                .map(|secret| client_command(port, secret))
                 .into(),
         );
         fields.insert("daemon_secret".to_string(), daemon_secret.into());
@@ -489,24 +480,8 @@ fn with_connection_fields(
     result
 }
 
-fn mode_str(mode: ContainerModeArg) -> &'static str {
-    match mode {
-        ContainerModeArg::Rest => "rest",
-        ContainerModeArg::Rpc => "rpc",
-    }
-}
-
-fn client_command(mode: ContainerModeArg, port: u16, secret: &str) -> String {
-    match mode {
-        ContainerModeArg::Rest => format!(
-            "curl -X POST http://127.0.0.1:{port}/v1/afpay \
-             -H \"Authorization: Bearer {secret}\" \
-             -H 'Content-Type: application/json' -d '{{\"code\":\"version\"}}'"
-        ),
-        ContainerModeArg::Rpc => {
-            format!("afpay wallet list --rpc-endpoint 127.0.0.1:{port} --rpc-secret {secret}")
-        }
-    }
+fn client_command(port: u16, secret: &str) -> String {
+    format!("curl http://127.0.0.1:{port}/v1/wallets -H \"Authorization: Bearer {secret}\"")
 }
 
 /// The Linux target triple for the image arch. Apple Container always runs
@@ -590,8 +565,6 @@ fn run_args(
         a.push(format!("{name}-{sub}:/data/{sub}"));
     }
     a.push("-e".into());
-    a.push(format!("AFPAY_MODE={}", mode_str(args.mode)));
-    a.push("-e".into());
     a.push(format!("AFPAY_PORT={}", args.port));
     for e in &EXTRAS {
         a.push("-e".into());
@@ -664,28 +637,19 @@ fn container_running(runtime: Runtime, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn secret_path(mode: ContainerModeArg) -> &'static str {
-    match mode {
-        ContainerModeArg::Rest => "/data/afpay/rest-api-key-secret",
-        ContainerModeArg::Rpc => "/data/afpay/rpc-secret",
-    }
-}
-
-fn legacy_secret_path(mode: ContainerModeArg) -> Option<&'static str> {
-    match mode {
-        ContainerModeArg::Rest => Some("/data/afpay/rest-api-key"),
-        ContainerModeArg::Rpc => None,
-    }
-}
+/// Where the entrypoint persists the daemon's bearer API key inside the data
+/// volume. The second path is what earlier images wrote; both are read so a
+/// volume created before the rename still resolves.
+const SECRET_PATHS: [&str; 2] = [
+    "/data/afpay/rest-api-key-secret",
+    "/data/afpay/rest-api-key",
+];
 
 /// Read the bearer secret the entrypoint persisted to the data volume. The
 /// entrypoint writes it on first start, so retry briefly after `run`.
-fn read_secret(runtime: Runtime, name: &str, mode: ContainerModeArg) -> Option<String> {
+fn read_secret(runtime: Runtime, name: &str) -> Option<String> {
     for attempt in 0..10 {
-        for path in [Some(secret_path(mode)), legacy_secret_path(mode)]
-            .into_iter()
-            .flatten()
-        {
+        for path in SECRET_PATHS {
             let argv = vec![
                 "exec".into(),
                 name.to_string(),
@@ -868,7 +832,6 @@ mod tests {
                 name: "afpay".into(),
             },
             port: 9401,
-            mode: ContainerModeArg::Rest,
             with: vec!["bitcoind".into()],
             allow: vec!["mint=https://mint.example".into()],
             btc_network: "mainnet".into(),
@@ -886,7 +849,6 @@ mod tests {
         assert!(a.contains(&"AFPAY_ALLOWED_MINT_URLS=https://mint.example".to_string()));
         assert!(a.contains(&"afpay-bitcoind:/data/bitcoind".to_string()));
         assert!(a.contains(&"afpay-phoenixd:/data/phoenixd".to_string()));
-        assert!(a.contains(&"AFPAY_MODE=rest".to_string()));
         assert!(a.contains(&"AFPAY_PORT=9401".to_string()));
         assert!(a.contains(&"ENABLE_BITCOIND=true".to_string()));
         assert!(a.contains(&"ENABLE_PHOENIXD=false".to_string()));
@@ -895,19 +857,17 @@ mod tests {
     }
 
     #[test]
-    fn client_command_matches_mode() {
-        let rest = client_command(ContainerModeArg::Rest, 9401, "deadbeef");
-        assert!(rest.contains("curl"));
-        assert!(rest.contains("Bearer deadbeef"));
-        let rpc = client_command(ContainerModeArg::Rpc, 9400, "cafe");
-        assert!(rpc.contains("--rpc-secret cafe"));
+    fn the_client_command_is_a_bearer_curl_against_the_http_face() {
+        let command = client_command(9401, "deadbeef");
+        assert!(command.contains("curl"));
+        assert!(command.contains("http://127.0.0.1:9401/v1/wallets"));
+        assert!(command.contains("Bearer deadbeef"));
     }
 
     #[test]
     fn container_connection_fields_follow_afdata_url_and_secret_contracts() {
         let raw = with_connection_fields(
             json!({"code": "container_status"}),
-            ContainerModeArg::Rest,
             9401,
             Some("credential-canary".to_string()),
         );

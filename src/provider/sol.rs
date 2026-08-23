@@ -1561,6 +1561,8 @@ impl PayProvider for SolProvider {
             fee_estimate_native: DEFAULT_SOL_SEND_FEE_LAMPORTS,
             fee_unit: "lamports".to_string(),
             spend_debits,
+            warnings: Vec::new(),
+            upstream_plan_id: None,
         })
     }
 

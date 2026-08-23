@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      # The runner images ship whatever ShellCheck their distribution packages
+      # — Ubuntu 24.04's is 0.9.0, two majors behind — and its rules differ from
+      # the pinned one's on real code. Provision the pin so this leg judges the
+      # tree by the same rules the local gate does.
+      - name: Setup ShellCheck
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./scripts/install-shellcheck.sh --install
+
+      # This spore has no single test script to call the check from, so it is
+      # its own step. The container entry points and the backup/restore helpers
+      # are the scripts that matter here.
+      - name: ShellCheck
+        shell: bash
+        run: ./scripts/install-shellcheck.sh --check .
+
+      - name: Install afdata skill validator
+        run: cargo install agent-first-data --locked --features skill
+
+      - name: Validate Agent Skill
+        run: afdata skill validate skills/agent-first-pay
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      # `--lib --bins --tests` is what the release gate runs for this spore, so
+      # anything that can fail a release fails here too. The integration suites
+      # are included deliberately: every test that wants a network, a wallet or
+      # a daemon is `#[ignore]`d, so what remains runs offline.
+      #
+      # Both home variables point at a throwaway directory, as the release gate
+      # does. Without them the suites would read and write the runner's real
+      # HOME, which makes results depend on what a previous step left behind.
+      - name: Tests
+        shell: bash
+        run: |
+          TEST_TMP="$(mktemp -d)"
+          export AFPAY_TEST_HOME="$TEST_TMP" AFPAY_HOME="$TEST_TMP"
+          cargo test --lib --bins --tests
+
+      # The container image pins bitcoind and phoenixd, and `cargo upgrade`
+      # cannot see them; both sat several releases behind before anything
+      # compared them against upstream. Drift is a hard failure, but an
+      # unreachable upstream is not — the check retries and then warns, so a
+      # GitHub-side network problem cannot turn into a red build here.
+      - name: Container third-party pins
+        run: bash tests/check_container_third_party_versions.sh

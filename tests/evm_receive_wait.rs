@@ -278,6 +278,7 @@ async fn evm_receive_wait_matches_onchain_memo() {
             write_qr_svg_file: false,
             min_confirmations: None,
             reference: None,
+            idempotency_key: None,
         }),
     )
     .await;
@@ -373,6 +374,7 @@ async fn evm_receive_wait_emits_chain_transaction_id() {
             write_qr_svg_file: false,
             min_confirmations: None,
             reference: None,
+            idempotency_key: None,
         }),
     )
     .await;

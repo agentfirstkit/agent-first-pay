@@ -1,0 +1,16 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/receive-claim-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "wallet": {
+      "description": "Wallet the quote was created against.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet"
+  ],
+  "title": "ReceiveClaimRequest",
+  "type": "object"
+}

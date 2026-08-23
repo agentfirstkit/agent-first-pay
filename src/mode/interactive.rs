@@ -1,5 +1,5 @@
 use super::InteractiveSessionRuntime;
-use super::session::{HostMessageKind, InteractionHost, parse_session_command};
+use super::session::{HostMessageKind, InteractionHost, PlannedPayment, parse_session_command};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::io::Write as _;
@@ -31,61 +31,12 @@ impl InteractionHost for LineHost {
         Self::emit_stdout(&text);
     }
 
-    fn confirm_send(&mut self, wallet: &str, amount: u64, to: &str) -> bool {
-        let target = if to.is_empty() {
-            "P2P cashu token".to_string()
-        } else if to.len() > 40 {
-            format!("{}...", &to[..40])
-        } else {
-            to.to_string()
-        };
-        let lines = vec![format!("  Send {amount} sats from {wallet} to {target}")];
-        match Self::prompt_with_lines(&lines, "  Confirm? [y/N]> ") {
-            Some(buf) => matches!(buf.trim(), "y" | "Y" | "yes" | "YES"),
-            None => false,
-        }
-    }
-
-    fn confirm_send_with_fee(
-        &mut self,
-        wallet: &str,
-        amount: u64,
-        fee: u64,
-        fee_unit: &str,
-    ) -> bool {
-        let total = amount + fee;
-        let mut lines = vec![format!(
-            "  Send {amount} {fee_unit} from {wallet} as P2P cashu token"
-        )];
-        if fee > 0 {
-            lines.push(format!(
-                "  Fee: {fee} {fee_unit}  (total: {total} {fee_unit})"
-            ));
-        }
-        match Self::prompt_with_lines(&lines, "  Confirm? [y/N]> ") {
-            Some(buf) => matches!(buf.trim(), "y" | "Y" | "yes" | "YES"),
-            None => false,
-        }
-    }
-
-    fn confirm_withdraw(
-        &mut self,
-        wallet: &str,
-        amount: u64,
-        fee_estimate: u64,
-        fee_unit: &str,
-        to: &str,
-    ) -> bool {
-        let target = if to.len() > 40 {
-            format!("{}...", &to[..40])
-        } else {
-            to.to_string()
-        };
-        let total = amount + fee_estimate;
-        let lines = vec![
-            format!("  Pay {amount} {fee_unit} from {wallet} to {target}"),
-            format!("  Fee estimate: {fee_estimate} {fee_unit}  (total: {total} {fee_unit})"),
-        ];
+    fn confirm_planned_payment(&mut self, plan: &PlannedPayment<'_>) -> bool {
+        let lines = plan
+            .lines()
+            .into_iter()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>();
         match Self::prompt_with_lines(&lines, "  Confirm? [y/N]> ") {
             Some(buf) => matches!(buf.trim(), "y" | "Y" | "yes" | "YES"),
             None => false,

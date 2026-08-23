@@ -1,0 +1,17 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/pay-confirm-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The whole body of a confirm: the id of the plan that was reviewed.\n\nThe payment itself is not repeated here, and cannot be. What executes is\nread out of the stored plan, so a caller cannot approve one payment and\nsubmit another.",
+  "properties": {
+    "plan_id": {
+      "description": "The `plan_id` returned by the matching plan operation.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "plan_id"
+  ],
+  "title": "PayConfirmRequest",
+  "type": "object"
+}

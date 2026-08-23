@@ -1,6 +1,6 @@
 use crate::args::InteractiveFrontend;
 use crate::handler::{self, App};
-#[cfg(feature = "rpc")]
+#[cfg(feature = "federation")]
 use crate::provider::remote;
 use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
@@ -754,7 +754,7 @@ fn network_config_completion(
         let flags = match network {
             "evm" => vec![
                 "--label",
-                "--rpc-endpoint",
+                "--evm-rpc-endpoint",
                 "--chain-id",
                 "--symbol",
                 "--address",
@@ -763,7 +763,7 @@ fn network_config_completion(
             ],
             "sol" => vec![
                 "--label",
-                "--rpc-endpoint",
+                "--sol-rpc-endpoint",
                 "--symbol",
                 "--address",
                 "--decimals",
@@ -874,22 +874,6 @@ fn inject_wallet(argv: &mut Vec<String>, state: &SessionState) {
 // QR Code Rendering
 // ═══════════════════════════════════════════
 
-#[cfg(feature = "interactive")]
-fn render_qr_svg(data: &str) -> Result<String, String> {
-    use qrcode::QrCode;
-    use qrcode::render::svg;
-
-    let code = QrCode::new(data.as_bytes()).map_err(|e| format!("QR encode error: {e}"))?;
-    let rendered = code
-        .render::<svg::Color<'_>>()
-        .min_dimensions(320, 320)
-        .dark_color(svg::Color("#000000"))
-        .light_color(svg::Color("#ffffff"))
-        .quiet_zone(true)
-        .build();
-    Ok(rendered)
-}
-
 fn write_qr_svg_file(data_dir: &str, kind: &str, payload: &str) -> Result<String, String> {
     let directory = Path::new(data_dir).join("qr-codes");
     std::fs::create_dir_all(&directory)
@@ -901,7 +885,7 @@ fn write_qr_svg_file(data_dir: &str, kind: &str, payload: &str) -> Result<String
         .unwrap_or(0);
     let file_name = format!("{kind}-{timestamp_ms}.svg");
     let file_path = directory.join(file_name);
-    let svg = render_qr_svg(payload)?;
+    let svg = super::qr::render_qr_svg(payload)?;
     std::fs::write(&file_path, svg)
         .map_err(|e| format!("write qr svg {}: {e}", file_path.display()))?;
     Ok(file_path.display().to_string())
@@ -928,23 +912,81 @@ pub(super) enum HostMessageKind {
 
 pub(super) trait InteractionHost {
     fn emit(&mut self, kind: HostMessageKind, text: String);
-    fn confirm_send(&mut self, wallet: &str, amount: u64, to: &str) -> bool;
-    fn confirm_send_with_fee(
-        &mut self,
-        wallet: &str,
-        amount: u64,
-        fee: u64,
-        fee_unit: &str,
-    ) -> bool;
-    fn confirm_withdraw(
-        &mut self,
-        wallet: &str,
-        amount: u64,
-        fee_estimate: u64,
-        fee_unit: &str,
-        to: &str,
-    ) -> bool;
+    /// Show a resolved payment plan and return the person's answer.
+    ///
+    /// One method rather than the four this used to be, because there is now
+    /// only one thing to ask about: afpay resolves the payment first, and a
+    /// payment it cannot resolve produces no plan and never reaches a prompt.
+    /// The "fee unknown, approve anyway?" case is gone — an outage refuses the
+    /// plan instead of asking someone to accept an unknown fee.
+    fn confirm_planned_payment(&mut self, plan: &PlannedPayment<'_>) -> bool;
     fn prompt_deposit_claim(&mut self, wallet: &str, quote_id: &str) -> bool;
+}
+
+/// The plan a session is asking a person to approve, in the terms it shows
+/// them. Built from `Output::PayPlanned` — never from the request — so the
+/// prompt describes what the confirm will actually do.
+pub(super) struct PlannedPayment<'a> {
+    /// `send` or `cashu_send`.
+    pub operation: &'a str,
+    pub wallet: &'a str,
+    /// Absent for a Cashu token mint, which has no destination.
+    pub to: Option<&'a str>,
+    pub amount_native: u64,
+    pub fee_estimate_native: u64,
+    pub fee_unit: &'a str,
+    pub warnings: &'a [PlanWarning],
+}
+
+impl PlannedPayment<'_> {
+    /// The destination, shortened for a prompt line.
+    pub fn target(&self) -> String {
+        match self.to {
+            None => "a Cashu bearer token".to_string(),
+            Some(to) if to.len() > 40 => format!("{}...", &to[..40]),
+            Some(to) => to.to_string(),
+        }
+    }
+
+    /// What leaves the wallet in total, fee included.
+    pub fn total_native(&self) -> u64 {
+        self.amount_native.saturating_add(self.fee_estimate_native)
+    }
+
+    /// The two lines every frontend shows: what moves, and what it costs.
+    pub fn lines(&self) -> Vec<String> {
+        let Self {
+            wallet,
+            amount_native,
+            fee_estimate_native,
+            fee_unit,
+            ..
+        } = self;
+        let mut lines = vec![
+            format!(
+                "Pay {amount_native} {fee_unit} from {wallet} to {}",
+                self.target()
+            ),
+            format!(
+                "Fee estimate: {fee_estimate_native} {fee_unit}  (total: {} {fee_unit})",
+                self.total_native()
+            ),
+        ];
+        lines.extend(
+            self.warnings
+                .iter()
+                .map(|warning| format!("Warning [{}]: {}", warning.code, warning.message)),
+        );
+        lines
+    }
+
+    pub fn title(&self) -> &'static str {
+        if self.operation == "cashu_send" {
+            "Confirm Cashu Send"
+        } else {
+            "Confirm Payment"
+        }
+    }
 }
 
 pub(super) enum SessionBackend {
@@ -952,16 +994,19 @@ pub(super) enum SessionBackend {
         app: Arc<App>,
         rx: mpsc::Receiver<Output>,
     },
-    #[cfg(feature = "rpc")]
-    Remote { endpoint: String, secret: String },
+    #[cfg(feature = "federation")]
+    Remote {
+        peer_url: String,
+        api_key_secret: String,
+    },
 }
 
 impl SessionBackend {
     pub(super) fn connection_label(&self) -> String {
         match self {
             Self::Local { .. } => "local".to_string(),
-            #[cfg(feature = "rpc")]
-            Self::Remote { endpoint, .. } => format!("remote: {endpoint}"),
+            #[cfg(feature = "federation")]
+            Self::Remote { peer_url, .. } => format!("peer: {peer_url}"),
         }
     }
 
@@ -973,10 +1018,11 @@ impl SessionBackend {
     ) -> bool {
         match self {
             Self::Local { app, rx } => execute_local_command(host, state, app, rx, cmd).await,
-            #[cfg(feature = "rpc")]
-            Self::Remote { endpoint, secret } => {
-                execute_remote_command(host, state, endpoint, secret, cmd).await
-            }
+            #[cfg(feature = "federation")]
+            Self::Remote {
+                peer_url,
+                api_key_secret,
+            } => execute_remote_command(host, state, peer_url, api_key_secret, cmd).await,
         }
     }
 
@@ -999,8 +1045,11 @@ impl SessionBackend {
                 }
                 results
             }
-            #[cfg(feature = "rpc")]
-            Self::Remote { endpoint, secret } => remote::rpc_call(endpoint, secret, &input).await,
+            #[cfg(feature = "federation")]
+            Self::Remote {
+                peer_url,
+                api_key_secret,
+            } => remote::peer_call(peer_url, api_key_secret, &input).await,
         }
     }
 
@@ -1020,17 +1069,21 @@ impl SessionBackend {
     }
 
     /// Spawn query (Remote). Results returned via JoinHandle.
-    #[cfg(feature = "rpc")]
+    #[cfg(feature = "federation")]
     pub(super) fn spawn_remote(
         &self,
         input: Input,
     ) -> tokio::task::JoinHandle<Vec<serde_json::Value>> {
-        let Self::Remote { endpoint, secret } = self else {
+        let Self::Remote {
+            peer_url,
+            api_key_secret,
+        } = self
+        else {
             unreachable!("spawn_remote called on Local backend")
         };
-        let endpoint = endpoint.clone();
-        let secret = secret.clone();
-        tokio::spawn(async move { remote::rpc_call(&endpoint, &secret, &input).await })
+        let peer_url = peer_url.clone();
+        let api_key_secret = api_key_secret.clone();
+        tokio::spawn(async move { remote::peer_call(&peer_url, &api_key_secret, &input).await })
     }
 
     /// Non-blocking drain of pending outputs from rx (Local only).
@@ -1046,6 +1099,87 @@ impl SessionBackend {
         }
         results
     }
+}
+
+/// Run the plan half of a payment, ask the person, and confirm what they saw.
+///
+/// This is the local session's whole payment path. It does not resolve a quote
+/// of its own — the plan afpay recorded *is* the quote, and it is the same
+/// record the confirm reads back — so the window a person answers and the
+/// payment afpay makes cannot describe two different things.
+///
+/// Returns `false` when the plan step failed or the person refused; the caller
+/// has already been shown why.
+async fn plan_and_confirm<H: InteractionHost>(
+    host: &mut H,
+    state: &mut SessionState,
+    app: &Arc<App>,
+    rx: &mut mpsc::Receiver<Output>,
+    input: Input,
+) -> bool {
+    handler::dispatch(app, Request::from_input(input)).await;
+    tokio::task::yield_now().await;
+
+    let filters = agent_first_data::LogFilters::new(state.log_filters.clone());
+    let mut planned = None;
+    while let Ok(output) = rx.try_recv() {
+        if let Output::PayPlanned { .. } = output {
+            planned = Some(output);
+            continue;
+        }
+        if let Output::Log { ref event, .. } = output
+            && !filters.enabled(event)
+        {
+            continue;
+        }
+        host.emit(
+            HostMessageKind::Output,
+            render_output(&output, state.output_format),
+        );
+    }
+
+    let Some(Output::PayPlanned {
+        plan_id,
+        operation,
+        wallet,
+        to,
+        amount_native,
+        fee_estimate_native,
+        fee_unit,
+        warnings,
+        ..
+    }) = planned
+    else {
+        // The plan step emitted its own error above. Nothing was resolved, so
+        // there is nothing to ask about.
+        return false;
+    };
+
+    let approved = host.confirm_planned_payment(&PlannedPayment {
+        operation: &operation,
+        wallet: &wallet,
+        to: to.as_deref(),
+        amount_native,
+        fee_estimate_native,
+        fee_unit: &fee_unit,
+        warnings: &warnings,
+    });
+    if !approved {
+        // The plan is left to expire on its own rather than confirmed. Saying
+        // no here is the same refusal the window and the HTTP face record:
+        // nothing was contacted, and nothing needs undoing.
+        return false;
+    }
+
+    let confirm = Input::PayConfirm {
+        id: state.next_id(),
+        plan_id,
+        expect: None,
+        idempotency_key: None,
+    };
+    handler::dispatch(app, Request::from_input(confirm)).await;
+    tokio::task::yield_now().await;
+    true
 }
 
 async fn execute_local_command<H: InteractionHost>(
@@ -1072,65 +1206,22 @@ async fn execute_local_command<H: InteractionHost>(
                 }
             );
 
-            let needs_confirm = matches!(&input, Input::CashuSend { .. } | Input::Send { .. });
-            if needs_confirm {
-                let confirmed = match &input {
-                    Input::CashuSend { wallet, amount, .. } => {
-                        let wallet_name = wallet.as_deref().unwrap_or("");
-                        let mut got_quote = false;
-                        let mut confirmed = false;
-                        for provider in app.providers.values() {
-                            if let Ok(q) = provider.cashu_send_quote(wallet_name, amount).await {
-                                got_quote = true;
-                                confirmed = host.confirm_send_with_fee(
-                                    &q.wallet,
-                                    q.amount_native,
-                                    q.fee_native,
-                                    &q.fee_unit,
-                                );
-                                break;
-                            }
-                        }
-                        if !got_quote {
-                            let display = wallet.as_deref().unwrap_or("auto");
-                            host.confirm_send(display, amount.value, "P2P cashu token")
-                        } else {
-                            confirmed
-                        }
-                    }
-                    Input::Send { wallet, to, .. } => {
-                        let wallet_name = wallet.as_deref().unwrap_or("");
-                        let mut got_quote = false;
-                        let mut confirmed = false;
-                        for provider in app.providers.values() {
-                            if let Ok(q) = provider.send_quote(wallet_name, to, None).await {
-                                got_quote = true;
-                                confirmed = host.confirm_withdraw(
-                                    &q.wallet,
-                                    q.amount_native,
-                                    q.fee_estimate_native,
-                                    &q.fee_unit,
-                                    to,
-                                );
-                                break;
-                            }
-                        }
-                        if !got_quote {
-                            host.emit(
-                                HostMessageKind::Notice,
-                                "  Could not get melt quote; skipping confirmation.".to_string(),
-                            );
-                            true
-                        } else {
-                            confirmed
-                        }
-                    }
-                    _ => true,
-                };
-                if !confirmed {
+            // A payment is two dispatches, not one: resolve it, show it, then
+            // confirm the id that was shown. `plan_and_confirm` drains its own
+            // outputs, so the loop below picks up only the confirm's.
+            if matches!(&input, Input::SendPlan { .. } | Input::CashuSendPlan { .. }) {
+                if !plan_and_confirm(host, state, app, rx, input).await {
                     host.emit(HostMessageKind::Notice, "Cancelled.".to_string());
-                    return false;
                 }
+                collect_and_emit(
+                    host,
+                    rx,
+                    state.output_format,
+                    &agent_first_data::LogFilters::new(state.log_filters.clone()),
+                    &state.data_dir,
+                    false,
+                );
+                return false;
             }
 
             let (deposit_wallet, do_follow_up) = match &input {
@@ -1216,19 +1307,19 @@ async fn execute_local_command<H: InteractionHost>(
     false
 }
 
-#[cfg(feature = "rpc")]
+#[cfg(feature = "federation")]
 async fn execute_remote_command<H: InteractionHost>(
     host: &mut H,
     state: &mut SessionState,
-    endpoint: &str,
-    secret: &str,
+    peer_url: &str,
+    api_key_secret: &str,
     cmd: SessionCommand,
 ) -> bool {
     match cmd {
         SessionCommand::Quit => return true,
         SessionCommand::Help => host.emit(HostMessageKind::Notice, help_text()),
         SessionCommand::Use(target) => {
-            resolve_use_remote(host, state, endpoint, secret, &target).await
+            resolve_use_remote(host, state, peer_url, api_key_secret, &target).await
         }
         SessionCommand::Session(name, args) => handle_session_command(host, state, &name, &args),
         SessionCommand::Dispatch(input) => {
@@ -1239,8 +1330,8 @@ async fn execute_remote_command<H: InteractionHost>(
                     ..
                 }
             );
-            let mut outputs = remote::rpc_call(endpoint, secret, &input).await;
-            remote::wrap_remote_limit_topology(&mut outputs, endpoint);
+            let mut outputs = remote::peer_call(peer_url, api_key_secret, &input).await;
+            remote::wrap_remote_limit_topology(&mut outputs, peer_url);
             emit_remote_outputs_with_qr(
                 host,
                 &outputs,
@@ -1390,12 +1481,12 @@ fn resolve_use_local<H: InteractionHost>(host: &mut H, state: &mut SessionState,
     }
 }
 
-#[cfg(feature = "rpc")]
+#[cfg(feature = "federation")]
 async fn resolve_use_remote<H: InteractionHost>(
     host: &mut H,
     state: &mut SessionState,
-    endpoint: &str,
-    secret: &str,
+    peer_url: &str,
+    api_key_secret: &str,
     target: &str,
 ) {
     if target.is_empty() {
@@ -1413,7 +1504,7 @@ async fn resolve_use_remote<H: InteractionHost>(
         id: state.next_id(),
         network: None,
     };
-    let outputs = remote::rpc_call(endpoint, secret, &list_input).await;
+    let outputs = remote::peer_call(peer_url, api_key_secret, &list_input).await;
     let mut found = false;
     for value in &outputs {
         if value.get("code").and_then(|v| v.as_str()) == Some("error") {
@@ -1506,7 +1597,7 @@ fn maybe_save_qr_svg_from_output<H: InteractionHost>(
         return;
     }
     let qr_payload = match output {
-        Output::ReceiveInfo { receive_info, .. } => wallet_deposit_qr_payload(
+        Output::ReceiveInfo { receive_info, .. } => super::qr::wallet_deposit_qr_payload(
             receive_info.invoice.as_deref(),
             receive_info.address.as_deref(),
         ),
@@ -1538,7 +1629,7 @@ fn maybe_save_qr_svg_from_remote_value<H: InteractionHost>(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     let qr_payload = match code {
-        "wallet_deposit" => wallet_deposit_qr_payload(
+        "wallet_deposit" => super::qr::wallet_deposit_qr_payload(
             value
                 .get("receive_info")
                 .and_then(|v| v.get("invoice"))
@@ -1617,29 +1708,6 @@ fn emit_remote_outputs_with_qr<H: InteractionHost>(
             should_write_qr_svg_file,
         );
     }
-}
-
-fn add_lightning_prefix(invoice: &str) -> String {
-    if invoice.starts_with("lightning:") {
-        invoice.to_string()
-    } else if invoice.starts_with("lnbc")
-        || invoice.starts_with("lntb")
-        || invoice.starts_with("lnbcrt")
-    {
-        format!("lightning:{invoice}")
-    } else {
-        invoice.to_string()
-    }
-}
-
-fn wallet_deposit_qr_payload(
-    invoice: Option<&str>,
-    address: Option<&str>,
-) -> Option<(&'static str, String)> {
-    if let Some(invoice) = invoice {
-        return Some(("lightning_invoice", add_lightning_prefix(invoice)));
-    }
-    address.map(|value| ("receive_address", value.to_string()))
 }
 
 // ═══════════════════════════════════════════
@@ -1725,15 +1793,111 @@ mod tests {
         );
     }
 
+    /// Records what it was asked, and refuses everything.
+    ///
+    /// Refusing is the point: if the code under test ever moves money without
+    /// consulting this host, `asked` stays at zero while a payment happens.
+    #[derive(Default)]
+    struct RefusingHost {
+        asked: usize,
+        last_lines: Vec<String>,
+    }
+
+    impl InteractionHost for RefusingHost {
+        fn emit(&mut self, _kind: HostMessageKind, _text: String) {}
+        fn confirm_planned_payment(&mut self, plan: &PlannedPayment<'_>) -> bool {
+            self.asked += 1;
+            self.last_lines = plan.lines();
+            false
+        }
+        fn prompt_deposit_claim(&mut self, _wallet: &str, _quote_id: &str) -> bool {
+            false
+        }
+    }
+
+    fn session_state() -> SessionState {
+        SessionState::new(
+            "/tmp".to_string(),
+            OutputFormat::Json,
+            agent_first_data::LogFilters::new(Vec::<String>::new()),
+            None,
+        )
+    }
+
+    /// A payment nobody can resolve produces no plan, so nobody is asked to
+    /// approve one — and, critically, nothing is dispatched to a provider.
+    /// The old code asked the person to accept an unknown fee here; the plan
+    /// boundary removes the question by refusing earlier.
+    #[tokio::test]
+    async fn a_payment_that_cannot_be_resolved_is_never_offered_for_approval() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let app = Arc::new(App::new(RuntimeConfig::default(), tx, Some(false), None));
+        let mut host = RefusingHost::default();
+        let mut state = session_state();
+        let proceeded = plan_and_confirm(
+            &mut host,
+            &mut state,
+            &app,
+            &mut rx,
+            Input::SendPlan {
+                id: "test".to_string(),
+                wallet: Some("w_test".to_string()),
+                network: None,
+                to: "0xabc".to_string(),
+                chain_id: None,
+                amount: None,
+                onchain_memo: None,
+                local_memo: None,
+                mints: None,
+            },
+        )
+        .await;
+        assert!(!proceeded, "an unresolvable payment must not proceed");
+        assert_eq!(
+            host.asked, 0,
+            "there is no resolved plan to approve, so nothing may be offered"
+        );
+    }
+
+    /// The lines a person reads come off the plan, and they name the total —
+    /// the number that decides whether to refuse.
     #[test]
-    fn lightning_prefix_is_added_once() {
-        assert_eq!(
-            add_lightning_prefix("lnbc123"),
-            "lightning:lnbc123".to_string()
+    fn the_prompt_states_the_amount_the_fee_and_the_total() {
+        let plan = PlannedPayment {
+            operation: "send",
+            wallet: "w_1",
+            to: Some("lnbc2500u1p"),
+            amount_native: 250_000,
+            fee_estimate_native: 2_500,
+            fee_unit: "sats",
+            warnings: &[PlanWarning {
+                code: "review_signal".to_string(),
+                message: "verify the selected network".to_string(),
+                hint: None,
+            }],
+        };
+        let lines = plan.lines();
+        assert!(
+            lines[0].contains("250000 sats from w_1 to lnbc2500u1p"),
+            "{lines:?}"
         );
+        assert!(lines[1].contains("total: 252500 sats"), "{lines:?}");
         assert_eq!(
-            add_lightning_prefix("lightning:lnbc123"),
-            "lightning:lnbc123".to_string()
+            lines[2],
+            "Warning [review_signal]: verify the selected network"
         );
+        assert_eq!(plan.title(), "Confirm Payment");
+
+        let token = PlannedPayment {
+            operation: "cashu_send",
+            wallet: "w_2",
+            to: None,
+            amount_native: 100,
+            fee_estimate_native: 0,
+            fee_unit: "sats",
+            warnings: &[],
+        };
+        assert_eq!(token.target(), "a Cashu bearer token");
+        assert_eq!(token.title(), "Confirm Cashu Send");
     }
 }

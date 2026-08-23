@@ -7,18 +7,19 @@ use serde::{Deserialize, Serialize};
 pub struct RuntimeConfig {
     #[serde(default)]
     pub data_dir: String,
+    /// Default afpay peer for commands that carry no `--peer-url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rpc_endpoint: Option<String>,
+    pub peer_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rpc_secret: Option<String>,
+    pub peer_api_key_secret: Option<String>,
     #[serde(default)]
     pub log: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange_rate: Option<ExchangeRateConfig>,
-    /// Named afpay RPC nodes (e.g. `[afpay_rpc.wallet-server]`).
+    /// Named afpay peers (e.g. `[peers.wallet-server]`).
     #[serde(default)]
-    pub afpay_rpc: std::collections::HashMap<String, AfpayRpcConfig>,
-    /// Network → afpay_rpc node name (omit = local provider).
+    pub peers: std::collections::HashMap<String, PeerConfig>,
+    /// Network → peer name (omit = local provider).
     #[serde(default)]
     pub providers: std::collections::HashMap<String, String>,
     /// Storage backend: "redb" (default) or "postgres".
@@ -154,11 +155,14 @@ impl std::fmt::Debug for RuntimeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeConfig")
             .field("data_dir", &self.data_dir)
-            .field("rpc_endpoint", &self.rpc_endpoint)
-            .field("rpc_secret", &self.rpc_secret.as_ref().map(|_| "***"))
+            .field("peer_url", &self.peer_url)
+            .field(
+                "peer_api_key_secret",
+                &self.peer_api_key_secret.as_ref().map(|_| "***"),
+            )
             .field("log", &self.log)
             .field("exchange_rate", &self.exchange_rate)
-            .field("afpay_rpc", &self.afpay_rpc)
+            .field("peers", &self.peers)
             .field("providers", &self.providers)
             .field("storage_backend", &self.storage_backend)
             .field(
@@ -178,11 +182,11 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
-            rpc_endpoint: None,
-            rpc_secret: None,
+            peer_url: None,
+            peer_api_key_secret: None,
             log: vec![],
             exchange_rate: None,
-            afpay_rpc: std::collections::HashMap::new(),
+            peers: std::collections::HashMap::new(),
             providers: std::collections::HashMap::new(),
             storage_backend: None,
             postgres_url_secret: None,
@@ -215,8 +219,15 @@ impl Default for RuntimeConfig {
 /// Allowlist entries with userinfo, query, or fragment are rejected. The
 /// previous bare `starts_with` check let `https://mint.example` match
 /// `https://mint.example.evil/...`; this matcher closes that bypass.
+/// Whether one endpoint is allowed by one category's list.
+///
+/// An empty list allows everything: that is the laptop default, and
+/// [`AllowlistPolicy::require_for_public_listen`] is what refuses it on a
+/// public bind. A list of exactly `*` is the explicit way to say "this category
+/// is open" — the same permission, written down, so a public daemon can require
+/// an answer instead of reading silence as one.
 pub fn url_allowed(url: &str, allowlist: &[String]) -> bool {
-    if allowlist.is_empty() {
+    if allowlist.is_empty() || allowlist.iter().any(|entry| entry == "*") {
         return true;
     }
     let Some(candidate) = ParsedUrl::parse(url, /* allow_query_fragment */ true) else {
@@ -348,36 +359,54 @@ impl AllowlistPolicy {
         }
     }
 
-    pub fn any_set(&self) -> bool {
-        self.mints
-            + self.esplora
-            + self.sol_rpc
-            + self.evm_rpc
-            + self.btc_core
-            + self.btc_electrum
-            + self.ln_endpoints
-            > 0
+    /// Every endpoint category, with how many entries the operator allowed.
+    fn categories(&self) -> [(&'static str, usize); 7] {
+        [
+            ("allowed_mint_urls", self.mints),
+            ("allowed_esplora_urls", self.esplora),
+            ("allowed_sol_rpc_endpoints", self.sol_rpc),
+            ("allowed_evm_rpc_endpoints", self.evm_rpc),
+            ("allowed_btc_core_urls", self.btc_core),
+            ("allowed_btc_electrum_urls", self.btc_electrum),
+            ("allowed_ln_endpoints", self.ln_endpoints),
+        ]
     }
 
-    /// Returns `Err` with a human-readable message when `--public-listen`
-    /// is set but the operator has not opted into ANY allowlist. Empty
-    /// allowlists are acceptable on localhost (laptop mode) but not when the
-    /// daemon is bound to a public address: any reachable agent could then
-    /// point a new wallet at an attacker-controlled mint/esplora/RPC node.
+    /// Refuse to bind publicly unless *every* endpoint category is decided.
+    ///
+    /// An empty list means "anything goes", which is a reasonable default on a
+    /// laptop and is not one when a reachable caller with a bearer token can
+    /// create a wallet pointing at an endpoint of their choosing. This used to
+    /// accept any one non-empty list, so configuring `allowed_mint_urls` alone
+    /// started a public daemon whose Solana, EVM, Bitcoin and Lightning
+    /// endpoints were still unrestricted — while the startup banner said
+    /// "fail-closed".
+    ///
+    /// Deciding a category means listing endpoints for it, or writing `*` to
+    /// say out loud that it is unrestricted. Silence is no longer an answer.
     pub fn require_for_public_listen(&self) -> Result<(), String> {
-        if self.any_set() {
+        let undecided: Vec<&str> = self
+            .categories()
+            .iter()
+            .filter(|(_, count)| *count == 0)
+            .map(|(name, _)| *name)
+            .collect();
+        if undecided.is_empty() {
             return Ok(());
         }
-        Err(
-            "--public-listen requires a non-empty operator allowlist (allowed_mint_urls, allowed_esplora_urls, allowed_sol_rpc_endpoints, allowed_evm_rpc_endpoints, allowed_btc_core_urls, allowed_btc_electrum_urls, or allowed_ln_endpoints in runtime config)".to_string(),
-        )
+        Err(format!(
+            "--public-listen requires every endpoint category to be decided, and {} {} still empty, which means unrestricted: {}. List the endpoints you trust, or set the category to [\"*\"] to say it is deliberately open.",
+            undecided.len(),
+            if undecided.len() == 1 { "is" } else { "are" },
+            undecided.join(", ")
+        ))
     }
 
     /// One-line banner suitable for daemon startup. Operators see at a glance
     /// what categories are restricted and that the policy is fail-closed.
     pub fn banner(&self) -> String {
         format!(
-            "allowlist: mints={} esplora={} sol_rpc={} evm_rpc={} btc_core={} btc_electrum={} ln={} (fail-closed: non-empty list blocks anything off-list)",
+            "allowlist: mints={} esplora={} sol_rpc={} evm_rpc={} btc_core={} btc_electrum={} ln={} (a non-empty list blocks anything off it; 0 means that category is unrestricted, which --public-listen refuses)",
             self.mints,
             self.esplora,
             self.sol_rpc,
@@ -404,19 +433,21 @@ fn default_data_dir() -> String {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct AfpayRpcConfig {
-    pub endpoint: String,
+/// One afpay node this one federates with. `url` is the peer's HTTP API
+/// (`http://host:9401`); `api_key_secret` is the peer's `--rest-api-key-secret`.
+pub struct PeerConfig {
+    pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint_secret: Option<String>,
+    pub api_key_secret: Option<String>,
 }
 
-impl std::fmt::Debug for AfpayRpcConfig {
+impl std::fmt::Debug for PeerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AfpayRpcConfig")
-            .field("endpoint", &self.endpoint)
+        f.debug_struct("PeerConfig")
+            .field("url", &self.url)
             .field(
-                "endpoint_secret",
-                &self.endpoint_secret.as_ref().map(|_| "***"),
+                "api_key_secret",
+                &self.api_key_secret.as_ref().map(|_| "***"),
             )
             .finish()
     }
@@ -627,15 +658,16 @@ mod tests {
         assert!(banner.contains("esplora=0"));
         assert!(banner.contains("sol_rpc=1"));
         assert!(banner.contains("evm_rpc=1"));
-        assert!(banner.contains("fail-closed"));
-        assert!(p.any_set());
+        // The banner used to claim "fail-closed" flatly, next to counts that
+        // could all be zero. It now says what a zero means.
+        assert!(banner.contains("unrestricted"), "{banner}");
+        assert!(banner.contains("--public-listen"), "{banner}");
     }
 
     #[test]
     fn allowlist_policy_require_for_public_listen_rejects_empty() {
         let cfg = RuntimeConfig::default();
         let p = AllowlistPolicy::from_config(&cfg);
-        assert!(!p.any_set());
         let err = p
             .require_for_public_listen()
             .expect_err("empty policy must fail public-listen");
@@ -644,9 +676,33 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_policy_require_for_public_listen_allows_any_set() {
+    fn one_configured_category_does_not_open_a_public_listener() {
+        // The shape that used to start a public daemon: mints are restricted,
+        // and every other category is still "anything goes" — while the banner
+        // said fail-closed. A caller with a token could point a new wallet at
+        // any RPC endpoint they liked.
         let cfg = RuntimeConfig {
             allowed_mint_urls: vec!["https://mint.example".to_string()],
+            ..RuntimeConfig::default()
+        };
+        let error = AllowlistPolicy::from_config(&cfg)
+            .require_for_public_listen()
+            .expect_err("an undecided category must refuse a public bind");
+        assert!(error.contains("allowed_evm_rpc_endpoints"), "{error}");
+        assert!(!error.contains("allowed_mint_urls"), "{error}");
+    }
+
+    #[test]
+    fn every_category_decided_allows_a_public_listener() {
+        // Deciding a category means listing endpoints, or saying `*` out loud.
+        let cfg = RuntimeConfig {
+            allowed_mint_urls: vec!["https://mint.example".to_string()],
+            allowed_esplora_urls: vec!["*".to_string()],
+            allowed_sol_rpc_endpoints: vec!["*".to_string()],
+            allowed_evm_rpc_endpoints: vec!["https://rpc.example".to_string()],
+            allowed_btc_core_urls: vec!["*".to_string()],
+            allowed_btc_electrum_urls: vec!["*".to_string()],
+            allowed_ln_endpoints: vec!["*".to_string()],
             ..RuntimeConfig::default()
         };
         assert!(
@@ -654,6 +710,14 @@ mod tests {
                 .require_for_public_listen()
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn an_explicit_wildcard_is_the_written_form_of_an_empty_list() {
+        assert!(url_allowed("https://anything.example", &["*".to_string()]));
+        // And it is a whole-category statement, not a pattern to mix in.
+        let mixed = vec!["https://mint.example".to_string(), "*".to_string()];
+        assert!(url_allowed("https://elsewhere.example", &mixed));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::args::CliRequest;
 use crate::config;
 use crate::handler::{self, App};
 use crate::output_fmt;
-#[cfg(feature = "rpc")]
+#[cfg(feature = "federation")]
 use crate::provider::remote;
 use crate::store;
 use crate::types::*;
@@ -19,8 +19,8 @@ pub(super) async fn run(req: CliRequest) {
         output: output_format,
         log,
         data_dir,
-        rpc_endpoint: _,
-        rpc_secret: _,
+        peer_url: _,
+        peer_api_key_secret: _,
         startup_argv,
         startup_args,
         startup_requested,
@@ -99,7 +99,12 @@ pub(super) async fn run(req: CliRequest) {
     std::process::exit(if had_error { 1 } else { 0 });
 }
 
-#[cfg(feature = "rpc")]
+/// `<command> --peer-url …`: run this command on another afpay node.
+///
+/// One HTTP request against the peer's `/v1` resource routes, rendered here
+/// exactly as a local run would render it. A peer that is not this afpay
+/// answers with a named mismatch rather than a parse failure.
+#[cfg(feature = "federation")]
 pub(super) async fn run_remote(req: CliRequest) {
     let resolved_dir = req
         .data_dir
@@ -119,14 +124,14 @@ pub(super) async fn run_remote(req: CliRequest) {
         emit_output(&event, req.output);
     }
 
-    let (endpoint, secret) = remote::require_remote_args(
-        req.rpc_endpoint.as_deref(),
-        req.rpc_secret.as_deref(),
+    let (peer_url, api_key_secret) = remote::require_peer_args(
+        req.peer_url.as_deref(),
+        req.peer_api_key_secret.as_deref(),
         req.output,
     );
 
-    let mut outputs = remote::rpc_call(endpoint, secret, &req.input).await;
-    remote::wrap_remote_limit_topology(&mut outputs, endpoint);
+    let mut outputs = remote::peer_call(peer_url, api_key_secret, &req.input).await;
+    remote::wrap_remote_limit_topology(&mut outputs, peer_url);
     let had_error = remote::emit_remote_outputs(&outputs, req.output, &req_log_filters);
     std::process::exit(if had_error { 1 } else { 0 });
 }
@@ -172,9 +177,10 @@ pub(super) fn request_id_for_tracking(input: &Input) -> Option<&str> {
         | Input::Balance { id, .. }
         | Input::Receive { id, .. }
         | Input::ReceiveClaim { id, .. }
-        | Input::CashuSend { id, .. }
+        | Input::CashuSendPlan { id, .. }
         | Input::CashuReceive { id, .. }
-        | Input::Send { id, .. }
+        | Input::SendPlan { id, .. }
+        | Input::PayConfirm { id, .. }
         | Input::Restore { id, .. }
         | Input::WalletShowSeed { id, .. }
         | Input::HistoryList { id, .. }

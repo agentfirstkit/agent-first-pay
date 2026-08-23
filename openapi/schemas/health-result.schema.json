@@ -1,0 +1,32 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/health-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "protocol_version": {
+      "description": "Version of the JSON domain protocol the payloads below follow.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "service": {
+      "description": "Always `afpay`.",
+      "type": "string"
+    },
+    "status": {
+      "description": "Always `ready`; the process answers this route only once it is serving.",
+      "type": "string"
+    },
+    "version": {
+      "description": "Crate version of the process answering this request.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "service",
+    "version",
+    "protocol_version",
+    "status"
+  ],
+  "title": "HealthResult",
+  "type": "object"
+}

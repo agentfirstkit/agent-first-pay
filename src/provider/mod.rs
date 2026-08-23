@@ -10,7 +10,7 @@ pub mod cashu;
 pub mod evm;
 #[cfg(any(feature = "ln-nwc", feature = "ln-phoenixd", feature = "ln-lnbits"))]
 pub mod ln;
-#[cfg(feature = "rpc")]
+#[cfg(feature = "federation")]
 pub mod remote;
 #[cfg(feature = "sol")]
 pub mod sol;
@@ -79,6 +79,16 @@ pub enum PayError {
         detail: String,
         hint: Option<String>,
     },
+    /// The node named by `--peer-url` reached, but it is not the afpay this
+    /// build can federate with: a different service entirely, a different
+    /// afpay version, a route it does not serve, or a credential it refused.
+    /// Distinct from `NetworkError` on purpose — retrying will not fix it, and
+    /// a silent wrong answer would be worse than a loud refusal.
+    PeerMismatch {
+        peer: String,
+        detail: String,
+        hint: Option<String>,
+    },
     /// A request targeted a resource (mint URL, esplora endpoint, …) that is not
     /// in the operator's allowlist. Distinct from InvalidAmount so agents can
     /// surface the allowlist hint without ambiguity.
@@ -88,6 +98,36 @@ pub enum PayError {
     },
     InvalidRequest {
         message: String,
+    },
+    /// Another operation holds the workspace write lock. Distinct from
+    /// `InternalError` because it is a conflict, not a defect: the same
+    /// request succeeds once the holder finishes, and every transport can say
+    /// so — HTTP as `409`, the CLI as a retryable event.
+    Busy {
+        message: String,
+    },
+    /// A confirm named a plan this workspace cannot produce: never issued
+    /// here, already confirmed, already refused, or swept after expiry. Plans
+    /// are single-use, so this is the ordinary answer to a replayed confirm
+    /// that carries a fresh idempotency key.
+    PlanNotFound {
+        message: String,
+    },
+    /// The plan exists but its window has closed. A fee quote is a perishable
+    /// statement about the network; afpay refuses rather than paying on terms
+    /// nobody reviewed recently.
+    PlanExpired {
+        message: String,
+    },
+    /// The plan exists and is unexpired, but the state it was resolved
+    /// against has moved. §9 of the Provider OpenAPI baseline requires this:
+    /// a configuration, wallet, workspace or spend-rule change invalidates an
+    /// outstanding plan rather than silently re-resolving it.
+    PlanStale {
+        message: String,
+        /// Which parts moved — `configuration`, `wallet`, `spend_limits`,
+        /// `workspace` — so the caller knows what to look at before replanning.
+        drifted: Vec<String>,
     },
 }
 
@@ -137,8 +177,15 @@ impl fmt::Display for PayError {
             Self::RemoteProtocolError {
                 endpoint, detail, ..
             } => write!(f, "remote {endpoint} returned malformed response: {detail}"),
+            Self::PeerMismatch { peer, detail, .. } => {
+                write!(f, "afpay peer {peer} does not match this node: {detail}")
+            }
             Self::Forbidden { message, .. } => write!(f, "{message}"),
             Self::InvalidRequest { message } => write!(f, "{message}"),
+            Self::Busy { message } => write!(f, "{message}"),
+            Self::PlanNotFound { message }
+            | Self::PlanExpired { message }
+            | Self::PlanStale { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -154,13 +201,18 @@ impl PayError {
             Self::LimitExceeded { .. } => "limit_exceeded",
             Self::ConfigureOnDaemon { .. } => "configure_on_daemon",
             Self::RemoteProtocolError { .. } => "remote_protocol_error",
+            Self::PeerMismatch { .. } => "peer_mismatch",
             Self::Forbidden { .. } => "forbidden",
             Self::InvalidRequest { .. } => "invalid_request",
+            Self::Busy { .. } => "busy",
+            Self::PlanNotFound { .. } => "plan_not_found",
+            Self::PlanExpired { .. } => "plan_expired",
+            Self::PlanStale { .. } => "plan_stale",
         }
     }
 
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::NetworkError { .. })
+        matches!(self, Self::NetworkError { .. } | Self::Busy { .. })
     }
 
     /// Optional retry-after hint for caller backoff. Returns Some only for
@@ -215,12 +267,17 @@ impl PayError {
                     "send `{operation}` to the spend-ledger daemon at {ep}; this client does not enforce limits locally"
                 ),
                 None => format!(
-                    "`{operation}` requires a local spend-ledger; enable a storage backend (redb/postgres) or point `afpay_rpc` at a daemon in config.toml"
+                    "`{operation}` requires a local spend-ledger; enable a storage backend (redb/postgres) or point `peers` at a node in config.toml"
                 ),
             }),
             Self::RemoteProtocolError { hint, endpoint, .. } => hint.clone().or_else(|| {
                 Some(format!(
                     "remote {endpoint} returned a malformed response; verify it runs a compatible afpay version"
+                ))
+            }),
+            Self::PeerMismatch { hint, peer, .. } => hint.clone().or_else(|| {
+                Some(format!(
+                    "read {peer}/health and confirm it is an afpay node on this exact version"
                 ))
             }),
             Self::Forbidden { hint, .. } => hint.clone().or_else(|| {
@@ -231,6 +288,19 @@ impl PayError {
             }),
             Self::InvalidRequest { message } => Some(format!(
                 "invalid request: {message}; check `afpay config --help` for valid keys"
+            )),
+            Self::Busy { .. } => Some(
+                "another operation holds the workspace lock; retry the identical request — with the same idempotency key when it moves money".to_string(),
+            ),
+            Self::PlanNotFound { .. } => Some(
+                "plans are single-use: resolve a new one with the same payment request, review it, and confirm that id. To retry a confirm that may already have run, resend the original Idempotency-Key rather than a new plan".to_string(),
+            ),
+            Self::PlanExpired { .. } => Some(
+                "resolve the payment again and confirm the new plan; the fee it quotes is current".to_string(),
+            ),
+            Self::PlanStale { drifted, .. } => Some(format!(
+                "{} changed after this payment was resolved, so the reviewed terms no longer describe what would happen; resolve the payment again and review the new plan",
+                drifted.join(" and ")
             )),
         }
     }
@@ -347,7 +417,8 @@ pub trait PayProvider: Send + Sync {
     ) -> Result<ReceiveInfo, PayError>;
     async fn receive_claim(&self, wallet: &str, quote_id: &str) -> Result<u64, PayError>;
 
-    #[cfg(feature = "interactive")]
+    /// Resolve what minting a bearer token would cost, and which wallet would
+    /// pay for it. Read-only: nothing is reserved and no value moves.
     async fn cashu_send_quote(
         &self,
         _wallet: &str,
@@ -364,6 +435,25 @@ pub trait PayProvider: Send + Sync {
         onchain_memo: Option<&str>,
         mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError>;
+
+    /// Mint the token a caller reviewed as a plan.
+    ///
+    /// `upstream_plan_id` is the plan the quote opened on another afpay node,
+    /// carried through so a federated confirm submits the same plan it
+    /// resolved rather than opening a second one. Providers that talk to a
+    /// network rather than to a peer have nothing upstream to confirm and
+    /// ignore it.
+    async fn cashu_send_confirmed(
+        &self,
+        wallet: &str,
+        amount: Amount,
+        onchain_memo: Option<&str>,
+        mints: Option<&[String]>,
+        upstream_plan_id: Option<&str>,
+    ) -> Result<CashuSendResult, PayError> {
+        let _ = upstream_plan_id;
+        self.cashu_send(wallet, amount, onchain_memo, mints).await
+    }
     async fn cashu_receive(
         &self,
         wallet: &str,
@@ -377,6 +467,12 @@ pub trait PayProvider: Send + Sync {
         mints: Option<&[String]>,
     ) -> Result<SendResult, PayError>;
 
+    /// Resolve a payment without making it: which wallet pays, how much leaves,
+    /// what the network will charge, and which spend budgets that debits.
+    ///
+    /// This is the resolver behind every plan afpay issues — the confirm
+    /// window, the CLI, the HTTP face and federation all read the same answer.
+    /// It must not move value, reserve budget, or write to the ledger.
     async fn send_quote(
         &self,
         _wallet: &str,
@@ -386,6 +482,20 @@ pub trait PayProvider: Send + Sync {
         Err(PayError::not_implemented(
             "send_quote not supported".to_string(),
         ))
+    }
+
+    /// Execute the payment a caller reviewed as a plan. See
+    /// [`PayProvider::cashu_send_confirmed`] for what `upstream_plan_id` is.
+    async fn send_confirmed(
+        &self,
+        wallet: &str,
+        to: &str,
+        onchain_memo: Option<&str>,
+        mints: Option<&[String]>,
+        upstream_plan_id: Option<&str>,
+    ) -> Result<SendResult, PayError> {
+        let _ = upstream_plan_id;
+        self.send(wallet, to, onchain_memo, mints).await
     }
 
     async fn history_list(

@@ -79,21 +79,24 @@ afpay <command>
   └── btc provider
 ```
 
-For remote operation, two server modes are available:
+For remote operation there is exactly one machine face — the HTTP resource API —
+and everything talks to it, including afpay itself:
 
 ```
-# RPC mode — gRPC + AES-256-GCM PSK (process-to-process)
-afpay CLI / pipe
-  │ gRPC (AES-256-GCM PSK)
-  └──→ afpay --mode rpc (VPS)
-
-# REST mode — HTTP + Bearer token (any HTTP client)
-curl / scripts / any language
-  │ HTTP POST /v1/afpay
-  └──→ afpay --mode rest (VPS / Docker)
+curl / scripts / any language        another afpay node
+  │ GET /v1/wallets                    │ --peer-url http://host:9401
+  │ POST /v1/send-plans → /v1/sends     │ (the same routes, same bearer token)
+  └──────────────→ afpay --mode rest (VPS / Docker) ←──────────────┘
 ```
 
-Both server modes enforce spend limits independently.
+The HTTP face describes itself: `GET /openapi.json` and `GET /schemas/index.json`
+need no credential, and `afpay api export` writes the same contract without a
+running daemon.
+
+Federation is not a second protocol. `<command> --peer-url` runs the command on
+another afpay node over the routes above, so a peer can only ask for what any
+agent holding that node's token could ask for — and every node it forwards
+through enforces its own spend limits.
 
 See [Architecture](docs/architecture.md) for advanced multi-server deployment patterns.
 
@@ -107,7 +110,7 @@ See [Architecture](docs/architecture.md) for advanced multi-server deployment pa
 | EVM chain | gwei | USDC, USDT (ERC-20) | `evm` |
 | Bitcoin | sats | — | `btc-esplora` / `btc-core` / `btc-electrum` |
 
-Default builds include REST/RPC, redb + PostgreSQL, Cashu, Phoenixd Lightning, Solana, EVM, Bitcoin Esplora, exchange rates, interactive UI, and backup support. Selective compilation:
+Default builds include the HTTP API and federation, redb + PostgreSQL, Cashu, Phoenixd Lightning, Solana, EVM, Bitcoin Esplora, exchange rates, interactive UI, and backup support. Selective compilation:
 
 ```bash
 cargo build --features cashu              # Cashu only (minimal binary)
@@ -115,8 +118,8 @@ cargo build --features cashu,ln           # Cashu + Lightning
 cargo build --features btc-esplora        # Bitcoin on-chain (Esplora backend)
 cargo build --features btc-core           # Bitcoin on-chain (Bitcoin Core RPC)
 cargo build --features btc-electrum       # Bitcoin on-chain (Electrum)
-cargo build --no-default-features --features rpc  # RPC client only (no wallet SDK)
-cargo build                               # Default production feature set, including REST/RPC
+cargo build --no-default-features --features federation  # Coordinator only (no wallet SDK)
+cargo build                               # Default production feature set
 ```
 
 ## Storage Backends
@@ -145,28 +148,90 @@ Default mode is CLI — one command per invocation:
 # Local (wallet on this machine)
 afpay balance
 
-# Remote (forward to rpc daemon)
-afpay balance --rpc-endpoint 10.0.1.5:9400 --rpc-secret "64-char-hex"
+# On another afpay node (forwarded over its HTTP API)
+afpay balance --peer-url http://10.0.1.5:9401 --peer-api-key-secret "64-char-hex"
 ```
 
-Other modes: `--mode interactive` (REPL), `--mode tui` (full-screen terminal UI), `--mode pipe` (JSONL stdin/stdout), `--mode rpc` (gRPC daemon), `--mode rest` (HTTP REST API). See [CLI Reference](docs/cli.md) for flags and subcommands, and [Architecture](docs/architecture.md) for deployment and protocol details.
+Other modes: `--mode interactive` (REPL), `--mode tui` (full-screen terminal UI), `--mode pipe` (JSONL stdin/stdout), `--mode rest` (the HTTP API). See [CLI Reference](docs/cli.md) for flags and subcommands, and [Architecture](docs/architecture.md) for deployment and protocol details.
 
 ## Modes
 
 | Mode | Start | Use Case |
 |------|-------|----------|
-| cli | `afpay <subcommand>` | One command, local or forwarded via `--rpc-endpoint` |
+| cli | `afpay <subcommand>` | One command, local or forwarded to a peer via `--peer-url` |
 | pipe | `afpay --mode pipe` | Long-lived JSONL stdin/stdout session for agents |
 | interactive | `afpay --mode interactive` | Human REPL with completion and QR helpers |
 | tui | `afpay --mode tui` | Full-screen terminal workflow over the same interactive command interface |
-| rpc | `afpay --mode rpc` | Encrypted gRPC daemon for afpay clients or coordinators; listens on `127.0.0.1:9400` by default |
-| rest | `afpay --mode rest` | HTTP API server for curl, containers, and general clients; listens on `127.0.0.1:9401` by default |
+| rest | `afpay --mode rest` | The HTTP resource API — for curl, containers, general clients, and other afpay nodes; listens on `127.0.0.1:9401` by default |
 
-### Network Exposure
+### Reaching a daemon that is not on this machine
 
-REST and RPC bind to loopback by default. To expose either daemon on `0.0.0.0` or another non-loopback address, pass `--public-listen` explicitly and put the service behind TLS, firewall rules, or a trusted private network. REST bearer tokens and RPC PSKs are not a replacement for transport security on the public Internet.
+`--mode rest` binds to `127.0.0.1:9401`. Binding anywhere else needs
+`--public-listen`, which is an acknowledgement, not a security feature: afpay
+serves plain HTTP and **does not terminate TLS**. Put one of the three
+arrangements below between the network and the daemon.
+
+**Encryption is not authentication.** All three carry the bearer token as well:
+the tunnel decides who can reach the port, the token decides who may spend. Never
+drop `--rest-api-key-secret` because the transport is private.
+
+**1. Tailscale or WireGuard — best fit for your own machines.** Encryption plus
+device identity, no certificates to issue or rotate. Bind afpay to the tunnel
+interface only:
+
+```bash
+# on the daemon host
+afpay --mode rest --rest-listen 100.64.0.7:9401 --public-listen \
+  --rest-api-key-secret "$(openssl rand -hex 32)"
+
+# from any other device on the tailnet
+afpay balance --peer-url http://100.64.0.7:9401 --peer-api-key-secret "…"
+```
+
+**2. SSH tunnel — the safest posture available.** afpay keeps listening only on
+loopback, so nothing is exposed even if the firewall is wrong. No
+`--public-listen` at all:
+
+```bash
+# on the daemon host: the default bind is already correct
+afpay --mode rest --rest-api-key-secret "$(openssl rand -hex 32)"
+
+# on the client: forward the loopback port over SSH
+ssh -N -L 9401:127.0.0.1:9401 user@daemon-host &
+afpay balance --peer-url http://127.0.0.1:9401 --peer-api-key-secret "…"
+```
+
+**3. TLS reverse proxy — when you want a stable hostname.** Caddy's internal CA
+issues and renews LAN certificates automatically; trust its root once per client
+(`caddy trust`):
+
+```caddyfile
+# Caddyfile on the daemon host
+afpay.home.arpa {
+    tls internal
+    reverse_proxy 127.0.0.1:9401
+}
+```
+
+```bash
+afpay --mode rest --rest-api-key-secret "$(openssl rand -hex 32)"   # loopback only
+afpay balance --peer-url https://afpay.home.arpa --peer-api-key-secret "…"
+```
+
+**Why afpay does not do TLS itself.** No public CA will issue for a LAN name, so
+built-in TLS would mean shipping a private-CA workflow — exactly what Caddy and
+Tailscale already do better. Certificate loading, renewal, and SNI would have to
+be duplicated across every listener rather than solved once in front of them. And
+TLS would not answer the question that actually matters here: it proves the
+server's name, not that the caller may move money. That is the bearer token's
+job, and it is required either way.
+
+The HTTP face is narrower than the CLI by design. Reading a seed, editing spend-limit rules, repairing a reservation and changing daemon config are local operations: they have no route, so a leaked bearer token cannot raise its own spending limit. Federation goes through the same routes, so a peer cannot reach them either.
 
 ## Quick Start
+
+Every `send` below resolves a plan and returns a `plan_id`; `afpay pay confirm
+--plan-id …` is what actually pays. See [Paying is two steps](#paying-is-two-steps).
 
 ### Cashu
 
@@ -349,6 +414,27 @@ Balance queries automatically show all known tokens:
 
 Built-in tokens: EVM — USDC/USDT on Base (8453), Arbitrum (42161), Ethereum (1). SOL — USDC/USDT on mainnet-beta, USDC on devnet. Raw contract/mint addresses can also be passed to `--token`.
 
+## Paying is two steps
+
+`send` resolves a payment; it does not make one. It reports the wallet afpay
+would use, what leaves it, the fee it expects, and the spend budgets it would
+debit, under a single-use `plan_id`. Confirming that id is what pays.
+
+```bash
+afpay ln send --to lnbc1...
+# → {"code":"pay_planned","plan_id":"plan_…","wallet":"w_…","amount_native":250000,
+#    "fee_estimate_native":2500,"fee_unit":"sats","spend_debits":[…]}
+
+afpay pay confirm --plan-id plan_… --idempotency-key pay-invoice-1
+```
+
+Every caller goes through the same two steps — the CLI, the pipe, the HTTP API
+(`POST /v1/send-plans` then `POST /v1/sends`), the confirmation window, and one
+afpay node paying through another. A plan expires after 15 minutes, is
+confirmable exactly once, and is refused outright if the workspace, daemon
+configuration, wallet, or spend rules changed after it was resolved. What was
+reviewed and what happens cannot be two different payments.
+
 ## Spend Limits
 
 Multi-tier spend limits — all rules checked before every send, any breach rejects the transaction:
@@ -368,13 +454,14 @@ afpay limit list
 |------------|----------|
 | No unwrap/expect/panic | `#![deny(...)]` global lint |
 | Key security | All secret fields use `_secret` suffix, agent-first-data auto-redacts |
-| Spend limits non-bypassable | RPC daemon enforces limits server-side; agent cannot modify daemon config |
+| Spend limits non-bypassable | The daemon enforces limits server-side; agent cannot modify daemon config |
+| Nothing pays without review | Money leaves a wallet only by confirming a plan afpay resolved and recorded. There is no operation, on any transport, that takes a description of a payment and makes it in one step |
 | Single-point failure isolation | Each network can run in its own VPS/container independently |
 | Consistent output | All modes use the same Output types |
-| RPC security | gRPC + HKDF-derived PSK AES-256-GCM payload encryption, nonce replay rejection, zero certificate management |
+| One machine face | Every non-human caller — curl, containers, other afpay nodes — speaks the same `/v1` HTTP routes with the same Bearer token; there is no second protocol to keep in sync or to widen for federation |
 | Dual storage backend | redb (embedded) or PostgreSQL, selected via config |
-| Pure Rust zero C deps | CDK, Alloy, BDK, Solana component crates, redb, sqlx, aes-gcm — all pure Rust |
-| REST API (Docker-friendly) | HTTP `POST /v1/afpay` with Bearer auth; bind publicly only with `--public-listen` behind TLS/firewall |
+| Pure Rust zero C deps | CDK, Alloy, BDK, Solana component crates, redb, sqlx — all pure Rust |
+| HTTP API (Docker-friendly) | Resource routes under `/v1` with Bearer auth and an OpenAPI 3.2 contract; every operation a retry could duplicate takes an `Idempotency-Key`; key material, spend-limit rules and daemon config have no route at all; reach it off-box through Tailscale/WireGuard, an SSH tunnel, or a TLS reverse proxy (see [Reaching a daemon that is not on this machine](#reaching-a-daemon-that-is-not-on-this-machine)) |
 | Depends on agent-first-data | Output formatting, `_secret` redaction, OutputFormat enum |
 
 ## Containers
@@ -382,18 +469,17 @@ afpay limit list
 Single-container deployment with supervisord (afpay + optional phoenixd + optional bitcoind). The one-command path is `afpay container install` — it builds the image from a recipe embedded in the binary and runs the daemon under **Docker, Podman, or Apple `container`** (auto-detected; override with `--runtime`):
 
 ```bash
-# REST mode (default). --allow seeds the operator allowlist afpay requires to
-# expose a listener (categories: mint, esplora, sol-rpc, evm-rpc, btc-core,
-# btc-electrum, ln; repeatable).
+# --allow seeds the operator allowlist afpay requires to expose a listener
+# (categories: mint, esplora, sol-rpc, evm-rpc, btc-core, btc-electrum, ln;
+# repeatable).
 afpay container install --allow mint=https://mint.example
 
 # Credentials and the credential-bearing client command are redacted by
 # default. Reveal them only for an operator who is ready to store them safely.
 afpay container status --reveal-daemon-secret
 
-# Bundle + enable phoenixd (or bitcoind); RPC instead of REST
+# Bundle + enable phoenixd (or bitcoind)
 afpay container install --with phoenixd --allow ln=http://127.0.0.1:9740
-afpay container install --mode rpc --port 9400 --allow esplora=https://esplora.example
 
 # Status / logs / teardown
 afpay container status        # endpoint + redacted credential fields
@@ -415,7 +501,7 @@ docker compose -f container/docker/compose.yaml up --build
 podman build -t afpay -f container/docker/Dockerfile .
 ```
 
-`AFPAY_MODE` selects `rest` or `rpc`. Secrets are auto-generated on first run, persisted to mode-specific files with private permissions, and passed through environment variables rather than process arguments. `bitcoind` is disabled by default; when enabled it runs pruned `mainnet` with `BTC_PRUNE_MB=550`. See [container/README.md](container/README.md) for backup/restore and the full container workflow, and [Architecture](docs/architecture.md) for the variable reference.
+The bearer API key is auto-generated on first run, persisted to the data volume with private permissions, and passed through an environment variable rather than a process argument. `bitcoind` is disabled by default; when enabled it runs pruned `mainnet` with `BTC_PRUNE_MB=550`. See [container/README.md](container/README.md) for backup/restore and the full container workflow, and [Architecture](docs/architecture.md) for the variable reference.
 
 ## Data and Recovery
 
@@ -435,7 +521,7 @@ cargo test
 ## Docs
 
 - [CLI Reference](docs/cli.md) — every command and flag
-- [Architecture](docs/architecture.md) — how it is built, deployment patterns, RPC protocol, Provider design
+- [Architecture](docs/architecture.md) — how it is built, deployment patterns, the HTTP API, Provider design
 - [Testing](docs/testing.md) — unit and integration tests
 
 ## License

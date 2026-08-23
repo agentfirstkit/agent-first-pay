@@ -1,0 +1,95 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/send-plan-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "amount": {
+      "description": "Amount in the network's base unit. Optional only when `to` already\ncarries one.",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "token"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "chain_id": {
+      "description": "Pin the EVM chain. A wallet on a different chain refuses with\n`forbidden` (`wrong_chain`) at plan time instead of broadcasting.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "local_memo": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Local-only bookkeeping annotation; never sent to the network.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "mints": {
+      "description": "Restrict Cashu wallet selection to these mints, tried in order.",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "network": {
+      "description": "Network to send on, when the target is ambiguous.",
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "onchain_memo": {
+      "description": "Memo carried with the transaction.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "to": {
+      "description": "Address, BOLT11 invoice, BOLT12 offer, or payment URI.",
+      "type": "string"
+    },
+    "wallet": {
+      "description": "Source wallet; omit to let afpay select one. The plan names the wallet\nit actually picked.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "to"
+  ],
+  "title": "SendPlanRequest",
+  "type": "object"
+}

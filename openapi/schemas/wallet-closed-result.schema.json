@@ -1,0 +1,14 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/wallet-closed-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "wallet": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet"
+  ],
+  "title": "WalletClosedResult",
+  "type": "object"
+}

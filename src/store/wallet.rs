@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 // ═══════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct CustomToken {
     pub symbol: String,
     pub address: String,
@@ -30,6 +31,7 @@ pub struct CustomToken {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rest", derive(schemars::JsonSchema))]
 pub struct WalletMetadata {
     pub id: String,
     pub network: Network,
@@ -41,8 +43,8 @@ pub struct WalletMetadata {
     pub sol_rpc_endpoints: Option<Vec<String>>,
     /// Solana cluster the wallet was created on: `"mainnet-beta"`, `"devnet"`,
     /// or `"testnet"`. Pre-cluster-tagging wallets serialize without this
-    /// field; on load they remain `None` and skip the send-time cluster
-    /// check.
+    /// field; on load they remain `None` and payment plans surface an
+    /// unpinned-cluster warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sol_cluster: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

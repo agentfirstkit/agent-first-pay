@@ -134,6 +134,28 @@ pub enum IdempotentReplayPayload {
         confirm_errors: Vec<String>,
         hint: String,
     },
+    /// A wallet that already exists. The mnemonic is deliberately absent: a
+    /// replay record is not a place to keep key material for 24 hours, and the
+    /// seed of a wallet that exists is readable on the machine that holds it
+    /// (`local_wallet_show_seed`). A replayed create therefore reports the
+    /// wallet without re-emitting its seed.
+    WalletCreated {
+        wallet: String,
+        network: crate::types::Network,
+        address: String,
+    },
+    /// A receive that was already placed: the same address, invoice, or mint
+    /// quote the first call handed out. Replaying this is the point — a payer
+    /// may already be holding it.
+    ReceiveInfo {
+        wallet: String,
+        receive_info: crate::types::ReceiveInfo,
+    },
+    /// A receive that was placed and then waited until it settled.
+    ReceiveClaimed {
+        wallet: String,
+        amount: crate::types::Amount,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2116,7 +2138,20 @@ impl SpendLedger {
                 "invalid exchange-rate conversion result".to_string(),
             ));
         }
-        Ok((usd * 100f64).round() as u64)
+        // Rounded up, never to nearest.
+        //
+        // This number is charged against a spending limit, and rounding a
+        // payment down is the ledger saying it cost less than it did. Worse, it
+        // can say a payment cost nothing at all: a USD-priced token with six
+        // decimals, sent 4,999 base units at a time, is 0.4999 cents, which
+        // `round()` made zero — so the same send repeated any number of times
+        // never touched the global cap. Anything worth more than nothing costs
+        // at least one cent here.
+        //
+        // The bias is deliberate and only ever against the spender. It does not
+        // make this a fixed-point ledger — `f64` still decides the value — but
+        // it removes the direction of error that lets a limit be walked past.
+        Ok((usd * 100f64).ceil() as u64)
     }
 
     async fn get_or_fetch_quote(
@@ -2799,6 +2834,57 @@ fn next_counter(write_txn: &redb::WriteTransaction, key: &str) -> Result<u64, Pa
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn a_payment_worth_something_never_costs_the_limit_nothing() {
+        // A USD-priced six-decimal token: 4,999 base units is 0.4999 cents.
+        // Rounding to nearest made that zero, so the same send repeated any
+        // number of times never touched the global USD cap. Rounding up costs
+        // a cent, which makes splitting strictly worse for the spender rather
+        // than free.
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+
+        let sub_cent = ledger
+            .amount_to_usd_cents("evm", Some("usdc"), 4_999)
+            .await
+            .expect("a USD-priced token converts without a quote");
+        assert_eq!(sub_cent, 1, "a payment worth 0.4999 cents must cost a cent");
+
+        // Zero really is zero, and a whole cent is still one cent.
+        assert_eq!(
+            ledger
+                .amount_to_usd_cents("evm", Some("usdc"), 0)
+                .await
+                .expect("zero converts"),
+            0
+        );
+        assert_eq!(
+            ledger
+                .amount_to_usd_cents("evm", Some("usdc"), 10_000)
+                .await
+                .expect("one cent converts"),
+            1
+        );
+
+        // And splitting a payment can only ever cost more, never less.
+        let whole = ledger
+            .amount_to_usd_cents("evm", Some("usdc"), 100_000)
+            .await
+            .expect("converts");
+        let mut split = 0u64;
+        for _ in 0..10 {
+            split += ledger
+                .amount_to_usd_cents("evm", Some("usdc"), 10_000)
+                .await
+                .expect("converts");
+        }
+        assert!(
+            split >= whole,
+            "splitting must not undercount: {split} < {whole}"
+        );
+    }
 
     #[test]
     fn ttl_per_network_matches_spec() {

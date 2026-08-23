@@ -1,0 +1,182 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/transaction-status-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "confirmations": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "item": {
+      "description": "The stored record, when afpay holds one for this transaction.",
+      "properties": {
+        "amount": {
+          "properties": {
+            "token": {
+              "type": "string"
+            },
+            "value": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "value",
+            "token"
+          ],
+          "type": "object"
+        },
+        "confirmed_at_epoch_s": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_at_epoch_s": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "direction": {
+          "enum": [
+            "send",
+            "receive"
+          ],
+          "type": "string"
+        },
+        "fee": {
+          "properties": {
+            "token": {
+              "type": "string"
+            },
+            "value": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "value",
+            "token"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "local_memo": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "network": {
+          "enum": [
+            "ln",
+            "sol",
+            "evm",
+            "cashu",
+            "btc"
+          ],
+          "type": "string"
+        },
+        "onchain_memo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preimage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference_keys": {
+          "description": "Reference keys found in the transaction (sol only, per strain-payment-method-solana).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "remote_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reservation_ids": {
+          "description": "Spend-ledger reservation ids debited for this payment. Cross-link so\n`history list` / `history status` can show which spend-limit budgets\nthis transaction consumed, and so an operator reconciling\n`AccountingInconsistent` can trace either way.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "confirmed",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "transaction_id": {
+          "type": "string"
+        },
+        "wallet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transaction_id",
+        "wallet",
+        "network",
+        "direction",
+        "amount",
+        "status",
+        "created_at_epoch_s"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "preimage": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "confirmed",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "transaction_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "transaction_id",
+    "status"
+  ],
+  "title": "TransactionStatusResult",
+  "type": "object"
+}

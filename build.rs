@@ -1,9 +1,6 @@
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     println!("cargo:rustc-env=DISPLAY_NAME=Agent-First Pay");
     println!("cargo:rustc-env=GIT_SHA={}", git_sha());
-    #[cfg(feature = "rpc")]
-    tonic_prost_build::compile_protos("proto/afpay.proto")?;
-    Ok(())
 }
 
 /// Short commit SHA of the tree this was built from, or `"unknown"` when no

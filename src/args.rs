@@ -8,14 +8,13 @@
 
 #[cfg(feature = "rest")]
 use crate::mode::rest::RestInit;
-#[cfg(feature = "rpc")]
-use crate::mode::rpc::RpcInit;
 use crate::types::*;
 use agent_first_data::{
     ArgSpec, ArgSyntax, ArgValueType, BoundOutcome, BuiltCliSpec, CliSpec, CliSpecError, CliValue,
-    Combination, CommandSpec, OutputFormat, OutputSpec, ResolvedInvocation, build_afdata_cli,
-    cli_help_event, cli_parse_output, cli_version_event, render_cli_reference,
+    Combination, CommandSpec, OutputFormat, OutputSpec, ResolvedInvocation, SourceSet,
+    build_afdata_cli, cli_help_event, cli_parse_output, cli_version_event, render_cli_reference,
 };
+use agent_first_ui::cli::UiDeliveryOffer;
 // The unbound registry still resolves to `CliOutcome`; only the parts of this
 // file that reuse it without a handler binding need the name.
 #[cfg(any(feature = "interactive", test))]
@@ -62,15 +61,24 @@ pub enum Mode {
     Cli(Box<CliRequest>),
     Pipe(PipeInit),
     Interactive(InteractiveInit),
-    #[cfg(feature = "rpc")]
-    Rpc(RpcInit),
-    #[cfg(not(feature = "rpc"))]
-    Rpc(RpcStub),
     #[cfg(feature = "rest")]
     Rest(RestInit),
+    /// `afpay api export`: write the OpenAPI document and standalone JSON
+    /// Schemas the HTTP API is described by.
+    #[cfg(feature = "rest")]
+    ApiExport(ApiExportRequest),
+    Ui(Box<UiInit>),
     Data(DataOp),
     SkillAdmin(SkillAdminRequest),
     Container(ContainerRequest),
+}
+
+/// Payload for `afpay api export`, handled by `crate::api`.
+#[cfg(feature = "rest")]
+pub struct ApiExportRequest {
+    pub directory: String,
+    pub force: bool,
+    pub output: OutputFormat,
 }
 
 /// Payload for `afpay container …`, handled by `crate::container`.
@@ -78,9 +86,6 @@ pub struct ContainerRequest {
     pub action: ContainerCliAction,
     pub output: OutputFormat,
 }
-
-#[cfg(not(feature = "rpc"))]
-pub struct RpcStub;
 
 // ── Agent Skill administration ──────────────
 // The CLI-facing enums below convert to `agent_first_data::skill` enums in
@@ -156,9 +161,9 @@ pub struct CliRequest {
     pub output: OutputFormat,
     pub log: Vec<String>,
     pub data_dir: Option<String>,
-    pub rpc_endpoint: Option<String>,
-    #[cfg_attr(not(feature = "rpc"), allow(dead_code))]
-    pub rpc_secret: Option<String>,
+    pub peer_url: Option<String>,
+    #[cfg_attr(not(feature = "federation"), allow(dead_code))]
+    pub peer_api_key_secret: Option<String>,
     pub startup_argv: Vec<String>,
     pub startup_args: serde_json::Value,
     pub startup_requested: bool,
@@ -193,8 +198,31 @@ pub struct InteractiveInit {
     pub output: OutputFormat,
     pub log: Vec<String>,
     pub data_dir: Option<String>,
-    pub rpc_endpoint: Option<String>,
-    pub rpc_secret: Option<String>,
+    pub peer_url: Option<String>,
+    pub peer_api_key_secret: Option<String>,
+}
+
+/// Payload for `afpay ui …`, handled by `crate::mode::ui`.
+///
+/// It carries a fully-built `Input` rather than the flags that produced one,
+/// because a panel is not a second way to ask afpay a question: `dispatch`
+/// routes `ui wallet` through the very same `invocation_to_input` arm as
+/// `balance`, so the window and the agent read one request. What differs is
+/// only the ending — a person closing a window instead of a result on stdout.
+#[allow(dead_code)]
+pub struct UiInit {
+    pub input: Input,
+    /// What the person typed as `--mode`, unresolved. `None` means they typed
+    /// nothing, which AFUI needs to tell apart from `--mode window`: a default
+    /// applied here would shadow `AFUI_DELIVERY` and pop a window on a machine
+    /// nobody is sitting at.
+    pub delivery: Option<agent_first_ui::UiDeliveryMode>,
+    pub output: OutputFormat,
+    pub log: Vec<String>,
+    pub data_dir: Option<String>,
+    pub startup_argv: Vec<String>,
+    pub startup_args: serde_json::Value,
+    pub startup_requested: bool,
 }
 
 // ── Container orchestration (afpay container …) ──────────────
@@ -215,7 +243,6 @@ pub struct ContainerCommonArgs {
 pub struct ContainerInstallArgs {
     pub common: ContainerCommonArgs,
     pub port: u16,
-    pub mode: ContainerModeArg,
     pub with: Vec<String>,
     pub allow: Vec<String>,
     pub btc_network: String,
@@ -236,7 +263,6 @@ pub struct ContainerUninstallArgs {
 pub struct ContainerStatusArgs {
     pub common: ContainerCommonArgs,
     pub port: u16,
-    pub mode: ContainerModeArg,
     pub reveal_daemon_secret: bool,
 }
 
@@ -252,12 +278,6 @@ pub enum ContainerRuntimeArg {
     Apple,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContainerModeArg {
-    Rest,
-    Rpc,
-}
-
 // ═══════════════════════════════════════════
 // Registry: shared vocabulary
 // ═══════════════════════════════════════════
@@ -269,23 +289,43 @@ const EVERY_AGENT: &str = "all";
 /// Arguments every CLI-mode command accepts. They used to be root-level
 /// flags that had to precede the subcommand; the registry is flat, so each
 /// command declares them and they are written after the command path.
-const RUNTIME_IDS: [&str; 5] = ["data_dir", "log", "rpc_endpoint", "rpc_secret", "dry_run"];
+const RUNTIME_IDS: [&str; 5] = [
+    "data_dir",
+    "log",
+    "peer_url",
+    "peer_api_key_secret",
+    "dry_run",
+];
 
 fn runtime_args() -> [ArgSpec; 5] {
     [
         data_dir_arg(),
-        ArgSpec::option("--log", "FILTER")
-            .repeatable()
-            .about("Log filter to enable; repeat, or pass a comma-separated list"),
-        ArgSpec::option("--rpc-endpoint", "HOST:PORT")
-            .about("Forward the command to a remote afpay RPC daemon instead of running locally"),
-        ArgSpec::option("--rpc-secret", "SECRET").about("Shared secret for --rpc-endpoint"),
+        log_arg(),
+        peer_url_arg("Run this command on another afpay node instead of locally"),
+        peer_api_key_arg(),
         ArgSpec::flag("--dry-run").about("Preview the command without executing it"),
     ]
 }
 
+/// The peer's HTTP API, which is the only face another afpay node talks to.
+fn peer_url_arg(about: &str) -> ArgSpec {
+    ArgSpec::option("--peer-url", "URL").about(about)
+}
+
+fn peer_api_key_arg() -> ArgSpec {
+    ArgSpec::option("--peer-api-key-secret", "SOURCE")
+        .about("The peer's --rest-api-key-secret; required with --peer-url")
+        .sources(secret_sources())
+}
+
 fn data_dir_arg() -> ArgSpec {
     ArgSpec::option("--data-dir", "DIR").about("Wallet and data directory")
+}
+
+fn log_arg() -> ArgSpec {
+    ArgSpec::option("--log", "FILTER")
+        .repeatable()
+        .about("Log filter to enable; repeat, or pass a comma-separated list")
 }
 
 fn protocol() -> OutputSpec {
@@ -356,9 +396,18 @@ fn network_arg() -> ArgSpec {
         .about("Restrict to one network")
 }
 
+fn cashu_check_arg() -> ArgSpec {
+    ArgSpec::flag("--cashu-check")
+        .about("Verify Cashu proofs against the mint; slower but authoritative")
+}
+
 /// Arguments shared by every `send`. `onchain_memo` is opt-in because Lightning
 /// has no on-chain memo to carry: it is absent from `ln send` entirely rather
 /// than accepted and then rejected.
+///
+/// `--idempotency-key` is not here. A `send` resolves a plan and moves nothing,
+/// so it has no outcome to replay; the key belongs to `pay confirm`, which is
+/// the one command that pays.
 fn send_args(onchain_memo: bool) -> Vec<ArgSpec> {
     let mut args = vec![wallet_arg("Source wallet ID (auto-selected if omitted)")];
     if onchain_memo {
@@ -372,18 +421,14 @@ fn send_args(onchain_memo: bool) -> Vec<ArgSpec> {
             .repeatable()
             .about("Local bookkeeping annotation; bare text is stored as note=<text>"),
     );
-    args.push(ArgSpec::option("--idempotency-key", "KEY").about(
-        "Opaque key (≤128 chars); a repeat with the same key and body replays the first \
-         response instead of re-broadcasting",
-    ));
     args
 }
 
 fn send_ids(onchain_memo: bool) -> Vec<&'static str> {
     if onchain_memo {
-        vec!["wallet", "onchain_memo", "local_memo", "idempotency_key"]
+        vec!["wallet", "onchain_memo", "local_memo"]
     } else {
-        vec!["wallet", "local_memo", "idempotency_key"]
+        vec!["wallet", "local_memo"]
     }
 }
 
@@ -395,15 +440,34 @@ fn receive_args() -> Vec<ArgSpec> {
         ArgSpec::option_i64("--wait-timeout-s", "SECONDS").about("Give up waiting after N seconds"),
         ArgSpec::option_i64("--wait-poll-interval-ms", "MS").about("Poll interval while waiting"),
         ArgSpec::flag("--qr-svg-file").about("Write the receive QR payload to an SVG file"),
+        idempotency_key_arg(
+            "a repeat with the same key and body returns the receive already placed instead of \
+             minting a second invoice",
+        ),
     ]
 }
 
-const RECEIVE_IDLE_IDS: [&str; 2] = ["wallet", "qr_svg_file"];
-const RECEIVE_WAIT_IDS: [&str; 4] = [
+/// The one `--idempotency-key` spelling, so every command that honours a key
+/// describes it the same way and none advertises one it would ignore.
+fn wallet_create_idempotency_key_arg() -> ArgSpec {
+    idempotency_key_arg(
+        "a repeat with the same key and body reports the wallet the first call created instead \
+         of generating a second key",
+    )
+}
+
+fn idempotency_key_arg(effect: &str) -> ArgSpec {
+    ArgSpec::option("--idempotency-key", "KEY")
+        .about(format!("Opaque key (\u{2264}128 chars); {effect}"))
+}
+
+const RECEIVE_IDLE_IDS: [&str; 3] = ["wallet", "qr_svg_file", "idempotency_key"];
+const RECEIVE_WAIT_IDS: [&str; 5] = [
     "wallet",
     "qr_svg_file",
     "wait_timeout_s",
     "wait_poll_interval_ms",
+    "idempotency_key",
 ];
 
 /// Both shapes of one `receive`: an address/invoice now, or the same call
@@ -666,8 +730,9 @@ fn restore_command(net: &'static str, label: &str) -> CommandSpec {
                 .about("Clear existing data before restoring instead of merging"),
         )
         .arg(
-            ArgSpec::option("--pg-url-secret", "URL")
-                .about("Override the PostgreSQL connection URL for the pg restore step"),
+            ArgSpec::option("--pg-url-secret", "SOURCE")
+                .about("Override the PostgreSQL connection URL for the pg restore step")
+                .sources(secret_sources()),
         )
         .combination(
             Combination::new(format!("{net}-restore"))
@@ -713,6 +778,8 @@ fn build_cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
         .into_iter()
         .chain(network_commands())
         .chain(cross_network_commands())
+        .chain(ui_commands())
+        .chain(api_commands())
         .chain(skill_commands())
         .chain(container_commands())
     {
@@ -723,41 +790,28 @@ fn build_cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
 }
 
 /// `afpay` with no subcommand runs a long-lived session instead of one request.
-/// Each session is its own shape, so the arguments that only configure the gRPC
+/// Each session is its own shape, so the arguments that only configure the HTTP
 /// daemon cannot be passed to the REPL, and vice versa.
 fn root_command() -> CommandSpec {
-    let mut modes = vec!["pipe", "interactive", "tui", "rpc"];
+    let mut modes = vec!["pipe", "interactive", "tui"];
     #[cfg(feature = "rest")]
     modes.push("rest");
 
-    let mut command = CommandSpec::new(Vec::<String>::new())
-        .about("Run a long-lived afpay session instead of a single command")
-        .arg(
-            ArgSpec::option_enum("--mode", modes)
-                .value_name("MODE")
-                .about("Long-lived session to run instead of a single command"),
-        )
-        .arg(data_dir_arg())
-        .arg(
-            ArgSpec::option("--log", "FILTER")
-                .repeatable()
-                .about("Log filter to enable; repeat, or pass a comma-separated list"),
-        )
-        .arg(
-            ArgSpec::option("--rpc-endpoint", "HOST:PORT")
-                .about("Drive a remote afpay RPC daemon from this session"),
-        )
-        .arg(ArgSpec::option("--rpc-secret", "SECRET").about("Shared secret for the RPC channel"))
-        .arg(
-            ArgSpec::option("--rpc-listen", "HOST:PORT")
-                .default("127.0.0.1:9400")
-                .about("Listen address for the RPC daemon"),
-        )
-        .arg(
-            ArgSpec::flag("--public-listen").about(
+    let mut command =
+        CommandSpec::new(Vec::<String>::new())
+            .about("Run a long-lived afpay session instead of a single command")
+            .arg(
+                ArgSpec::option_enum("--mode", modes)
+                    .value_name("MODE")
+                    .about("Long-lived session to run instead of a single command"),
+            )
+            .arg(data_dir_arg())
+            .arg(log_arg())
+            .arg(peer_url_arg("Drive another afpay node from this session"))
+            .arg(peer_api_key_arg())
+            .arg(ArgSpec::flag("--public-listen").about(
                 "Allow binding to a non-loopback address; use only behind TLS or a firewall",
-            ),
-        );
+            ));
 
     #[cfg(feature = "rest")]
     {
@@ -768,8 +822,9 @@ fn root_command() -> CommandSpec {
                     .about("Listen address for the REST server"),
             )
             .arg(
-                ArgSpec::option("--rest-api-key-secret", "KEY")
-                    .about("Bearer API key the REST server requires"),
+                ArgSpec::option("--rest-api-key-secret", "SOURCE")
+                    .about("Bearer API key the REST server requires")
+                    .sources(secret_sources()),
             );
     }
 
@@ -787,7 +842,7 @@ fn root_command() -> CommandSpec {
                 .action("mode_interactive")
                 .about("Human REPL with completion and QR helpers")
                 .fixed("mode", "interactive")
-                .optional(["data_dir", "log", "rpc_endpoint", "rpc_secret"])
+                .optional(["data_dir", "log", "peer_url", "peer_api_key_secret"])
                 .output(session()),
         )
         .combination(
@@ -795,21 +850,7 @@ fn root_command() -> CommandSpec {
                 .action("mode_tui")
                 .about("Full-screen terminal workflow over the same command interface")
                 .fixed("mode", "tui")
-                .optional(["data_dir", "log", "rpc_endpoint", "rpc_secret"])
-                .output(session()),
-        )
-        .combination(
-            Combination::new("session-rpc")
-                .action("mode_rpc")
-                .about("Encrypted gRPC daemon; only this shape accepts --rpc-listen")
-                .fixed("mode", "rpc")
-                .optional([
-                    "data_dir",
-                    "log",
-                    "rpc_listen",
-                    "rpc_secret",
-                    "public_listen",
-                ])
+                .optional(["data_dir", "log", "peer_url", "peer_api_key_secret"])
                 .output(session()),
         );
 
@@ -902,8 +943,9 @@ fn global_commands() -> Vec<CommandSpec> {
                     .about("Clear existing data before restoring instead of merging"),
             )
             .arg(
-                ArgSpec::option("--pg-url-secret", "URL")
-                    .about("Override the PostgreSQL connection URL for the pg restore step"),
+                ArgSpec::option("--pg-url-secret", "SOURCE")
+                    .about("Override the PostgreSQL connection URL for the pg restore step")
+                    .sources(secret_sources()),
             )
             .arg(
                 ArgSpec::option("--extra-dir", "LABEL=/path")
@@ -958,13 +1000,15 @@ fn cashu_commands() -> Vec<CommandSpec> {
         .arg(ArgSpec::option("--cashu-mint", "URL").about("Cashu mint URL"))
         .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
         .arg(
-            ArgSpec::option("--mnemonic-secret", "WORDS")
-                .about("Existing BIP39 mnemonic to restore this wallet from"),
+            ArgSpec::option("--mnemonic-secret", "SOURCE")
+                .about("Existing BIP39 mnemonic to restore this wallet from")
+                .sources(secret_sources()),
         )
+        .arg(wallet_create_idempotency_key_arg())
         .combination(
             shape("cashu-wallet-create", "cashu_wallet_create")
                 .required(["cashu_mint"])
-                .optional(["label", "mnemonic_secret"]),
+                .optional(["label", "mnemonic_secret", "idempotency_key"]),
         ),
         leaf(
             ["cashu", "wallet", "restore"],
@@ -1055,31 +1099,44 @@ fn ln_wallet_create_command() -> CommandSpec {
                 .value_name("BACKEND")
                 .about("Lightning backend this wallet talks to"),
         )
-        .arg(ArgSpec::option("--nwc-uri-secret", "URI").about("NWC connection URI"))
+        .arg(
+            ArgSpec::option("--nwc-uri-secret", "SOURCE")
+                .about("NWC connection URI")
+                .sources(secret_sources()),
+        )
         .arg(ArgSpec::option("--endpoint-url", "URL").about("Backend HTTP endpoint"))
-        .arg(ArgSpec::option("--password-secret", "PASSWORD").about("phoenixd HTTP password"))
-        .arg(ArgSpec::option("--admin-key-secret", "KEY").about("LNbits admin API key"))
+        .arg(
+            ArgSpec::option("--password-secret", "SOURCE")
+                .about("phoenixd HTTP password")
+                .sources(secret_sources()),
+        )
+        .arg(
+            ArgSpec::option("--admin-key-secret", "SOURCE")
+                .about("LNbits admin API key")
+                .sources(secret_sources()),
+        )
         .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
+        .arg(wallet_create_idempotency_key_arg())
         .combination(
             shape("ln-wallet-create-nwc", "ln_wallet_create")
                 .about("Nostr Wallet Connect; authenticates with a connection URI")
                 .fixed("backend", "nwc")
                 .required(["nwc_uri_secret"])
-                .optional(["label"]),
+                .optional(["label", "idempotency_key"]),
         )
         .combination(
             shape("ln-wallet-create-phoenixd", "ln_wallet_create")
                 .about("phoenixd; authenticates with an endpoint and HTTP password")
                 .fixed("backend", "phoenixd")
                 .required(["endpoint_url", "password_secret"])
-                .optional(["label"]),
+                .optional(["label", "idempotency_key"]),
         )
         .combination(
             shape("ln-wallet-create-lnbits", "ln_wallet_create")
                 .about("LNbits; authenticates with an endpoint and admin API key")
                 .fixed("backend", "lnbits")
                 .required(["endpoint_url", "admin_key_secret"])
-                .optional(["label"]),
+                .optional(["label", "idempotency_key"]),
         )
 }
 
@@ -1133,12 +1190,13 @@ fn sol_commands() -> Vec<CommandSpec> {
             .arg(
                 ArgSpec::option_enum("--sol-cluster", ["mainnet-beta", "devnet", "testnet"])
                     .value_name("CLUSTER")
-                    .about("Cluster pinned to this wallet; sends elsewhere are rejected"),
+                    .about("Intended cluster; plans warn when RPC hostname evidence differs"),
             )
+            .arg(wallet_create_idempotency_key_arg())
             .combination(
                 shape("sol-wallet-create", "sol_wallet_create")
                     .required(["sol_rpc_endpoint"])
-                    .optional(["label", "sol_cluster"]),
+                    .optional(["label", "sol_cluster", "idempotency_key"]),
             ),
         {
             let mut command = leaf(["sol", "send"], "Send SOL or an SPL token")
@@ -1195,10 +1253,11 @@ fn evm_commands() -> Vec<CommandSpec> {
                     .about("EVM chain ID"),
             )
             .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
+            .arg(wallet_create_idempotency_key_arg())
             .combination(
                 shape("evm-wallet-create", "evm_wallet_create")
                     .required(["evm_rpc_endpoint"])
-                    .optional(["chain_id", "label"]),
+                    .optional(["chain_id", "label", "idempotency_key"]),
             ),
         {
             let mut command = leaf(
@@ -1263,13 +1322,15 @@ fn btc_wallet_create_command() -> CommandSpec {
             .arg(ArgSpec::option("--btc-esplora-url", "URL").about("Custom Esplora API URL"))
             .arg(ArgSpec::option("--btc-core-url", "URL").about("Bitcoin Core RPC URL"))
             .arg(
-                ArgSpec::option("--btc-core-auth-secret", "USER:PASS")
-                    .about("Bitcoin Core RPC credentials"),
+                ArgSpec::option("--btc-core-auth-secret", "SOURCE")
+                    .about("Bitcoin Core RPC credentials as USER:PASS")
+                    .sources(secret_sources()),
             )
             .arg(ArgSpec::option("--btc-electrum-url", "URL").about("Electrum server URL"))
             .arg(
-                ArgSpec::option("--mnemonic-secret", "WORDS")
-                    .about("Existing BIP39 mnemonic to restore this wallet from"),
+                ArgSpec::option("--mnemonic-secret", "SOURCE")
+                    .about("Existing BIP39 mnemonic to restore this wallet from")
+                    .sources(secret_sources()),
             )
             .arg(ArgSpec::option("--label", "LABEL").about("Optional wallet label"))
     };
@@ -1278,30 +1339,34 @@ fn btc_wallet_create_command() -> CommandSpec {
         "btc_address_type",
         "mnemonic_secret",
         "label",
+        "idempotency_key",
     ];
-    base(leaf(["btc", "wallet", "create"], "Create a Bitcoin wallet"))
-        .combination(
-            shape("btc-wallet-create-esplora", "btc_wallet_create")
-                .about("Esplora chain source; only this shape accepts --btc-esplora-url")
-                .fixed("btc_backend", "esplora")
-                .optional(["btc_esplora_url"])
-                .optional(common),
-        )
-        .combination(
-            shape("btc-wallet-create-core-rpc", "btc_wallet_create")
-                .about("Bitcoin Core RPC chain source; requires --btc-core-url")
-                .fixed("btc_backend", "core-rpc")
-                .required(["btc_core_url"])
-                .optional(["btc_core_auth_secret"])
-                .optional(common),
-        )
-        .combination(
-            shape("btc-wallet-create-electrum", "btc_wallet_create")
-                .about("Electrum chain source; requires --btc-electrum-url")
-                .fixed("btc_backend", "electrum")
-                .required(["btc_electrum_url"])
-                .optional(common),
-        )
+    base(
+        leaf(["btc", "wallet", "create"], "Create a Bitcoin wallet")
+            .arg(wallet_create_idempotency_key_arg()),
+    )
+    .combination(
+        shape("btc-wallet-create-esplora", "btc_wallet_create")
+            .about("Esplora chain source; only this shape accepts --btc-esplora-url")
+            .fixed("btc_backend", "esplora")
+            .optional(["btc_esplora_url"])
+            .optional(common),
+    )
+    .combination(
+        shape("btc-wallet-create-core-rpc", "btc_wallet_create")
+            .about("Bitcoin Core RPC chain source; requires --btc-core-url")
+            .fixed("btc_backend", "core-rpc")
+            .required(["btc_core_url"])
+            .optional(["btc_core_auth_secret"])
+            .optional(common),
+    )
+    .combination(
+        shape("btc-wallet-create-electrum", "btc_wallet_create")
+            .about("Electrum chain source; requires --btc-electrum-url")
+            .fixed("btc_backend", "electrum")
+            .required(["btc_electrum_url"])
+            .optional(common),
+    )
 }
 
 fn btc_commands() -> Vec<CommandSpec> {
@@ -1346,10 +1411,7 @@ fn cross_network_commands() -> Vec<CommandSpec> {
         leaf(["balance"], "Balance across every network")
             .arg(wallet_arg("Wallet ID (omit to show every wallet)"))
             .arg(network_arg())
-            .arg(
-                ArgSpec::flag("--cashu-check")
-                    .about("Verify Cashu proofs against the mint; slower but authoritative"),
-            )
+            .arg(cashu_check_arg())
             .combination(shape("balance-all", "balance").optional([
                 "wallet",
                 "network",
@@ -1411,6 +1473,24 @@ fn cross_network_commands() -> Vec<CommandSpec> {
         )
         .combination(
             shape("history-update", "history_update").optional(["wallet", "network", "limit"]),
+        ),
+        group(["pay"], "Confirm a payment that was planned"),
+        leaf(
+            ["pay", "confirm"],
+            "Pay by confirming a plan a `send` resolved — the only command that moves money",
+        )
+        .arg(
+            ArgSpec::option("--plan-id", "PLAN_ID")
+                .about("The plan_id a `send` returned. Single-use, and refused once it expires or the terms it was resolved against change"),
+        )
+        .arg(ArgSpec::option("--idempotency-key", "KEY").about(
+            "Opaque key (\u{2264}128 chars); a repeat with the same key and plan replays the first \
+             response instead of paying twice",
+        ))
+        .combination(
+            shape("pay-confirm", "pay_confirm")
+                .required(["plan_id"])
+                .optional(["idempotency_key"]),
         ),
         group(["limit"], "Cross-network spend-limit administration"),
         leaf(
@@ -1495,6 +1575,236 @@ fn skill_command(verb: &str, about: &str, force: bool) -> CommandSpec {
         )
 }
 
+// ═══════════════════════════════════════════
+// Windows onto afpay data
+// ═══════════════════════════════════════════
+
+/// `afpay ui …`: a window a person reads or answers, not a result an agent
+/// parses.
+///
+/// This is its own verb family rather than a `--ui` flag on `balance` or `send`
+/// because the endings differ: those verbs return a result and exit, while a
+/// panel blocks until a person is done with it. One verb cannot own both
+/// endings, so the output contract here is `session()` — progress while the
+/// window is open, then one terminal result — not `protocol()`.
+///
+/// `--peer-url` is absent on purpose: a window is opened on this machine,
+/// against this machine's wallets. Driving another node is what
+/// `<verb> --peer-url` is for. `--dry-run` is absent for the same reason it
+/// is meaningless here — a panel is not a result to preview.
+fn ui_commands() -> Vec<CommandSpec> {
+    vec![
+        group(
+            ["ui"],
+            "Open a window onto afpay; it ends when the person is done with it",
+        ),
+        CommandSpec::new(["ui", "wallet"])
+            .about("Open a panel showing every wallet and its balance")
+            .arg(data_dir_arg())
+            .arg(log_arg())
+            .arg(wallet_arg("Wallet ID (omit to show every wallet)"))
+            .arg(network_arg())
+            .arg(cashu_check_arg())
+            .arg(WATCH_PANEL_DELIVERY.arg("--mode"))
+            .combination(
+                Combination::new("ui-wallet")
+                    .action("ui_wallet")
+                    .about("Show the same balances `afpay balance` reports, in a window")
+                    .optional([
+                        "data_dir",
+                        "log",
+                        "wallet",
+                        "network",
+                        "cashu_check",
+                        "mode",
+                    ])
+                    .output(session()),
+            ),
+        ui_receive_command(),
+        ui_send_command(),
+    ]
+}
+
+/// The network a `ui` panel works on, fixed to one value by every shape.
+fn ui_network_arg(about: &str) -> ArgSpec {
+    ArgSpec::option_enum("--network", NETWORKS)
+        .value_name("NETWORK")
+        .about(about)
+}
+
+fn ui_shape(id: &str, action: &str, network: &str, about: &str) -> Combination {
+    Combination::new(format!("ui-{id}-{network}"))
+        .action(action)
+        .about(about)
+        .fixed("network", network)
+        .optional(["data_dir", "log", "mode"])
+        .output(session())
+}
+
+/// A panel that only *shows* something may also be reached over this machine's
+/// network, because what leaks if the URL does is a view.
+///
+/// The same value builds the flag here and the plan in `mode::ui`, so the
+/// words in `--help` and the deliveries that actually work cannot drift.
+pub(crate) const WATCH_PANEL_DELIVERY: UiDeliveryOffer = UiDeliveryOffer::WithLink;
+
+/// A panel that *authorizes* a payment may not. AFUI's link URL is a bearer
+/// capability: whoever holds it approves the send. A person who wants to
+/// approve from their phone can still register the session and reach it
+/// through `afui session serve`, which is AFUI's own front door rather than a
+/// URL that is itself the credential.
+pub(crate) const DECISION_PANEL_DELIVERY: UiDeliveryOffer = UiDeliveryOffer::Local;
+
+/// `afpay ui receive`: the address or invoice, drawn as a code to scan.
+///
+/// There is no `--wait` here, and its absence is the design. `<net> receive
+/// --wait` blocks the *request* until a payment settles, which would hold the
+/// code back until after the money had already arrived — the person would be
+/// shown what to scan only once scanning it was pointless. In a panel the
+/// window is the wait: the code is on screen the moment it opens, and the
+/// person closes it when they have been paid. An agent that needs the blocking
+/// form still has `<net> receive --wait`, which returns a result it can read.
+fn ui_receive_command() -> CommandSpec {
+    CommandSpec::new(["ui", "receive"])
+        .about("Open a panel showing the receive address or invoice as a code to scan")
+        .arg(data_dir_arg())
+        .arg(log_arg())
+        .arg(ui_network_arg("Network to be paid on"))
+        .arg(WATCH_PANEL_DELIVERY.arg("--mode"))
+        .arg(wallet_arg("Wallet ID (auto-selected if omitted)"))
+        .arg(ArgSpec::option_i64("--amount-sats", "SATS").about("Amount in sats"))
+        .arg(ArgSpec::option("--onchain-memo", "TEXT").about("Memo recorded with the request"))
+        // One shape per network, because which of these arguments means
+        // anything follows from the network — the same reason `<net> receive`
+        // takes a different argument set on each.
+        .combination(
+            ui_receive_shape(
+                "cashu",
+                "A Lightning invoice that mints Cashu proofs when paid",
+            )
+            .optional(["wallet", "amount_sats", "onchain_memo"]),
+        )
+        .combination(
+            ui_receive_shape("ln", "A BOLT11 invoice, or the reusable BOLT12 offer")
+                .optional(["wallet", "amount_sats"]),
+        )
+        .combination(
+            ui_receive_shape("sol", "The wallet's Solana receive address").optional(["wallet"]),
+        )
+        .combination(
+            ui_receive_shape("evm", "The wallet's EVM receive address")
+                .optional(["wallet", "onchain_memo"]),
+        )
+        .combination(
+            ui_receive_shape("btc", "The wallet's Bitcoin receive address").optional(["wallet"]),
+        )
+}
+
+fn ui_receive_shape(network: &str, about: &str) -> Combination {
+    ui_shape("receive", "ui_receive", network, about)
+}
+
+/// `afpay ui send`: a resolved payment, shown to a person who approves or
+/// refuses it.
+///
+/// Every shape mirrors the `<net> send` it corresponds to, argument for
+/// argument, and resolves through the same builder. The panel is a place to
+/// answer a question about a send, never a second way to describe one.
+fn ui_send_command() -> CommandSpec {
+    let mut command = CommandSpec::new(["ui", "send"])
+        .about("Open a panel showing a resolved payment and wait for a person to approve it")
+        .arg(data_dir_arg())
+        .arg(log_arg())
+        .arg(ui_network_arg("Network the payment leaves on"))
+        .arg(DECISION_PANEL_DELIVERY.arg("--mode"))
+        .arg(
+            ArgSpec::option("--to", "DESTINATION")
+                .about("Recipient address, BOLT11 invoice, or BOLT12 offer"),
+        )
+        .arg(
+            ArgSpec::option_i64("--amount", "BASE_UNITS")
+                .about("Amount in base units (lamports for SOL, wei for ETH)"),
+        )
+        .arg(ArgSpec::option_i64("--amount-sats", "SATS").about("Amount in satoshis"))
+        .arg(ArgSpec::option("--token", "TOKEN").about("`native`, or a registered token symbol"))
+        .arg(
+            ArgSpec::option("--reference", "KEY")
+                .about("Reference key for order binding (base58-encoded 32 bytes)"),
+        )
+        .arg(
+            ArgSpec::option_i64("--chain-id", "ID")
+                .about("Pin the chain; a mismatched wallet returns wrong_chain"),
+        );
+    for argument in send_args(true) {
+        command = command.arg(argument);
+    }
+    command
+        .combination(
+            ui_send_shape("cashu", "Melt Cashu proofs to pay a Lightning invoice")
+                .required(["to"])
+                .optional(send_ids(true)),
+        )
+        .combination(
+            // Lightning carries no on-chain memo, so this shape does not offer
+            // one — the same asymmetry `ln send` already has.
+            ui_send_shape("ln", "Pay a BOLT11 invoice or a BOLT12 offer")
+                .required(["to"])
+                .optional(["amount_sats"])
+                .optional(send_ids(false)),
+        )
+        .combination(
+            ui_send_shape("sol", "Send SOL or an SPL token")
+                .required(["to", "amount", "token"])
+                .optional(["reference"])
+                .optional(send_ids(true)),
+        )
+        .combination(
+            ui_send_shape("evm", "Send the chain's native token or an ERC-20")
+                .required(["to", "amount", "token"])
+                .optional(["chain_id"])
+                .optional(send_ids(true)),
+        )
+        .combination(
+            ui_send_shape("btc", "Send BTC on-chain")
+                .required(["to", "amount_sats"])
+                .optional(send_ids(true)),
+        )
+}
+
+fn ui_send_shape(network: &str, about: &str) -> Combination {
+    ui_shape("send", "ui_send", network, about)
+}
+
+/// `afpay api …`: the contract the HTTP domain API is described by. Reading
+/// it needs no daemon and no credential, so it is a plain command rather than
+/// something only a running server can answer.
+#[cfg(feature = "rest")]
+fn api_commands() -> Vec<CommandSpec> {
+    vec![
+        group(["api"], "The HTTP domain API contract"),
+        CommandSpec::new(["api", "export"])
+            .about("Write the OpenAPI document and standalone JSON Schemas to a directory")
+            .arg(
+                ArgSpec::option("--directory", "DIR")
+                    .default("openapi")
+                    .about("Destination directory"),
+            )
+            .arg(ArgSpec::flag("--force").about("Replace generated files that are already there"))
+            .combination(
+                Combination::new("api-export")
+                    .action("api_export")
+                    .about("Export the contract")
+                    .optional(["directory", "force"])
+                    .output(protocol()),
+            ),
+    ]
+}
+
+#[cfg(not(feature = "rest"))]
+fn api_commands() -> Vec<CommandSpec> {
+    Vec::new()
+}
+
 fn skill_commands() -> Vec<CommandSpec> {
     vec![
         group(
@@ -1533,13 +1843,6 @@ fn container_base(command: CommandSpec) -> CommandSpec {
         )
 }
 
-fn container_mode_arg() -> ArgSpec {
-    ArgSpec::option_enum("--mode", ["rest", "rpc"])
-        .value_name("MODE")
-        .default("rest")
-        .about("Server mode: rest (HTTP + bearer key) or rpc (gRPC + PSK)")
-}
-
 fn container_port_arg() -> ArgSpec {
     ArgSpec::option_i64("--port", "PORT")
         .default_i64(9401)
@@ -1556,7 +1859,6 @@ fn container_commands() -> Vec<CommandSpec> {
         "runtime",
         "name",
         "port",
-        "mode",
         "with",
         "allow",
         "btc_network",
@@ -1574,7 +1876,6 @@ fn container_commands() -> Vec<CommandSpec> {
                 .about("Build the image if missing, run the daemon, and print the client command"),
         )
         .arg(container_port_arg())
-        .arg(container_mode_arg())
         .arg(
             ArgSpec::option_enum("--with", ["phoenixd", "bitcoind"])
                 .value_name("DAEMON")
@@ -1650,12 +1951,11 @@ fn container_commands() -> Vec<CommandSpec> {
             ),
         )
         .arg(container_port_arg())
-        .arg(container_mode_arg())
         .arg(reveal_arg())
         .combination(
             Combination::new("container-status")
                 .action("container_status")
-                .optional(["runtime", "name", "port", "mode", "reveal_daemon_secret"])
+                .optional(["runtime", "name", "port", "reveal_daemon_secret"])
                 .output(protocol()),
         ),
         // The runtime writes the log bytes straight through this process, so
@@ -1693,7 +1993,6 @@ fn action_ids() -> Vec<&'static str> {
         "mode_pipe",
         "mode_interactive",
         "mode_tui",
-        "mode_rpc",
         "global_limit_add",
         "global_config_get",
         "global_config_set",
@@ -1730,6 +2029,10 @@ fn action_ids() -> Vec<&'static str> {
         "btc_send",
         "btc_receive",
         "balance",
+        "pay_confirm",
+        "ui_wallet",
+        "ui_receive",
+        "ui_send",
         "history_list",
         "history_status",
         "history_update",
@@ -1746,7 +2049,10 @@ fn action_ids() -> Vec<&'static str> {
         "container_logs",
     ];
     #[cfg(feature = "rest")]
-    ids.push("mode_rest");
+    {
+        ids.push("mode_rest");
+        ids.push("api_export");
+    }
     ids
 }
 
@@ -1755,6 +2061,32 @@ type ModeHandler = fn(&ResolvedInvocation) -> Result<Mode, CliError>;
 // ═══════════════════════════════════════════
 // Invocation accessors
 // ═══════════════════════════════════════════
+
+/// The sources every afpay credential accepts.
+///
+/// No stream sources: afpay's REST and pipe modes own stdin, and a prompt would
+/// block a daemon an agent started.
+fn secret_sources() -> SourceSet {
+    SourceSet::config()
+}
+
+/// Read a credential the caller named a source for, instead of typing it on a
+/// command line where `ps`, the shell history, and every log that echoes argv
+/// can see it.
+///
+/// The registry refused an unacceptable source while resolving argv; what can
+/// still fail is the read, and `read_secret` keeps the file's contents out of
+/// the message.
+fn opt_secret(invocation: &ResolvedInvocation, id: &str) -> Result<Option<String>, CliError> {
+    let Some(raw) = opt_str(invocation, id) else {
+        return Ok(None);
+    };
+    secret_sources()
+        .parse(&raw)
+        .and_then(|source| source.read_secret())
+        .map(|secret| Some(secret.expose_secret().to_string()))
+        .map_err(|error| CliError::invalid_value(format!("--{} {error}", id.replace('_', "-"))))
+}
 
 fn opt_str(invocation: &ResolvedInvocation, id: &str) -> Option<String> {
     invocation
@@ -1819,6 +2151,15 @@ fn opt_usize(invocation: &ResolvedInvocation, id: &str) -> Result<Option<usize>,
     Ok(unsigned(invocation, id, usize::MAX as u64)?.map(|value| value as usize))
 }
 
+/// The `--mode` word a person typed. Absent means absent — see
+/// [`UiInit::delivery`].
+fn delivery_of(
+    invocation: &ResolvedInvocation,
+) -> Result<Option<agent_first_ui::UiDeliveryMode>, CliError> {
+    agent_first_ui::cli::delivery_of(invocation, "mode")
+        .map_err(|error| CliError::new("cli_invalid_argument_value", error.to_string()))
+}
+
 fn format_of(invocation: &ResolvedInvocation) -> OutputFormat {
     invocation
         .output_plan()
@@ -1874,8 +2215,7 @@ fn startup_args(invocation: &ResolvedInvocation, mode: &str) -> serde_json::Valu
         "output_format": invocation.output_plan().format().unwrap_or("json"),
         "output_to": invocation.output_plan().destination().unwrap_or("split"),
         "data_dir": opt_str(invocation, "data_dir"),
-        "rpc_endpoint": opt_str(invocation, "rpc_endpoint"),
-        "rpc_listen_address": opt_str(invocation, "rpc_listen"),
+        "peer_url": opt_str(invocation, "peer_url"),
         "rest_listen_address": opt_str(invocation, "rest_listen"),
         "public_listen_enabled": flag(invocation, "public_listen"),
     })
@@ -2012,23 +2352,23 @@ fn validate_token_not_contract(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve rpc_endpoint/rpc_secret: CLI args take priority, then config.toml.
-fn resolve_rpc_args(
-    cli_endpoint: Option<String>,
-    cli_secret: Option<String>,
+/// Resolve peer_url/peer_api_key_secret: CLI args take priority, then config.toml.
+fn resolve_peer_args(
+    cli_url: Option<String>,
+    cli_api_key: Option<String>,
     data_dir: Option<&str>,
 ) -> (Option<String>, Option<String>) {
-    if cli_endpoint.is_some() {
-        return (cli_endpoint, cli_secret);
+    if cli_url.is_some() {
+        return (cli_url, cli_api_key);
     }
     let dir = data_dir
         .map(|value| value.to_string())
         .unwrap_or_else(|| RuntimeConfig::default().data_dir);
     let config = RuntimeConfig::load_from_dir(&dir).unwrap_or_default();
-    if config.rpc_endpoint.is_some() {
-        return (config.rpc_endpoint, cli_secret.or(config.rpc_secret));
+    if config.peer_url.is_some() {
+        return (config.peer_url, cli_api_key.or(config.peer_api_key_secret));
     }
-    (None, cli_secret)
+    (None, cli_api_key)
 }
 
 // ═══════════════════════════════════════════
@@ -2120,22 +2460,24 @@ fn dispatch(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
             startup_requested: startup_requested(),
             scrub_parse_errors: flag(invocation, "public_listen"),
         })),
-        "mode_interactive" => Ok(interactive_mode(
-            invocation,
-            InteractiveFrontend::Interactive,
-        )),
-        "mode_tui" => Ok(interactive_mode(invocation, InteractiveFrontend::Tui)),
-        "mode_rpc" => rpc_mode(invocation),
+        "mode_interactive" => interactive_mode(invocation, InteractiveFrontend::Interactive),
+        "mode_tui" => interactive_mode(invocation, InteractiveFrontend::Tui),
         #[cfg(feature = "rest")]
         "mode_rest" => Ok(Mode::Rest(RestInit {
             listen: opt_str(invocation, "rest_listen").unwrap_or_default(),
-            api_key_secret: opt_str(invocation, "rest_api_key_secret"),
+            api_key_secret: opt_secret(invocation, "rest_api_key_secret")?,
             allow_public_listen: flag(invocation, "public_listen"),
             log: log_of(invocation),
             data_dir: opt_str(invocation, "data_dir"),
             startup_argv: std::env::args().collect(),
             startup_args: startup_args(invocation, "rest"),
             startup_requested: startup_requested(),
+        })),
+        #[cfg(feature = "rest")]
+        "api_export" => Ok(Mode::ApiExport(ApiExportRequest {
+            directory: opt_str(invocation, "directory").unwrap_or_default(),
+            force: flag(invocation, "force"),
+            output: format_of(invocation),
         })),
         "skill_status" | "skill_install" | "skill_uninstall" => {
             Ok(Mode::SkillAdmin(SkillAdminRequest {
@@ -2149,6 +2491,20 @@ fn dispatch(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
                 output: format_of(invocation),
             }))
         }
+        "ui_wallet" | "ui_receive" | "ui_send" => {
+            let id = crate::store::wallet::generate_request_identifier()
+                .map_err(|error| CliError::new("request_id_unavailable", error.to_string()))?;
+            Ok(Mode::Ui(Box::new(UiInit {
+                input: invocation_to_input(invocation, &id)?,
+                delivery: delivery_of(invocation)?,
+                output: format_of(invocation),
+                log: log_of(invocation),
+                data_dir: opt_str(invocation, "data_dir"),
+                startup_argv: std::env::args().collect(),
+                startup_args: startup_args(invocation, "ui"),
+                startup_requested: startup_requested(),
+            })))
+        }
         "global_backup" | "global_restore" | "network_backup" | "network_restore" => {
             Ok(Mode::Data(DataOp {
                 kind: data_op_kind(invocation, action)?,
@@ -2160,9 +2516,9 @@ fn dispatch(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
             let id = crate::store::wallet::generate_request_identifier()
                 .map_err(|error| CliError::new("request_id_unavailable", error.to_string()))?;
             let input = invocation_to_input(invocation, &id)?;
-            let (rpc_endpoint, rpc_secret) = resolve_rpc_args(
-                opt_str(invocation, "rpc_endpoint"),
-                opt_str(invocation, "rpc_secret"),
+            let (peer_url, peer_api_key_secret) = resolve_peer_args(
+                opt_str(invocation, "peer_url"),
+                opt_secret(invocation, "peer_api_key_secret")?,
                 opt_str(invocation, "data_dir").as_deref(),
             );
             Ok(Mode::Cli(Box::new(CliRequest {
@@ -2170,8 +2526,8 @@ fn dispatch(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
                 output: format_of(invocation),
                 log: log_of(invocation),
                 data_dir: opt_str(invocation, "data_dir"),
-                rpc_endpoint,
-                rpc_secret,
+                peer_url,
+                peer_api_key_secret,
                 startup_argv: std::env::args().collect(),
                 startup_args: startup_args(invocation, "cli"),
                 startup_requested: startup_requested(),
@@ -2181,42 +2537,24 @@ fn dispatch(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
     }
 }
 
-fn interactive_mode(invocation: &ResolvedInvocation, frontend: InteractiveFrontend) -> Mode {
+fn interactive_mode(
+    invocation: &ResolvedInvocation,
+    frontend: InteractiveFrontend,
+) -> Result<Mode, CliError> {
     let data_dir = opt_str(invocation, "data_dir");
-    let (rpc_endpoint, rpc_secret) = resolve_rpc_args(
-        opt_str(invocation, "rpc_endpoint"),
-        opt_str(invocation, "rpc_secret"),
+    let (peer_url, peer_api_key_secret) = resolve_peer_args(
+        opt_str(invocation, "peer_url"),
+        opt_secret(invocation, "peer_api_key_secret")?,
         data_dir.as_deref(),
     );
-    Mode::Interactive(InteractiveInit {
+    Ok(Mode::Interactive(InteractiveInit {
         frontend,
         output: format_of(invocation),
         log: log_of(invocation),
         data_dir,
-        rpc_endpoint,
-        rpc_secret,
-    })
-}
-
-fn rpc_mode(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
-    #[cfg(feature = "rpc")]
-    {
-        Ok(Mode::Rpc(RpcInit {
-            listen: opt_str(invocation, "rpc_listen").unwrap_or_default(),
-            rpc_secret: opt_str(invocation, "rpc_secret"),
-            allow_public_listen: flag(invocation, "public_listen"),
-            log: agent_first_data::LogFilters::new(log_of(invocation)),
-            data_dir: opt_str(invocation, "data_dir"),
-            startup_argv: std::env::args().collect(),
-            startup_args: startup_args(invocation, "rpc"),
-            startup_requested: startup_requested(),
-        }))
-    }
-    #[cfg(not(feature = "rpc"))]
-    {
-        let _ = invocation;
-        Ok(Mode::Rpc(RpcStub))
-    }
+        peer_url,
+        peer_api_key_secret,
+    }))
 }
 
 fn skill_action(invocation: &ResolvedInvocation, action: &str) -> SkillAdminAction {
@@ -2254,13 +2592,6 @@ fn container_common(invocation: &ResolvedInvocation) -> ContainerCommonArgs {
     }
 }
 
-fn container_mode(invocation: &ResolvedInvocation) -> ContainerModeArg {
-    match opt_str(invocation, "mode").as_deref() {
-        Some("rpc") => ContainerModeArg::Rpc,
-        _ => ContainerModeArg::Rest,
-    }
-}
-
 fn container_action(
     invocation: &ResolvedInvocation,
     action: &str,
@@ -2269,7 +2600,6 @@ fn container_action(
         "container_install" => ContainerCliAction::Install(ContainerInstallArgs {
             common: container_common(invocation),
             port: required_unsigned(invocation, "port", u64::from(u16::MAX))? as u16,
-            mode: container_mode(invocation),
             with: strs(invocation, "with"),
             allow: strs(invocation, "allow"),
             btc_network: opt_str(invocation, "btc_network").unwrap_or_default(),
@@ -2290,7 +2620,6 @@ fn container_action(
         "container_status" => ContainerCliAction::Status(ContainerStatusArgs {
             common: container_common(invocation),
             port: required_unsigned(invocation, "port", u64::from(u16::MAX))? as u16,
-            mode: container_mode(invocation),
             reveal_daemon_secret: flag(invocation, "reveal_daemon_secret"),
         }),
         _ => ContainerCliAction::Logs(ContainerLogsArgs {
@@ -2309,7 +2638,7 @@ fn data_op_kind(invocation: &ResolvedInvocation, action: &str) -> Result<DataOpK
         "global_restore" => DataOpKind::GlobalRestore {
             archive_path: req_str(invocation, "archive"),
             overwrite: flag(invocation, "dangerously_overwrite"),
-            pg_url_secret: opt_str(invocation, "pg_url_secret"),
+            pg_url_secret: opt_secret(invocation, "pg_url_secret")?,
             extra_dirs: extra_dirs_of(invocation)?,
         },
         "network_backup" => DataOpKind::NetworkBackup {
@@ -2321,7 +2650,7 @@ fn data_op_kind(invocation: &ResolvedInvocation, action: &str) -> Result<DataOpK
             network: network_of_path(invocation).unwrap_or(Network::Cashu),
             archive_path: req_str(invocation, "archive"),
             overwrite: flag(invocation, "dangerously_overwrite"),
-            pg_url_secret: opt_str(invocation, "pg_url_secret"),
+            pg_url_secret: opt_secret(invocation, "pg_url_secret")?,
         },
     })
 }
@@ -2345,6 +2674,7 @@ struct WalletCreateParams {
     btc_core_auth_secret: Option<String>,
     btc_electrum_url: Option<String>,
     sol_cluster: Option<String>,
+    idempotency_key: Option<String>,
 }
 
 fn wallet_create(id: &str, network: Network, params: WalletCreateParams) -> Input {
@@ -2364,6 +2694,7 @@ fn wallet_create(id: &str, network: Network, params: WalletCreateParams) -> Inpu
         btc_core_auth_secret: params.btc_core_auth_secret,
         btc_electrum_url: params.btc_electrum_url,
         sol_cluster: params.sol_cluster,
+        idempotency_key: params.idempotency_key,
     }
 }
 
@@ -2422,7 +2753,128 @@ fn receive_input(
         min_confirmations: unsigned(invocation, "min_confirmations", u64::from(u32::MAX))?
             .map(|value| value as u32),
         reference: opt_str(invocation, "reference"),
+        idempotency_key: opt_str(invocation, "idempotency_key"),
     })
+}
+
+/// One network's receive request, built once for both of its callers.
+///
+/// `<net> receive` and `ui receive --network <net>` resolve here. A panel that
+/// rebuilt the request from the same flags could drift from the command it
+/// mirrors one filter at a time, and then the code on screen and the address
+/// the agent was told would be for different wallets.
+fn network_receive_input(
+    invocation: &ResolvedInvocation,
+    id: &str,
+    network: Network,
+) -> Result<Input, CliError> {
+    let sats_amount = unsigned(invocation, "amount_sats", u64::MAX)?.map(sats);
+    let memo = opt_str(invocation, "onchain_memo");
+    match network {
+        Network::Cashu => receive_input(invocation, id, network, sats_amount, memo),
+        Network::Ln => receive_input(invocation, id, network, sats_amount, None),
+        // Solana watches for this memo rather than recording it, and a blank
+        // filter matches everything, so an empty one is no filter at all.
+        Network::Sol => receive_input(
+            invocation,
+            id,
+            network,
+            None,
+            memo.filter(|memo| !memo.trim().is_empty()),
+        ),
+        Network::Evm => receive_input(invocation, id, network, None, memo),
+        Network::Btc => receive_input(invocation, id, network, None, None),
+    }
+}
+
+/// One network's send request, built once for both of its callers.
+///
+/// `<net> send` and `ui send --network <net>` resolve here, so the payment a
+/// panel shows a person is the payment the command would have made. On this
+/// verb a second builder is not a maintenance cost but a way to pay the wrong
+/// destination: the destination is assembled differently on every network, and
+/// only one of the two copies would get the next fix.
+fn network_send_input(
+    invocation: &ResolvedInvocation,
+    id: &str,
+    network: Network,
+) -> Result<Input, CliError> {
+    match network {
+        Network::Cashu => send_input(
+            invocation,
+            id,
+            Network::Cashu,
+            req_str(invocation, "to"),
+            None,
+        ),
+        Network::Ln => {
+            let to = req_str(invocation, "to");
+            validate_bolt11(&to).map_err(CliError::invalid_value)?;
+            let amount_sats = unsigned(invocation, "amount_sats", u64::MAX)?;
+            // Whether the amount belongs on argv depends on the invoice's own
+            // contents, which no shape can see; a BOLT11 already encodes it.
+            let to = if is_bolt12_offer(&to) {
+                let value = amount_sats.ok_or_else(|| {
+                    CliError::invalid_value(
+                        "--amount-sats is required when sending to a bolt12 offer",
+                    )
+                })?;
+                format!("{to}?amount={value}")
+            } else {
+                if amount_sats.is_some() {
+                    return Err(CliError::invalid_value(
+                        "--amount-sats is not accepted for bolt11 invoices; the invoice encodes \
+                         the amount",
+                    ));
+                }
+                to
+            };
+            send_input(invocation, id, Network::Ln, to, None)
+        }
+        Network::Sol => {
+            let to = req_str(invocation, "to");
+            let token = req_str(invocation, "token");
+            validate_sol_address(&to).map_err(CliError::invalid_value)?;
+            validate_token_not_contract(&token).map_err(CliError::invalid_value)?;
+            let amount = required_unsigned(invocation, "amount", u64::MAX)?;
+            let mut target = format!("solana:{to}?amount={amount}&token={token}");
+            if let Some(reference) = opt_str(invocation, "reference") {
+                target.push_str(&format!("&reference={reference}"));
+            }
+            send_input(invocation, id, Network::Sol, target, None)
+        }
+        Network::Evm => {
+            let to = req_str(invocation, "to");
+            let token = req_str(invocation, "token");
+            validate_evm_address(&to).map_err(CliError::invalid_value)?;
+            validate_token_not_contract(&token).map_err(CliError::invalid_value)?;
+            let amount = required_unsigned(invocation, "amount", u64::MAX)?;
+            let target = format!("ethereum:{to}?amount={amount}&token={token}");
+            let chain_id = unsigned(invocation, "chain_id", u64::MAX)?;
+            send_input(invocation, id, Network::Evm, target, chain_id)
+        }
+        Network::Btc => {
+            let to = req_str(invocation, "to");
+            let amount = required_unsigned(invocation, "amount_sats", u64::MAX)?;
+            send_input(
+                invocation,
+                id,
+                Network::Btc,
+                format!("bitcoin:{to}?amount={amount}"),
+                None,
+            )
+        }
+    }
+}
+
+/// The network a `ui` shape fixes.
+///
+/// Every such shape pins exactly one, so the only way this fails is a registry
+/// edit that forgot to — reported as a value error rather than defaulted to a
+/// network the caller never named.
+fn ui_network_of(invocation: &ResolvedInvocation) -> Result<Network, CliError> {
+    network_from_str(&req_str(invocation, "network"))
+        .ok_or_else(|| CliError::invalid_value("--network must be one of cashu, ln, sol, evm, btc"))
 }
 
 fn send_input(
@@ -2432,7 +2884,7 @@ fn send_input(
     to: String,
     chain_id: Option<u64>,
 ) -> Result<Input, CliError> {
-    Ok(Input::Send {
+    Ok(Input::SendPlan {
         id: id.to_string(),
         wallet: wallet_of(invocation),
         network: Some(network),
@@ -2442,7 +2894,6 @@ fn send_input(
         local_memo: local_memo_of(invocation)?,
         mints: None,
         chain_id,
-        idempotency_key: opt_str(invocation, "idempotency_key"),
     })
 }
 
@@ -2505,7 +2956,11 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
             network: network_of_path(invocation),
             check: flag(invocation, "check"),
         }),
-        "balance" => Ok(Input::Balance {
+        // `ui wallet` shares this arm rather than rebuilding the request from
+        // the same flags. A panel that assembled its own `Input` could drift
+        // from `afpay balance` one filter at a time, and then the window and
+        // the agent would disagree about the same wallet.
+        "balance" | "ui_wallet" => Ok(Input::Balance {
             id: owned,
             wallet: wallet_of(invocation),
             network: network_filter(invocation),
@@ -2561,7 +3016,7 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
             WalletCreateParams {
                 label: opt_str(invocation, "label"),
                 mint_url: Some(req_str(invocation, "cashu_mint")),
-                mnemonic_secret: opt_str(invocation, "mnemonic_secret"),
+                mnemonic_secret: opt_secret(invocation, "mnemonic_secret")?,
                 ..WalletCreateParams::default()
             },
         )),
@@ -2571,38 +3026,31 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
         }),
         "cashu_send" => {
             let mints = strs(invocation, "cashu_mint");
-            Ok(Input::CashuSend {
+            Ok(Input::CashuSendPlan {
                 id: owned,
                 wallet: wallet_of(invocation),
                 amount: sats(required_unsigned(invocation, "amount_sats", u64::MAX)?),
                 onchain_memo: opt_str(invocation, "onchain_memo"),
                 local_memo: local_memo_of(invocation)?,
                 mints: (!mints.is_empty()).then_some(mints),
-                idempotency_key: opt_str(invocation, "idempotency_key"),
             })
         }
+        "pay_confirm" => Ok(Input::PayConfirm {
+            id: owned,
+            plan_id: req_str(invocation, "plan_id"),
+            // The local CLI has one confirm verb, so the plan decides which
+            // operation runs. The HTTP face, which addresses the two by
+            // different routes, pins it.
+            expect: None,
+            idempotency_key: opt_str(invocation, "idempotency_key"),
+        }),
         "cashu_receive" => Ok(Input::CashuReceive {
             id: owned,
             wallet: wallet_of(invocation),
             token: req_str(invocation, "token"),
         }),
-        "cashu_send_to_ln" => send_input(
-            invocation,
-            id,
-            Network::Cashu,
-            req_str(invocation, "to"),
-            None,
-        ),
-        "cashu_receive_from_ln" => {
-            let amount = unsigned(invocation, "amount_sats", u64::MAX)?.map(sats);
-            receive_input(
-                invocation,
-                id,
-                Network::Cashu,
-                amount,
-                opt_str(invocation, "onchain_memo"),
-            )
-        }
+        "cashu_send_to_ln" => network_send_input(invocation, id, Network::Cashu),
+        "cashu_receive_from_ln" => network_receive_input(invocation, id, Network::Cashu),
         "cashu_receive_from_ln_claim" => Ok(Input::ReceiveClaim {
             id: owned,
             wallet: req_str(invocation, "wallet"),
@@ -2619,41 +3067,16 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
                 request: LnWalletCreateRequest {
                     backend,
                     label: opt_str(invocation, "label"),
-                    nwc_uri_secret: opt_str(invocation, "nwc_uri_secret"),
+                    nwc_uri_secret: opt_secret(invocation, "nwc_uri_secret")?,
                     endpoint_url: opt_str(invocation, "endpoint_url"),
-                    password_secret: opt_str(invocation, "password_secret"),
-                    admin_key_secret: opt_str(invocation, "admin_key_secret"),
+                    password_secret: opt_secret(invocation, "password_secret")?,
+                    admin_key_secret: opt_secret(invocation, "admin_key_secret")?,
                 },
+                idempotency_key: opt_str(invocation, "idempotency_key"),
             })
         }
-        "ln_send" => {
-            let to = req_str(invocation, "to");
-            validate_bolt11(&to).map_err(CliError::invalid_value)?;
-            let amount_sats = unsigned(invocation, "amount_sats", u64::MAX)?;
-            // Whether the amount belongs on argv depends on the invoice's own
-            // contents, which no shape can see; a BOLT11 already encodes it.
-            let to = if is_bolt12_offer(&to) {
-                let value = amount_sats.ok_or_else(|| {
-                    CliError::invalid_value(
-                        "--amount-sats is required when sending to a bolt12 offer",
-                    )
-                })?;
-                format!("{to}?amount={value}")
-            } else {
-                if amount_sats.is_some() {
-                    return Err(CliError::invalid_value(
-                        "--amount-sats is not accepted for bolt11 invoices; the invoice encodes \
-                         the amount",
-                    ));
-                }
-                to
-            };
-            send_input(invocation, id, Network::Ln, to, None)
-        }
-        "ln_receive" => {
-            let amount = unsigned(invocation, "amount_sats", u64::MAX)?.map(sats);
-            receive_input(invocation, id, Network::Ln, amount, None)
-        }
+        "ln_send" => network_send_input(invocation, id, Network::Ln),
+        "ln_receive" => network_receive_input(invocation, id, Network::Ln),
         "sol_wallet_create" => Ok(wallet_create(
             id,
             Network::Sol,
@@ -2664,25 +3087,8 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
                 ..WalletCreateParams::default()
             },
         )),
-        "sol_send" => {
-            let to = req_str(invocation, "to");
-            let token = req_str(invocation, "token");
-            validate_sol_address(&to).map_err(CliError::invalid_value)?;
-            validate_token_not_contract(&token).map_err(CliError::invalid_value)?;
-            let amount = required_unsigned(invocation, "amount", u64::MAX)?;
-            let mut target = format!("solana:{to}?amount={amount}&token={token}");
-            if let Some(reference) = opt_str(invocation, "reference") {
-                target.push_str(&format!("&reference={reference}"));
-            }
-            send_input(invocation, id, Network::Sol, target, None)
-        }
-        "sol_receive" => receive_input(
-            invocation,
-            id,
-            Network::Sol,
-            None,
-            opt_str(invocation, "onchain_memo").filter(|memo| !memo.trim().is_empty()),
-        ),
+        "sol_send" => network_send_input(invocation, id, Network::Sol),
+        "sol_receive" => network_receive_input(invocation, id, Network::Sol),
         "evm_wallet_create" => Ok(wallet_create(
             id,
             Network::Evm,
@@ -2693,29 +3099,14 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
                 ..WalletCreateParams::default()
             },
         )),
-        "evm_send" => {
-            let to = req_str(invocation, "to");
-            let token = req_str(invocation, "token");
-            validate_evm_address(&to).map_err(CliError::invalid_value)?;
-            validate_token_not_contract(&token).map_err(CliError::invalid_value)?;
-            let amount = required_unsigned(invocation, "amount", u64::MAX)?;
-            let target = format!("ethereum:{to}?amount={amount}&token={token}");
-            let chain_id = unsigned(invocation, "chain_id", u64::MAX)?;
-            send_input(invocation, id, Network::Evm, target, chain_id)
-        }
-        "evm_receive" => receive_input(
-            invocation,
-            id,
-            Network::Evm,
-            None,
-            opt_str(invocation, "onchain_memo"),
-        ),
+        "evm_send" => network_send_input(invocation, id, Network::Evm),
+        "evm_receive" => network_receive_input(invocation, id, Network::Evm),
         "btc_wallet_create" => Ok(wallet_create(
             id,
             Network::Btc,
             WalletCreateParams {
                 label: opt_str(invocation, "label"),
-                mnemonic_secret: opt_str(invocation, "mnemonic_secret"),
+                mnemonic_secret: opt_secret(invocation, "mnemonic_secret")?,
                 btc_esplora_url: opt_str(invocation, "btc_esplora_url"),
                 btc_network: opt_str(invocation, "btc_network"),
                 btc_address_type: opt_str(invocation, "btc_address_type"),
@@ -2725,23 +3116,19 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
                     _ => Some(BtcBackend::Esplora),
                 },
                 btc_core_url: opt_str(invocation, "btc_core_url"),
-                btc_core_auth_secret: opt_str(invocation, "btc_core_auth_secret"),
+                btc_core_auth_secret: opt_secret(invocation, "btc_core_auth_secret")?,
                 btc_electrum_url: opt_str(invocation, "btc_electrum_url"),
                 ..WalletCreateParams::default()
             },
         )),
-        "btc_send" => {
-            let to = req_str(invocation, "to");
-            let amount = required_unsigned(invocation, "amount_sats", u64::MAX)?;
-            send_input(
-                invocation,
-                id,
-                Network::Btc,
-                format!("bitcoin:{to}?amount={amount}"),
-                None,
-            )
-        }
-        "btc_receive" => receive_input(invocation, id, Network::Btc, None, None),
+        "btc_send" => network_send_input(invocation, id, Network::Btc),
+        "btc_receive" => network_receive_input(invocation, id, Network::Btc),
+        // The panels share the builders above rather than rebuilding a request
+        // from the same flags — the same reason `ui wallet` shares `balance`'s
+        // arm. What a person is shown and what an agent asked for are one
+        // request, resolved once.
+        "ui_receive" => network_receive_input(invocation, id, ui_network_of(invocation)?),
+        "ui_send" => network_send_input(invocation, id, ui_network_of(invocation)?),
         other => Err(CliError::new(
             "cli_action_unreachable",
             format!("resolved action `{other}` has no implementation"),
@@ -3275,7 +3662,7 @@ mod tests {
         )
         .expect("cashu send --cashu-mint should parse");
         match input {
-            Input::CashuSend { mints, amount, .. } => {
+            Input::CashuSendPlan { mints, amount, .. } => {
                 assert_eq!(amount.value, 100);
                 assert_eq!(
                     mints,
@@ -3405,8 +3792,8 @@ mod tests {
         }
     }
 
-    // `--rpc-endpoint` now names the remote afpay daemon on every command, so
-    // omitting `--sol-rpc-endpoint` leaves no registered shape to match.
+    // `--peer-url` now names the afpay peer on every command, so omitting
+    // `--sol-rpc-endpoint` leaves no registered shape to match.
     #[test]
     fn parse_sol_wallet_create_without_sol_rpc_endpoint_rejected() {
         let error = rejection(&[
@@ -3414,8 +3801,8 @@ mod tests {
             "sol",
             "wallet",
             "create",
-            "--rpc-endpoint",
-            "127.0.0.1:9400",
+            "--peer-url",
+            "http://127.0.0.1:9401",
         ]);
         assert_eq!(error.rule, CliErrorRule::UnregisteredCombination);
     }
@@ -3625,7 +4012,7 @@ mod tests {
         )
         .expect("ln send should parse");
         match input {
-            Input::Send {
+            Input::SendPlan {
                 network,
                 local_memo,
                 ..
@@ -3661,7 +4048,7 @@ mod tests {
         let input = parse_subcommand(&["cashu", "send", "--amount-sats", "500"], "t_unified_1")
             .expect("cashu send --amount-sats should parse");
         match input {
-            Input::CashuSend { amount, .. } => {
+            Input::CashuSendPlan { amount, .. } => {
                 assert_eq!(amount.value, 500);
                 assert_eq!(amount.token, "sats");
             }
@@ -3686,7 +4073,7 @@ mod tests {
         )
         .expect("sol send --amount --token should parse");
         match input {
-            Input::Send { to, .. } => {
+            Input::SendPlan { to, .. } => {
                 assert!(to.contains("amount=1000000"));
                 assert!(to.contains("token=native"));
             }
@@ -3711,7 +4098,7 @@ mod tests {
         )
         .expect("evm send --amount --token should parse");
         match input {
-            Input::Send { to, .. } => {
+            Input::SendPlan { to, .. } => {
                 assert!(to.contains("amount=1000000000"));
                 assert!(to.contains("token=native"));
             }
@@ -3797,6 +4184,263 @@ mod tests {
         }
     }
 
+    /// The panel is a second *ending*, never a second data path.
+    ///
+    /// `ui wallet` and `balance` resolve through the same `invocation_to_input`
+    /// arm, so the window an agent's person is looking at and the result the
+    /// agent read cannot describe different money.
+    #[test]
+    fn the_wallet_panel_and_afpay_balance_build_the_same_request() {
+        let flags = ["--wallet", "w_abc", "--network", "sol", "--cashu-check"];
+        let mut balance_argv = vec!["balance"];
+        balance_argv.extend(flags);
+        let mut panel_argv = vec!["ui", "wallet"];
+        panel_argv.extend(flags);
+
+        // Same request id on both, so any difference left is a difference in
+        // the request itself.
+        let balance = parse_subcommand(&balance_argv, "t_ui_1").expect("balance must parse");
+        let panel = parse_subcommand(&panel_argv, "t_ui_1").expect("ui wallet must parse");
+        assert_eq!(
+            serde_json::to_value(&balance).unwrap(),
+            serde_json::to_value(&panel).unwrap(),
+        );
+        assert!(matches!(panel, Input::Balance { .. }));
+    }
+
+    /// `ui` is a verb family, not a `--ui` flag on `balance`: one call returns
+    /// a result and exits, the other blocks until a person closes a window, and
+    /// one verb cannot own both endings.
+    #[test]
+    fn the_panel_is_its_own_verb_rather_than_a_flag_on_balance() {
+        assert_eq!(
+            rejection(&["afpay", "balance", "--ui"]).rule,
+            CliErrorRule::UnknownArgument
+        );
+        // A window is opened on this machine, so the shape offers neither the
+        // remote forwarder nor the preview that only makes sense for a result.
+        for panel in [
+            vec!["afpay", "ui", "wallet"],
+            vec!["afpay", "ui", "receive", "--network", "btc"],
+            vec!["afpay", "ui", "send", "--network", "btc"],
+        ] {
+            let mut dry_run = panel.clone();
+            dry_run.push("--dry-run");
+            assert_eq!(
+                rejection(&dry_run).rule,
+                CliErrorRule::UnknownArgument,
+                "{panel:?} must not accept --dry-run"
+            );
+            let mut remote = panel.clone();
+            remote.extend(["--peer-url", "http://127.0.0.1:9401"]);
+            assert_eq!(
+                rejection(&remote).rule,
+                CliErrorRule::UnknownArgument,
+                "{panel:?} must not accept --peer-url"
+            );
+        }
+    }
+
+    /// The receive panel is a second *ending* for `<net> receive`, never a
+    /// second data path.
+    #[test]
+    fn the_receive_panel_and_afpay_receive_build_the_same_request() {
+        // One case per network, because each `<net> receive` accepts a
+        // different argument set and the panel mirrors each of them.
+        for (network, flags) in [
+            (
+                "cashu",
+                vec![
+                    "--wallet",
+                    "w_abc",
+                    "--amount-sats",
+                    "2100",
+                    "--onchain-memo",
+                    "invoice for ord_9",
+                ],
+            ),
+            ("ln", vec!["--wallet", "w_abc", "--amount-sats", "2100"]),
+            ("sol", vec!["--wallet", "w_abc"]),
+            ("evm", vec!["--wallet", "w_abc", "--onchain-memo", "ord_9"]),
+            ("btc", vec!["--wallet", "w_abc"]),
+        ] {
+            let verb = if network == "cashu" {
+                "receive-from-ln"
+            } else {
+                "receive"
+            };
+            let mut command_argv = vec![network, verb];
+            command_argv.extend(flags.iter().copied());
+            let mut panel_argv = vec!["ui", "receive", "--network", network];
+            panel_argv.extend(flags.iter().copied());
+
+            // Same request id on both, so any difference left is a difference
+            // in the request itself.
+            let command = parse_subcommand(&command_argv, "t_ui_recv")
+                .unwrap_or_else(|error| panic!("{command_argv:?} must parse: {error}"));
+            let panel = parse_subcommand(&panel_argv, "t_ui_recv")
+                .unwrap_or_else(|error| panic!("{panel_argv:?} must parse: {error}"));
+            assert_eq!(
+                serde_json::to_value(&command).unwrap(),
+                serde_json::to_value(&panel).unwrap(),
+                "{network}: the panel and the command must build one request",
+            );
+            assert!(matches!(panel, Input::Receive { .. }));
+        }
+    }
+
+    /// `<net> receive --wait` blocks the request until the money lands, which
+    /// would keep the code off the screen until scanning it was pointless. In a
+    /// panel the open window is the wait, so the flag is simply not part of the
+    /// command — accepted-then-rejected is the failure `evm receive` already had.
+    #[test]
+    fn the_receive_panel_has_no_wait() {
+        for argument in ["--wait", "--wait-timeout-s", "--wait-poll-interval-ms"] {
+            assert_eq!(
+                rejection(&["afpay", "ui", "receive", "--network", "btc", argument]).rule,
+                CliErrorRule::UnknownArgument,
+                "{argument} must not be part of `ui receive`"
+            );
+        }
+        // Nor does the panel write the file the REPL writes: it *is* the code.
+        assert_eq!(
+            rejection(&[
+                "afpay",
+                "ui",
+                "receive",
+                "--network",
+                "btc",
+                "--qr-svg-file"
+            ])
+            .rule,
+            CliErrorRule::UnknownArgument
+        );
+    }
+
+    /// The send panel must resolve the identical payment `<net> send` would.
+    /// A second destination builder is not a maintenance cost here, it is a way
+    /// to pay the wrong address.
+    #[test]
+    fn the_send_panel_and_afpay_send_build_the_same_request() {
+        for (network, verb, flags) in [
+            (
+                "cashu",
+                "send-to-ln",
+                vec!["--to", "lnbc1exampleinvoice", "--wallet", "w_abc"],
+            ),
+            (
+                "ln",
+                "send",
+                vec!["--to", "lnbc1exampleinvoice", "--wallet", "w_abc"],
+            ),
+            (
+                "sol",
+                "send",
+                vec![
+                    "--to",
+                    "11111111111111111111111111111111",
+                    "--amount",
+                    "5000",
+                    "--token",
+                    "native",
+                    "--wallet",
+                    "w_abc",
+                    "--local-memo",
+                    "note=lunch",
+                ],
+            ),
+            (
+                "evm",
+                "send",
+                vec![
+                    "--to",
+                    "0x00000000000000000000000000000000000000aa",
+                    "--amount",
+                    "7",
+                    "--token",
+                    "native",
+                    "--chain-id",
+                    "8453",
+                ],
+            ),
+            (
+                "btc",
+                "send",
+                vec!["--to", "bc1qexample", "--amount-sats", "1200"],
+            ),
+        ] {
+            let mut command_argv = vec![network, verb];
+            command_argv.extend(flags.iter().copied());
+            let mut panel_argv = vec!["ui", "send", "--network", network];
+            panel_argv.extend(flags.iter().copied());
+
+            let command = parse_subcommand(&command_argv, "t_ui_send")
+                .unwrap_or_else(|error| panic!("{command_argv:?} must parse: {error}"));
+            let panel = parse_subcommand(&panel_argv, "t_ui_send")
+                .unwrap_or_else(|error| panic!("{panel_argv:?} must parse: {error}"));
+            assert_eq!(
+                serde_json::to_value(&command).unwrap(),
+                serde_json::to_value(&panel).unwrap(),
+                "{network}: the panel and the command must build one payment",
+            );
+            assert!(matches!(panel, Input::SendPlan { .. }));
+        }
+    }
+
+    /// Argument applicability follows the network on the panel exactly as it
+    /// does on the command, so a shape cannot accept a value it would ignore.
+    #[test]
+    fn the_send_panel_rejects_arguments_the_network_has_no_use_for() {
+        // Lightning carries no on-chain memo, and `ln send` does not offer one.
+        assert_eq!(
+            rejection(&[
+                "afpay",
+                "ui",
+                "send",
+                "--network",
+                "ln",
+                "--to",
+                "lnbc1example",
+                "--onchain-memo",
+                "hello",
+            ])
+            .rule,
+            CliErrorRule::UnregisteredCombination
+        );
+        // Bitcoin has no token argument, and no chain to pin.
+        assert_eq!(
+            rejection(&[
+                "afpay",
+                "ui",
+                "send",
+                "--network",
+                "btc",
+                "--to",
+                "bc1qexample",
+                "--amount-sats",
+                "10",
+                "--token",
+                "native",
+            ])
+            .rule,
+            CliErrorRule::UnregisteredCombination
+        );
+        // Solana needs the amount and token it cannot infer.
+        assert_eq!(
+            rejection(&[
+                "afpay",
+                "ui",
+                "send",
+                "--network",
+                "sol",
+                "--to",
+                "11111111111111111111111111111111",
+            ])
+            .rule,
+            CliErrorRule::UnregisteredCombination
+        );
+    }
+
     #[test]
     fn parse_ln_receive_without_amount_for_bolt12() {
         let input = parse_subcommand(&["ln", "receive"], "t_bolt12_1")
@@ -3830,7 +4474,7 @@ mod tests {
         )
         .expect("ln send to bolt12 with --amount-sats should parse");
         match input {
-            Input::Send { to, network, .. } => {
+            Input::SendPlan { to, network, .. } => {
                 assert_eq!(network, Some(Network::Ln));
                 assert!(to.contains("lno1abc123"));
                 assert!(to.contains("?amount=500"));
@@ -3854,7 +4498,7 @@ mod tests {
         )
         .expect("uppercase LNO1 should be accepted");
         match input {
-            Input::Send { to, .. } => assert!(to.contains("?amount=100")),
+            Input::SendPlan { to, .. } => assert!(to.contains("?amount=100")),
             other => panic!("unexpected input: {other:?}"),
         }
     }

@@ -594,6 +594,8 @@ impl PayProvider for LnProvider {
                 amount_native: amount_sats.saturating_add(fee_estimate),
                 token: None,
             }],
+            warnings: Vec::new(),
+            upstream_plan_id: None,
         })
     }
 

@@ -1,0 +1,172 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/balance-list-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "summary": {
+      "default": [],
+      "description": "Totals grouped by network and unit.",
+      "items": {
+        "description": "Per-network balance summary aggregated from individual wallets.",
+        "properties": {
+          "confirmed": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "errors": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "network": {
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc"
+            ],
+            "type": "string"
+          },
+          "pending": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "wallet_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "network",
+          "wallet_count",
+          "confirmed",
+          "pending",
+          "unit",
+          "errors"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "wallets": {
+      "description": "One self-describing entry per wallet; a wallet whose provider failed\ncarries its own `error` rather than dropping out of the list.",
+      "items": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "backend": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "balance": {
+            "additionalProperties": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "properties": {
+              "confirmed": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "pending": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "unit": {
+                "description": "Native unit name: \"sats\", \"lamports\", \"gwei\", \"token-units\".",
+                "type": "string"
+              }
+            },
+            "required": [
+              "confirmed",
+              "pending",
+              "unit"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "chain_id": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "created_at_epoch_s": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mint_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network": {
+            "enum": [
+              "ln",
+              "sol",
+              "evm",
+              "cashu",
+              "btc"
+            ],
+            "type": "string"
+          },
+          "rpc_endpoints": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "network",
+          "address",
+          "created_at_epoch_s"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "wallets"
+  ],
+  "title": "BalanceListResult",
+  "type": "object"
+}

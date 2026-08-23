@@ -1,11 +1,9 @@
 use super::InteractiveSessionRuntime;
 use super::session::{
-    HostMessageKind, InteractionHost, SessionBackend, SessionState, TuiTerminal,
-    char_to_byte_index, mode_name, network_from_str, parse_session_command, save_history_entries,
+    HostMessageKind, InteractionHost, PlannedPayment, SessionBackend, SessionState, TuiTerminal,
+    char_to_byte_index, network_from_str, parse_session_command, save_history_entries,
 };
-use crate::args::InteractiveFrontend;
-use crate::config::VERSION;
-#[cfg(feature = "rpc")]
+#[cfg(feature = "federation")]
 use crate::provider::remote;
 use crate::store::PayStore;
 use crate::types::{Input, Network};
@@ -203,7 +201,7 @@ enum PendingQueryKind {
 
 enum PendingQueryHandle {
     Local(tokio::task::JoinHandle<()>),
-    #[cfg(feature = "rpc")]
+    #[cfg(feature = "federation")]
     Remote(tokio::task::JoinHandle<Vec<serde_json::Value>>),
 }
 
@@ -1164,7 +1162,6 @@ fn build_command_from_form(
 // ---------------------------------------------------------------------------
 
 struct TuiApp {
-    frontend: InteractiveFrontend,
     connection_label: String,
 
     // Sidebar
@@ -1243,9 +1240,11 @@ struct TuiApp {
 }
 
 impl TuiApp {
-    fn new(frontend: InteractiveFrontend, history: Vec<String>) -> Self {
+    /// The frontend is not among these: `mode::run` picks this entry point
+    /// only for `InteractiveFrontend::Tui`, so carrying the value in would be
+    /// carrying a constant, and branching on it would be branching on one.
+    fn new(history: Vec<String>) -> Self {
         Self {
-            frontend,
             connection_label: "local".to_string(),
             focus: TuiFocus::Sidebar,
             wallet_groups: Vec::new(),
@@ -2005,7 +2004,7 @@ impl TuiApp {
 
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(1)])
+            .constraints([Constraint::Min(5), Constraint::Length(2)])
             .split(area);
 
         let columns = Layout::default()
@@ -3000,13 +2999,14 @@ impl TuiApp {
             SidebarItem::DataHeader => "data".to_string(),
         };
 
-        let mut spans = vec![
+        let mut primary = vec![
             Span::styled(format!(" {} ", self.connection_label), dim),
             sep.clone(),
             Span::styled(cursor_label, Style::default().fg(Color::Green)),
             Span::raw(" "),
             sep.clone(),
         ];
+        let mut secondary = vec![Span::raw(" ")];
 
         let on_wallet = matches!(self.sidebar_cursor, SidebarItem::Wallet(_, _));
         let on_group_with_wallets = match self.sidebar_cursor {
@@ -3019,21 +3019,25 @@ impl TuiApp {
 
         // Context-aware hotkey hints based on sidebar cursor
         if self.current_form().is_some() {
-            spans.extend([
+            primary.extend([
                 Span::styled("Enter", key),
                 Span::styled(" submit ", dim),
                 Span::styled("Esc", key),
                 Span::styled(" cancel ", dim),
             ]);
         } else if on_wallet {
-            // On a specific wallet
-            spans.extend([
+            // The three ordinary wallet tasks stay on the first line. The
+            // consequential or infrequent operations remain discoverable on
+            // a second line instead of pushing those tasks off a narrow screen.
+            primary.extend([
                 Span::styled("s", key),
                 Span::styled(" send ", dim),
                 Span::styled("r", key),
                 Span::styled(" recv ", dim),
                 Span::styled("h", key),
                 Span::styled(" hist ", dim),
+            ]);
+            secondary.extend([
                 Span::styled("x", key),
                 Span::styled(" close ", dim),
                 Span::styled("D", key),
@@ -3043,7 +3047,7 @@ impl TuiApp {
             ]);
         } else if on_group_with_wallets {
             // On a network group that has wallets
-            spans.extend([
+            primary.extend([
                 Span::styled("c", key),
                 Span::styled(" create ", dim),
                 Span::styled("s", key),
@@ -3054,33 +3058,32 @@ impl TuiApp {
                 Span::styled(" hist ", dim),
             ]);
         } else if matches!(self.sidebar_cursor, SidebarItem::LimitHeader) {
-            spans.extend([Span::styled("a", key), Span::styled(" add ", dim)]);
+            primary.extend([Span::styled("a", key), Span::styled(" add ", dim)]);
         } else if matches!(self.sidebar_cursor, SidebarItem::Limit(_)) {
-            spans.extend([Span::styled("d", key), Span::styled(" delete ", dim)]);
+            primary.extend([Span::styled("d", key), Span::styled(" delete ", dim)]);
         } else if matches!(self.sidebar_cursor, SidebarItem::ConfigHeader) {
             // No special hotkeys for config — just view
         } else if matches!(self.sidebar_cursor, SidebarItem::DataHeader) {
-            spans.extend([Span::styled("Tab", key), Span::styled(" edit ", dim)]);
+            primary.extend([Span::styled("Tab", key), Span::styled(" edit ", dim)]);
         } else {
             // On an empty network group
-            spans.extend([Span::styled("c", key), Span::styled(" create ", dim)]);
+            primary.extend([Span::styled("c", key), Span::styled(" create ", dim)]);
         }
 
         if self.current_form().is_none() {
-            spans.extend([Span::styled("R", key), Span::styled(" refresh ", dim)]);
+            secondary.extend([Span::styled("R", key), Span::styled(" refresh ", dim)]);
         }
-        if self.last_copyable.is_some() {
-            spans.extend([Span::styled("y", key), Span::styled(" copy ", dim)]);
+        if self.current_form().is_none() && self.last_copyable.is_some() {
+            secondary.extend([Span::styled("y", key), Span::styled(" copy ", dim)]);
         }
-        spans.extend([
-            sep.clone(),
-            Span::styled(format!("v{VERSION} {} ", mode_name(self.frontend)), dim),
-            sep,
-            Span::styled("q", key),
-            Span::styled(" quit", dim),
-        ]);
+        if self.current_form().is_none() {
+            secondary.extend([sep, Span::styled("q", key), Span::styled(" quit", dim)]);
+        }
 
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![Line::from(primary), Line::from(secondary)])),
+            area,
+        );
     }
 
     fn position_cursor(&self, frame: &mut Frame, main_area: Rect, _status_area: Rect) {
@@ -3391,63 +3394,9 @@ impl InteractionHost for TuiHost<'_> {
         self.app.push_message(message_kind, text);
     }
 
-    fn confirm_send(&mut self, wallet: &str, amount: u64, to: &str) -> bool {
-        let target = if to.is_empty() {
-            "P2P cashu token".to_string()
-        } else if to.len() > 40 {
-            format!("{}...", &to[..40])
-        } else {
-            to.to_string()
-        };
-        self.app.prompt_yes_no(
-            self.terminal,
-            "Confirm Send",
-            vec![format!("Send {amount} sats from {wallet} to {target}")],
-        )
-    }
-
-    fn confirm_send_with_fee(
-        &mut self,
-        wallet: &str,
-        amount: u64,
-        fee: u64,
-        fee_unit: &str,
-    ) -> bool {
-        let total = amount + fee;
-        let mut lines = vec![format!(
-            "Send {amount} {fee_unit} from {wallet} as P2P cashu token"
-        )];
-        if fee > 0 {
-            lines.push(format!(
-                "Fee: {fee} {fee_unit}  (total: {total} {fee_unit})"
-            ));
-        }
+    fn confirm_planned_payment(&mut self, plan: &PlannedPayment<'_>) -> bool {
         self.app
-            .prompt_yes_no(self.terminal, "Confirm Cashu Send", lines)
-    }
-
-    fn confirm_withdraw(
-        &mut self,
-        wallet: &str,
-        amount: u64,
-        fee_estimate: u64,
-        fee_unit: &str,
-        to: &str,
-    ) -> bool {
-        let target = if to.len() > 40 {
-            format!("{}...", &to[..40])
-        } else {
-            to.to_string()
-        };
-        let total = amount + fee_estimate;
-        self.app.prompt_yes_no(
-            self.terminal,
-            "Confirm Payment",
-            vec![
-                format!("Pay {amount} {fee_unit} from {wallet} to {target}"),
-                format!("Fee estimate: {fee_estimate} {fee_unit}  (total: {total} {fee_unit})"),
-            ],
-        )
+            .prompt_yes_no(self.terminal, plan.title(), plan.lines())
     }
 
     fn prompt_deposit_claim(&mut self, _wallet: &str, _quote_id: &str) -> bool {
@@ -4083,17 +4032,17 @@ fn local_wallets(state: &SessionState) -> Result<Vec<TuiWalletEntry>, String> {
         .map_err(|error| format!("wallet refresh failed: {error}"))
 }
 
-#[cfg(feature = "rpc")]
+#[cfg(feature = "federation")]
 async fn remote_wallets(
     state: &mut SessionState,
-    endpoint: &str,
-    secret: &str,
+    peer_url: &str,
+    api_key_secret: &str,
 ) -> Result<Vec<TuiWalletEntry>, String> {
     let input = Input::WalletList {
         id: state.next_id(),
         network: None,
     };
-    let outputs = remote::rpc_call(endpoint, secret, &input).await;
+    let outputs = remote::peer_call(peer_url, api_key_secret, &input).await;
     let mut wallets = Vec::new();
     for value in outputs {
         if value.get("code").and_then(|v| v.as_str()) == Some("error") {
@@ -4141,10 +4090,11 @@ async fn refresh_wallets(
 ) -> Result<(), String> {
     let wallets = match backend {
         SessionBackend::Local { .. } => local_wallets(state)?,
-        #[cfg(feature = "rpc")]
-        SessionBackend::Remote { endpoint, secret } => {
-            remote_wallets(state, endpoint, secret).await?
-        }
+        #[cfg(feature = "federation")]
+        SessionBackend::Remote {
+            peer_url,
+            api_key_secret,
+        } => remote_wallets(state, peer_url, api_key_secret).await?,
     };
     app.set_wallets(wallets);
     Ok(())
@@ -4161,14 +4111,14 @@ fn spawn_pending(backend: &SessionBackend, input: Input, kind: PendingQueryKind)
     let handle = if backend.is_local() {
         PendingQueryHandle::Local(backend.spawn_local(input))
     } else {
-        #[cfg(feature = "rpc")]
+        #[cfg(feature = "federation")]
         {
             PendingQueryHandle::Remote(backend.spawn_remote(input))
         }
-        #[cfg(not(feature = "rpc"))]
+        #[cfg(not(feature = "federation"))]
         {
             let _ = input;
-            unreachable!("remote backend requires feature 'rpc'")
+            unreachable!("peer backend requires feature 'federation'")
         }
     };
     PendingQuery { kind, handle }
@@ -4254,7 +4204,6 @@ fn save_history(path: &str, history: &[String]) {
 
 pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
     let InteractiveSessionRuntime {
-        frontend,
         state,
         backend,
         completer: _,
@@ -4292,7 +4241,7 @@ pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
         }
     };
 
-    let mut app = TuiApp::new(frontend, history);
+    let mut app = TuiApp::new(history);
     app.data_dir = state.data_dir.clone();
     // intro_messages are not shown — status bar provides hotkey hints
     let _ = intro_messages;
@@ -4320,7 +4269,7 @@ pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
         if let Some(pq) = &app.pending_query {
             let finished = match &pq.handle {
                 PendingQueryHandle::Local(h) => h.is_finished(),
-                #[cfg(feature = "rpc")]
+                #[cfg(feature = "federation")]
                 PendingQueryHandle::Remote(h) => h.is_finished(),
             };
             if finished {
@@ -4332,7 +4281,7 @@ pub(super) async fn run_tui_ui(runtime: InteractiveSessionRuntime) {
                         let _ = h.await;
                         backend.try_recv_outputs()
                     }
-                    #[cfg(feature = "rpc")]
+                    #[cfg(feature = "federation")]
                     PendingQueryHandle::Remote(h) => h.await.unwrap_or_default(),
                 };
                 match pq.kind {
@@ -4956,7 +4905,7 @@ mod tests {
     }
 
     fn test_app() -> TuiApp {
-        let mut app = TuiApp::new(InteractiveFrontend::Tui, vec![]);
+        let mut app = TuiApp::new(vec![]);
         let wallets = vec![
             TuiWalletEntry {
                 id: "w_cashu1".to_string(),

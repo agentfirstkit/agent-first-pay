@@ -1,0 +1,122 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/pay-plan-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A payment resolved down to what it would actually do, and the id that\nsubmits it. Nothing has moved.",
+  "properties": {
+    "amount_native": {
+      "description": "What leaves the wallet, in the network's base unit.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expires_at_epoch_ms": {
+      "description": "After this the plan is refused and the payment must be re-planned.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fee_estimate_native": {
+      "description": "What the network is expected to charge on top. An estimate: the chain\ncharges what it charges, and the reservation is taken against this.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fee_unit": {
+      "description": "Unit both amounts are quoted in (`sats`, `lamports`, `gwei`).",
+      "type": "string"
+    },
+    "network": {
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc"
+      ],
+      "type": "string"
+    },
+    "operation": {
+      "description": "`send` or `cashu_send` — which confirm route accepts this plan.",
+      "type": "string"
+    },
+    "plan_id": {
+      "description": "Submit this to the matching confirm operation. Single-use.",
+      "type": "string"
+    },
+    "spend_debits": {
+      "default": [],
+      "description": "The spend-limit budgets confirming this plan would debit.",
+      "items": {
+        "properties": {
+          "amount_native": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "amount_native"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "to": {
+      "description": "The destination exactly as the payment will use it, normalised. Absent\nfor a Cashu token mint.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wallet": {
+      "description": "The wallet afpay picked, which may differ from the one requested when\nthe request left it open.",
+      "type": "string"
+    },
+    "warnings": {
+      "default": [],
+      "description": "Safety signals that must be considered before confirming the plan.",
+      "items": {
+        "description": "A review-time warning attached to a resolved payment plan.\n\nWarnings are part of the plan result rather than diagnostic logs, so a\ncaller cannot hide a safety signal by disabling log categories.",
+        "properties": {
+          "code": {
+            "description": "Stable machine-readable warning code.",
+            "type": "string"
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "plan_id",
+    "operation",
+    "network",
+    "wallet",
+    "amount_native",
+    "fee_estimate_native",
+    "fee_unit",
+    "expires_at_epoch_ms"
+  ],
+  "title": "PayPlanResult",
+  "type": "object"
+}

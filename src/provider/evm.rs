@@ -1655,6 +1655,8 @@ impl PayProvider for EvmProvider {
             fee_estimate_native: fee_gwei,
             fee_unit: "gwei".to_string(),
             spend_debits,
+            warnings: Vec::new(),
+            upstream_plan_id: None,
         })
     }
 

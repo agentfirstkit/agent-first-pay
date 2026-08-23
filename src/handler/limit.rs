@@ -7,11 +7,11 @@ use super::App;
 use super::helpers::*;
 
 /// Pick a daemon endpoint to suggest in `ConfigureOnDaemon` hints. Returns the
-/// first configured `afpay_rpc` endpoint, since limit-bearing daemons are typically
-/// the user's primary RPC backend.
+/// first configured peer url, since limit-bearing daemons are typically the
+/// user's primary backend.
 async fn primary_daemon_endpoint(app: &App) -> Option<String> {
     let cfg = app.config.read().await;
-    cfg.afpay_rpc.values().next().map(|c| c.endpoint.clone())
+    cfg.peers.values().next().map(|peer| peer.url.clone())
 }
 
 pub(crate) async fn dispatch_limit(app: &App, input: Input) {
@@ -110,7 +110,7 @@ pub(crate) async fn dispatch_limit(app: &App, input: Input) {
                 vec![]
             };
 
-            // Query downstream afpay_rpc nodes
+            // Query the spend limits of every configured downstream peer
             let config = app.config.read().await.clone();
             let downstream = query_downstream_limits(&config).await;
 

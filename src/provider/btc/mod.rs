@@ -623,6 +623,8 @@ impl PayProvider for BtcProvider {
                 amount_native: target.amount_sats.saturating_add(fee_estimate_native),
                 token: None,
             }],
+            warnings: Vec::new(),
+            upstream_plan_id: None,
         })
     }
 

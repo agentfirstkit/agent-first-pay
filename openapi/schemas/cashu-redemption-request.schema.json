@@ -1,0 +1,23 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/cashu-redemption-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "token": {
+      "description": "The bearer token to redeem.",
+      "type": "string"
+    },
+    "wallet": {
+      "description": "Destination wallet; omit to let afpay select one on the token's mint.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "token"
+  ],
+  "title": "CashuRedemptionRequest",
+  "type": "object"
+}

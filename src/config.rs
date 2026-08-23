@@ -63,9 +63,9 @@ fn sanitize_startup_argv(argv: Vec<String>) -> Vec<String> {
         "--nwc-uri-secret",
         "--password-secret",
         "--pg-url-secret",
+        "--peer-api-key-secret",
         "--rest-api-key-secret",
         "--rest-api-key",
-        "--rpc-secret",
     ];
 
     let mut redact_next = false;
@@ -181,8 +181,8 @@ mod tests {
         let out = build_startup_log(
             Some(vec![
                 "afpay".to_string(),
-                "--rpc-secret".to_string(),
-                "rpc-secret-value".to_string(),
+                "--peer-api-key-secret".to_string(),
+                "peer-secret-value".to_string(),
                 "--rest-api-key-secret=rest-secret-value".to_string(),
                 "--data-dir".to_string(),
                 "/tmp/afpay".to_string(),
@@ -192,7 +192,7 @@ mod tests {
         );
         let value = serde_json::to_value(out)?;
         let rendered = value.to_string();
-        assert!(!rendered.contains("rpc-secret-value"));
+        assert!(!rendered.contains("peer-secret-value"));
         assert!(!rendered.contains("rest-secret-value"));
         assert!(rendered.contains("***"));
         assert!(rendered.contains("/tmp/afpay"));

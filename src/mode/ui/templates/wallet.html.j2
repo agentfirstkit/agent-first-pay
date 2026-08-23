@@ -1,0 +1,21 @@
+{#-
+  `wallet_inspect`: every wallet this view covers, and what it holds.
+
+  A wallet whose provider could not be reached carries `failed` and an `error`
+  instead of a `balance`, and it is on the page beside the ones that answered.
+  Dropping it would tell the person they have less money than they do.
+-#}
+{% extends "layout.html.j2" %}
+{% block panel %}
+{% if document.totals %}<section class="totals">
+{% for total in document.totals %}<div class="total{% if total.degraded %} degraded{% endif %}"><span class="network">{{ total.network }}</span><span class="amount">{{ total.confirmed }}<span class="unit">{{ total.unit }}</span></span><span class="meta">{{ total.wallet_count }} wallet{% if total.wallet_count != '1' %}s{% endif %} · {{ total.pending }} pending{% if total.degraded %} · {{ total.errors }} unreachable{% endif %}</span></div>
+{% endfor %}</section>
+{% endif %}{% if document.groups %}{% for group in document.groups %}<section class="group">
+<h2>{{ group.network }}</h2>
+<ul class="wallets">
+{% for wallet in group.wallets %}<li class="wallet{% if wallet.failed %} failed{% endif %}"><div class="ident"><span class="id">{{ wallet.id }}</span>{% if wallet.label %}<span class="label">{{ wallet.label }}</span>{% endif %}</div>{% if wallet.address %}<div class="address">{{ wallet.address }}</div>{% endif %}{% if wallet.balance %}<dl class="balance"><div><dt>confirmed</dt><dd>{{ wallet.balance.confirmed }}<span class="unit">{{ wallet.balance.unit }}</span></dd></div><div><dt>pending</dt><dd>{{ wallet.balance.pending }}<span class="unit">{{ wallet.balance.unit }}</span></dd></div></dl>{% with fields = wallet.balance.extras, class = "extras" %}{% include "fields.html.j2" %}{% endwith %}{% else %}<p class="no-balance">No balance reported.</p>{% endif %}{% if wallet.error %}<p class="error">{{ wallet.error }}</p>{% endif %}{% with fields = wallet.details, class = "details" %}{% include "fields.html.j2" %}{% endwith %}</li>
+{% endfor %}</ul>
+</section>
+{% endfor %}{% else %}<p class="empty">No wallets match this view.</p>
+{% endif %}
+{% endblock %}

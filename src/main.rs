@@ -9,6 +9,8 @@
     )
 )]
 
+#[cfg(feature = "rest")]
+mod api;
 mod args;
 mod config;
 mod container;

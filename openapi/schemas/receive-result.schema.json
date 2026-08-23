@@ -1,0 +1,39 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/receive-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "receive_info": {
+      "description": "The address, invoice, and/or mint quote id to hand to the payer.",
+      "properties": {
+        "address": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "invoice": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quote_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "wallet": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet",
+    "receive_info"
+  ],
+  "title": "ReceiveResult",
+  "type": "object"
+}

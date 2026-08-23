@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-pay"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2024"
 description = "A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control."
 license = "MIT"
@@ -20,21 +20,15 @@ default = [
     "evm",
     "btc-esplora",
     "exchange-rate",
-    "rpc",
+    "federation",
     "rest",
     "backup",
+    "ui",
 ]
-rpc = [
-    "dep:tonic",
-    "dep:tonic-prost",
-    "dep:prost",
-    "dep:aes-gcm",
-    "dep:hkdf",
-    "dep:sha2",
-    "dep:zstd",
-    "dep:tonic-build",
-    "dep:tonic-prost-build",
-]
+# One afpay node driving another as a payment provider, and `--peer-url` on
+# every command. The wire is the peer's own HTTP domain API, so this is an
+# HTTP client and nothing more — no second protocol, no second server.
+federation = ["dep:reqwest"]
 backup = ["dep:tar", "dep:zstd"]
 ln = ["dep:lightning-invoice"]
 redb = ["dep:redb", "dep:fs2", "dep:cdk-redb"]
@@ -87,7 +81,17 @@ interactive = [
     "dep:ratatui",
     "dep:shell-words",
 ]
-rest = ["dep:axum", "dep:tower-http"]
+# The HTTP domain API: resource routes, the OpenAPI/JSON Schema contract they
+# are described by, and the typed DTOs both are generated from. `schemars` is
+# the generator, so it lives and dies with this feature.
+rest = ["dep:axum", "dep:schemars"]
+# `afpay ui …`: isolated windows over the same requests the CLI runs. It needs
+# an Axum router of its own, so it declares axum rather than leaning on `rest`.
+# `qrcode` is here because a receive panel nobody can scan is not a receive
+# panel; `mode::qr` is the one encoder both this and the REPL go through.
+# `minijinja` because no panel is written in Rust: each is a template rendered
+# against a typed document, which is what lets a person replace one.
+ui = ["agent-first-ui/page", "agent-first-ui/session", "dep:axum", "dep:qrcode"]
 
 [[bin]]
 name = "afpay"
@@ -96,7 +100,12 @@ path = "src/main.rs"
 [dependencies]
 # Local monorepo development uses sibling crates where needed; version keys keep
 # packaging tied to the matching published crates.
-agent-first-data = { version = "0.31.0", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml"] }
+# The document formats are what `--*-secret file:PATH#DOT_PATH` reads out of.
+# A build that declares the source without them advertises a credential store
+# it cannot open, and says so only when someone reaches for it.
+agent-first-data = { version = "0.34.0", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
+# `session`: a confirmation panel is a window over a served AFUI session.
+agent-first-ui = { version = "0.5.0", default-features = false, optional = true }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -122,12 +131,11 @@ solana-system-interface = { version = "3.3", features = ["wincode"], optional = 
 base64 = { version = "0.23", optional = true }
 wincode = { version = "0.6", optional = true }
 
-alloy = { version = "2.3", default-features = false, features = ["provider-http", "signers", "signer-local", "signer-mnemonic", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
+alloy = { version = "2.4", default-features = false, features = ["provider-http", "signers", "signer-local", "signer-mnemonic", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
 bdk_wallet = { version = "3", default-features = false, features = ["std", "keys-bip39"], optional = true }
 bdk_esplora = { version = "0.22", default-features = false, features = ["async-https-rustls", "tokio"], optional = true }
 bdk_bitcoind_rpc = { version = "0.22", optional = true }
 bdk_electrum = { version = "0.24", default-features = false, features = ["use-rustls"], optional = true }
-aes-gcm = { version = "0.11", optional = true }
 bip39 = { version = "2", default-features = false, optional = true }
 cdk = { version = "0.17", default-features = false, features = ["wallet"], optional = true }
 cdk-redb = { version = "0.17", optional = true }
@@ -135,31 +143,28 @@ cdk-postgres = { version = "0.17", optional = true }
 fs2 = { version = "0.4", optional = true }
 getrandom = "0.4"
 blake3 = "1"
-hkdf = { version = "0.13", optional = true }
 hex = "0.4"
 lightning-invoice = { version = "0.34", optional = true }
-prost = { version = "0.14", optional = true }
+# The panel template engine. The same one afmail and afpsql render their UIs
+# with — a second engine would be a second set of escaping rules to keep honest.
+minijinja = { version = "2", optional = true }
 rustyline = { version = "18", optional = true }
 qrcode = { version = "0.14", optional = true }
 crossterm = { version = "0.29", optional = true }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"], optional = true }
-sha2 = { version = "0.11", optional = true }
 zstd = { version = "0.13", optional = true }
 shell-words = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 toml = "1.1"
-tonic = { version = "0.14", optional = true }
-tonic-prost = { version = "0.14", optional = true }
 spl-token = { version = "9", features = ["no-entrypoint"], optional = true }
 spl-associated-token-account = { version = "8", features = ["no-entrypoint"], optional = true }
 axum = { version = "0.8", optional = true }
-tower-http = { version = "0.7", features = ["cors"], optional = true }
-
-[build-dependencies]
-tonic-build = { version = "0.14", optional = true }
-tonic-prost-build = { version = "0.14", optional = true }
+schemars = { version = "1.2", optional = true }
 
 [dev-dependencies]
+# `test-support` rather than a second copy of AFUI's fingerprint, trust store
+# and stub browser in this spore's tests.
+agent-first-ui = { version = "0.5.0", default-features = false, features = ["test-support"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

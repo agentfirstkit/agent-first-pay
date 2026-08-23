@@ -1,4 +1,5 @@
 use crate::provider::PayError;
+use crate::spend::IdempotentReplayPayload;
 use crate::store::PayStore;
 use crate::store::wallet;
 use crate::types::*;
@@ -6,8 +7,19 @@ use std::time::Instant;
 
 use super::App;
 use super::helpers::*;
+use super::idempotency::{
+    IdempotencyEntry, canonical_request_hash, clear_idempotent, enter_idempotent,
+    finalize_idempotent,
+};
 
 pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
+    // Creating a wallet is the one wallet operation a retry can duplicate:
+    // without a mnemonic the daemon generates one, so the id it derives is
+    // fresh every time and there is nothing for a second call to converge on.
+    // The key is read before the input is destructured so the hash covers the
+    // whole request, exactly as it would have arrived.
+    let request_hash = canonical_request_hash(&input);
+
     match input {
         Input::WalletCreate {
             id,
@@ -25,6 +37,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             btc_core_auth_secret,
             btc_electrum_url,
             sol_cluster,
+            idempotency_key,
         } => {
             let start = Instant::now();
             let mut log_args = serde_json::json!({
@@ -101,7 +114,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
 
             // Validate sol_cluster value, if supplied. Accept the three known
             // Solana clusters or reject early — silently dropping it later
-            // would defeat the point of the cluster check at send time.
+            // would defeat the point of the plan-time cluster warning.
             if let Some(cluster) = sol_cluster.as_deref()
                 && !matches!(cluster, "mainnet-beta" | "devnet" | "testnet")
             {
@@ -131,6 +144,19 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                 btc_electrum_url,
                 sol_cluster: sol_cluster.filter(|_| network == Network::Sol),
             };
+            let idem_ctx = match enter_idempotent(
+                app,
+                &id,
+                idempotency_key.as_deref(),
+                request_hash.as_deref(),
+                start,
+            )
+            .await
+            {
+                IdempotencyEntry::Proceed { ctx } => ctx,
+                IdempotencyEntry::Done => return,
+            };
+
             match get_provider(&app.providers, network) {
                 Some(p) => match p.create_wallet(&request).await {
                     Ok(info) => {
@@ -140,6 +166,16 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             let meta = metadata_from_wallet_create(&info, &request);
                             let _ = store.save_wallet_metadata(&meta);
                         }
+                        finalize_idempotent(
+                            app,
+                            idem_ctx.as_ref(),
+                            IdempotentReplayPayload::WalletCreated {
+                                wallet: info.id.clone(),
+                                network: info.network,
+                                address: info.address.clone(),
+                            },
+                        )
+                        .await;
                         let _ = app
                             .writer
                             .send(Output::WalletCreated {
@@ -152,9 +188,13 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             })
                             .await;
                     }
-                    Err(e) => emit_error(&app.writer, Some(id), &e, start).await,
+                    Err(e) => {
+                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        emit_error(&app.writer, Some(id), &e, start).await;
+                    }
                 },
                 None => {
+                    clear_idempotent(app, idem_ctx.as_ref()).await;
                     emit_error(
                         &app.writer,
                         Some(id),
@@ -166,7 +206,11 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
             }
         }
 
-        Input::LnWalletCreate { id, request } => {
+        Input::LnWalletCreate {
+            id,
+            request,
+            idempotency_key,
+        } => {
             let start = Instant::now();
             let request_value =
                 serde_json::to_value(&request).unwrap_or_else(|_| serde_json::json!({}));
@@ -202,6 +246,19 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                 return;
             }
 
+            let idem_ctx = match enter_idempotent(
+                app,
+                &id,
+                idempotency_key.as_deref(),
+                request_hash.as_deref(),
+                start,
+            )
+            .await
+            {
+                IdempotencyEntry::Proceed { ctx } => ctx,
+                IdempotencyEntry::Done => return,
+            };
+
             match get_provider(&app.providers, Network::Ln) {
                 Some(p) => match p.create_ln_wallet(request).await {
                     Ok(info) => {
@@ -211,6 +268,16 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             let meta = metadata_from_ln_wallet_create(&info, &request_for_meta);
                             let _ = store.save_wallet_metadata(&meta);
                         }
+                        finalize_idempotent(
+                            app,
+                            idem_ctx.as_ref(),
+                            IdempotentReplayPayload::WalletCreated {
+                                wallet: info.id.clone(),
+                                network: info.network,
+                                address: info.address.clone(),
+                            },
+                        )
+                        .await;
                         let _ = app
                             .writer
                             .send(Output::WalletCreated {
@@ -223,9 +290,13 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             })
                             .await;
                     }
-                    Err(e) => emit_error(&app.writer, Some(id), &e, start).await,
+                    Err(e) => {
+                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        emit_error(&app.writer, Some(id), &e, start).await;
+                    }
                 },
                 None => {
+                    clear_idempotent(app, idem_ctx.as_ref()).await;
                     emit_error(
                         &app.writer,
                         Some(id),
@@ -686,7 +757,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                                     &app.writer,
                                     Some(id),
                                     &PayError::invalid_amount(format!(
-                                        "rpc-endpoint not supported for {} wallets",
+                                        "chain rpc endpoints are not supported for {} wallets",
                                         meta.network
                                     )),
                                     start,
@@ -888,7 +959,7 @@ fn metadata_from_wallet_create(
             .sol_cluster
             .clone()
             .filter(|_| info.network == Network::Sol),
-        // Do not mirror seed/backend secrets from downstream RPC nodes.
+        // Do not mirror seed/backend secrets from downstream peers.
         seed_secret: None,
         backend: None,
         btc_esplora_url: request.btc_esplora_url.clone(),

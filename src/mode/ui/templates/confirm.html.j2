@@ -1,0 +1,28 @@
+{#-
+  `send_confirm`: one resolved payment, and a person's answer about it.
+
+  This template may be replaced like any other — reordered, regrouped, reworded,
+  with sections dropped. What it cannot do is decide what a control means.
+  `data-afpay-decision` *declares* a control; afpay's own runtime, injected at
+  the layout's trusted-runtime marker under a nonce a frontend cannot forge, is
+  what binds that declaration to the route that sends or refuses the payment.
+  A page that declares neither control is a broken override and is reported as
+  one, because a question with no answer is worse than no window — and the
+  question here is whether to move money.
+
+  `document.plan_id` is the plan afpay will submit if this page is approved.
+  What is shown is what is confirmed: the terms come from the stored plan, and
+  nothing a template does changes which plan the approval names.
+-#}
+{% extends "layout.html.j2" %}
+{% block panel %}
+<section class="quote">
+<div class="payment-lead"><p class="payment-amount">{{ document.amount }}<span class="unit">{{ document.unit }}</span></p><p class="payment-destination"><span>to</span> {{ document.to }}</p></div>
+<dl class="terms"><div><dt>network fee</dt><dd>{{ document.fee }}<span class="unit">{{ document.unit }}</span></dd></div><div><dt>on-chain memo</dt><dd>{{ document.onchain_memo }}</dd></div></dl>
+{% if document.debits %}<dl class="debits">{% for debit in document.debits %}<div><dt>debits</dt><dd>{{ debit.amount }}<span class="unit">{{ debit.token }}</span></dd></div>{% endfor %}</dl>
+{% endif %}{% with fields = document.details, class = "details" %}{% include "fields.html.j2" %}{% endwith %}
+</section>
+<div class="decide">
+{% for decision in document.decisions %}<button type="button" class="{{ decision.id }}" data-afpay-decision="{{ decision.id }}">{{ decision.label }}</button>
+{% endfor %}<span class="decision-status" data-afpay-decision-status role="status" aria-live="polite"></span></div>
+{% endblock %}

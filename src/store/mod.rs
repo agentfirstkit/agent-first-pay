@@ -1,5 +1,6 @@
 #[cfg(feature = "redb")]
 pub mod lock;
+pub mod plan;
 pub mod wallet;
 
 #[cfg(feature = "redb")]

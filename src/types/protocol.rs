@@ -11,10 +11,10 @@ pub const JSON_PROTOCOL_VERSION: u32 = 1;
 
 /// Wire-level wrapper for every Input. Carries cross-cutting flags (dry_run,
 /// future: request_metadata) so handlers don't have to thread them through
-/// each variant. JSON layout: `{"dry_run": true, "code": "send", ...input fields}`.
+/// each variant. JSON layout: `{"dry_run": true, "code": "send_plan", ...input fields}`.
 /// Plain Input JSON (no dry_run field) still deserializes via #[serde(default)].
-/// Note: idempotency_key lives on the individual Send/CashuSend variants (not
-/// here) because it only applies to value-moving operations.
+/// Note: idempotency_key lives on `PayConfirm` (not here) because exactly one
+/// operation moves value, and it is the one that needs a replay identity.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
     /// When true, every handler validates the request and emits Output::DryRun
@@ -100,17 +100,31 @@ pub enum Input {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         btc_electrum_url: Option<String>,
         /// Solana cluster tag: `"mainnet-beta"`, `"devnet"`, or `"testnet"`.
-        /// When set, the daemon stores it on the wallet and refuses sends if
-        /// the active RPC endpoint heuristically belongs to a different
-        /// cluster. Omit on non-sol wallets.
+        /// When set, the daemon stores it as intent. Payment plans surface a
+        /// structured warning when RPC hostname evidence is missing or appears
+        /// to name another cluster. Omit on non-sol wallets.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sol_cluster: Option<String>,
+        /// Agent-supplied opaque key (≤128 chars). Two calls with the same
+        /// key and the same body replay the first outcome instead of creating
+        /// a second one; the same key with a different body returns
+        /// `idempotency_conflict`. Persisted for 24h. Required on the HTTP
+        /// face, optional on the local CLI.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     #[serde(rename = "ln_wallet_create")]
     LnWalletCreate {
         id: String,
         #[serde(flatten)]
         request: LnWalletCreateRequest,
+        /// Agent-supplied opaque key (≤128 chars). Two calls with the same
+        /// key and the same body replay the first outcome instead of creating
+        /// a second one; the same key with a different body returns
+        /// `idempotency_conflict`. Persisted for 24h. Required on the HTTP
+        /// face, optional on the local CLI.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     #[serde(rename = "wallet_close")]
     WalletClose {
@@ -160,6 +174,13 @@ pub enum Input {
         /// Reference key to watch for (base58, sol only, per strain-payment-method-solana).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<String>,
+        /// Agent-supplied opaque key (≤128 chars). Two calls with the same
+        /// key and the same body replay the first outcome instead of creating
+        /// a second one; the same key with a different body returns
+        /// `idempotency_conflict`. Persisted for 24h. Required on the HTTP
+        /// face, optional on the local CLI.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idempotency_key: Option<String>,
     },
     #[serde(rename = "receive_claim")]
     ReceiveClaim {
@@ -168,8 +189,10 @@ pub enum Input {
         quote_id: String,
     },
 
-    #[serde(rename = "cashu_send")]
-    CashuSend {
+    /// Resolve what minting a Cashu bearer token would cost and record it as a
+    /// reviewable plan. Nothing is minted and no proofs move.
+    #[serde(rename = "cashu_send_plan")]
+    CashuSendPlan {
         id: String,
         #[serde(default)]
         wallet: Option<String>,
@@ -181,11 +204,6 @@ pub enum Input {
         /// Restrict to wallets on these mints (tried in order).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mints: Option<Vec<String>>,
-        /// Agent-supplied opaque key (≤128 chars). Two CashuSend calls with the
-        /// same key replay the first terminal output instead of re-minting.
-        /// Mismatched body returns `idempotency_conflict`. Persisted for 24h.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        idempotency_key: Option<String>,
     },
     #[serde(rename = "cashu_receive")]
     CashuReceive {
@@ -194,8 +212,11 @@ pub enum Input {
         wallet: Option<String>,
         token: String,
     },
-    #[serde(rename = "send")]
-    Send {
+    /// Resolve a payment against its provider and record it as a reviewable
+    /// plan. No value moves and nothing is broadcast: this is the first half
+    /// of the plan/confirm boundary every remote effect in afpay goes through.
+    #[serde(rename = "send_plan")]
+    SendPlan {
         id: String,
         #[serde(default)]
         wallet: Option<String>,
@@ -204,7 +225,7 @@ pub enum Input {
         to: String,
         /// Amount in the network's base unit (sats / lamports / wei). Required for
         /// EVM/SOL/BTC. Optional for Lightning when `to` is an amount-bearing
-        /// invoice. Cashu sends go through CashuSend.
+        /// invoice. Cashu token mints go through CashuSendPlan.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount: Option<Amount>,
         #[serde(default)]
@@ -220,10 +241,34 @@ pub enum Input {
         /// not accidentally broadcast on Arbitrum / Optimism / Mainnet.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         chain_id: Option<u64>,
-        /// Agent-supplied opaque key (≤128 chars). Two Send calls with the
-        /// same key replay the first terminal output (Sent / AccountingInconsistent)
-        /// instead of re-broadcasting. Mismatched body returns
-        /// `idempotency_conflict`. Persisted for 24h.
+    },
+
+    /// Execute a plan someone reviewed. The **only** operation in afpay that
+    /// moves money out of a wallet.
+    ///
+    /// The payment executed is read out of the stored plan, never out of this
+    /// request: a confirm carries an id and nothing else, so what happens is
+    /// what was reviewed. A plan whose workspace, configuration, wallet or
+    /// spend rules moved since it was resolved is refused (`plan_stale`)
+    /// rather than re-resolved, and a plan is confirmable exactly once.
+    #[serde(rename = "pay_confirm")]
+    PayConfirm {
+        id: String,
+        plan_id: String,
+        /// What the caller believes this plan authorises. When set, a plan
+        /// that says otherwise is refused rather than executed — that is what
+        /// keeps a token-mint plan submitted to the send route from quietly
+        /// minting a token. Transports that address the two operations by
+        /// different routes set it; the local CLI, which has one confirm verb,
+        /// leaves it open and lets the plan decide.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<PayPlanOperation>,
+        /// Agent-supplied opaque key (≤128 chars). Two confirms with the same
+        /// key replay the first terminal output (`sent` / `cashu_sent` /
+        /// `accounting_inconsistent`) instead of re-broadcasting. A different
+        /// body under the same key returns `idempotency_conflict`. Persisted
+        /// for 24h. Required on the HTTP face; optional on the local CLI,
+        /// where the plan id stands in.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idempotency_key: Option<String>,
     },
@@ -430,6 +475,49 @@ pub enum Output {
         id: String,
         wallet: String,
         amount: Amount,
+        trace: Trace,
+    },
+
+    /// A payment, fully resolved and recorded, waiting for someone to confirm
+    /// it. Nothing has moved. `plan_id` is what a confirm submits; everything
+    /// beside it is what the confirm will do, in the terms a person or an
+    /// agent needs in order to refuse.
+    #[serde(rename = "pay_planned")]
+    PayPlanned {
+        id: String,
+        plan_id: String,
+        /// `send` or `cashu_send` — which confirm route this plan belongs to.
+        operation: String,
+        network: Network,
+        /// The wallet the provider picked, not the caller's hint.
+        wallet: String,
+        /// The destination exactly as the payment will use it. Absent for a
+        /// Cashu token mint, which has no destination.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        amount_native: u64,
+        fee_estimate_native: u64,
+        fee_unit: String,
+        /// The memo this payment will write on-chain, where it is public and
+        /// permanent. Carried on the plan because a person cannot meaningfully
+        /// approve a payment whose irreversible side effects they cannot see.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        onchain_memo: Option<String>,
+        /// The annotations this payment will record locally. Shown for the same
+        /// reason, and kept distinct from `onchain_memo` because these stay on
+        /// this machine and can be corrected afterwards.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        local_memo: BTreeMap<String, String>,
+        /// The spend-limit budgets this payment would debit.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        spend_debits: Vec<SpendDebit>,
+        /// Review-time safety signals. These are result fields rather than
+        /// logs, so log filtering cannot hide them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<PlanWarning>,
+        /// After this, the plan is refused and the payment must be resolved
+        /// again against current network conditions.
+        expires_at_epoch_ms: u64,
         trace: Trace,
     },
 
@@ -940,16 +1028,16 @@ mod tests {
 
     #[test]
     fn debug_output_redacts_config_secrets() {
-        let mut afpay_rpc = std::collections::HashMap::new();
-        afpay_rpc.insert(
+        let mut peers = std::collections::HashMap::new();
+        peers.insert(
             "wallet-server".to_string(),
-            AfpayRpcConfig {
-                endpoint: "http://127.0.0.1:9400".to_string(),
-                endpoint_secret: Some("downstream-secret-value".to_string()),
+            PeerConfig {
+                url: "http://127.0.0.1:9401".to_string(),
+                api_key_secret: Some("downstream-secret-value".to_string()),
             },
         );
         let config = RuntimeConfig {
-            rpc_secret: Some("rpc-secret-value".to_string()),
+            peer_api_key_secret: Some("peer-secret-value".to_string()),
             postgres_url_secret: Some("postgres-secret-value".to_string()),
             exchange_rate: Some(ExchangeRateConfig {
                 ttl_s: 60,
@@ -959,11 +1047,11 @@ mod tests {
                     api_key_secret: Some("exchange-secret-value".to_string()),
                 }],
             }),
-            afpay_rpc,
+            peers,
             ..RuntimeConfig::default()
         };
         let rendered = format!("{config:?}");
-        assert!(!rendered.contains("rpc-secret-value"));
+        assert!(!rendered.contains("peer-secret-value"));
         assert!(!rendered.contains("postgres-secret-value"));
         assert!(!rendered.contains("downstream-secret-value"));
         assert!(!rendered.contains("exchange-secret-value"));
@@ -1111,7 +1199,7 @@ mod tests {
     fn request_parses_dry_run_alongside_flattened_input() {
         let json = r#"{
             "dry_run": true,
-            "code": "send",
+            "code": "send_plan",
             "id": "t",
             "to": "0xabc",
             "amount": {"value": 1000, "token": "eth"}
@@ -1119,39 +1207,39 @@ mod tests {
         let request: Request = serde_json::from_str(json).expect("dry_run request parses");
         assert!(request.dry_run);
         match request.input {
-            Input::Send { amount, to, .. } => {
+            Input::SendPlan { amount, to, .. } => {
                 assert_eq!(to, "0xabc");
                 let amount = amount.expect("amount field deserialized");
                 assert_eq!(amount.value, 1000);
                 assert_eq!(amount.token, "eth");
             }
-            other => panic!("expected Send, got {other:?}"),
+            other => panic!("expected SendPlan, got {other:?}"),
         }
     }
 
     #[test]
     fn send_chain_id_parses_and_defaults_to_none() {
-        let with_chain = r#"{"code":"send","id":"t","to":"0xabc","chain_id":42161}"#;
+        let with_chain = r#"{"code":"send_plan","id":"t","to":"0xabc","chain_id":42161}"#;
         let input: Input = serde_json::from_str(with_chain).expect("with chain_id parses");
         match input {
-            Input::Send { chain_id, .. } => assert_eq!(chain_id, Some(42161)),
-            other => panic!("expected Send, got {other:?}"),
+            Input::SendPlan { chain_id, .. } => assert_eq!(chain_id, Some(42161)),
+            other => panic!("expected SendPlan, got {other:?}"),
         }
-        let without = r#"{"code":"send","id":"t","to":"0xabc"}"#;
+        let without = r#"{"code":"send_plan","id":"t","to":"0xabc"}"#;
         let input: Input = serde_json::from_str(without).expect("without chain_id parses");
         match input {
-            Input::Send { chain_id, .. } => assert_eq!(chain_id, None),
-            other => panic!("expected Send, got {other:?}"),
+            Input::SendPlan { chain_id, .. } => assert_eq!(chain_id, None),
+            other => panic!("expected SendPlan, got {other:?}"),
         }
     }
 
     #[test]
     fn send_amount_field_is_optional() {
-        let json = r#"{"code":"send","id":"t","to":"bitcoin:bc1q?amount=100"}"#;
+        let json = r#"{"code":"send_plan","id":"t","to":"bitcoin:bc1q?amount=100"}"#;
         let input: Input = serde_json::from_str(json).expect("send without amount parses");
         match input {
-            Input::Send { amount, .. } => assert!(amount.is_none()),
-            other => panic!("expected Send, got {other:?}"),
+            Input::SendPlan { amount, .. } => assert!(amount.is_none()),
+            other => panic!("expected SendPlan, got {other:?}"),
         }
     }
 }

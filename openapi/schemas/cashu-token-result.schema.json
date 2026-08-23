@@ -1,0 +1,61 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/cashu-token-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "fee": {
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "token"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "reservation_ids": {
+      "default": [],
+      "items": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "confirmed",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "token": {
+      "description": "The bearer token. Whoever holds this string holds the funds.",
+      "type": "string"
+    },
+    "transaction_id": {
+      "type": "string"
+    },
+    "wallet": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet",
+    "transaction_id",
+    "status",
+    "token"
+  ],
+  "title": "CashuTokenResult",
+  "type": "object"
+}

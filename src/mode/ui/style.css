@@ -1,0 +1,397 @@
+/* Panel appearance only. The palette, the reset, the focus ring, `[hidden]`
+   and the page inset come from `__afui/base.css`, which the session serves and
+   the layout links first. */
+
+:root {
+  /* Two surfaces this page needs and the baseline has no opinion about: the
+     card a wallet or a quote sits on, and the line around the one carrying a
+     warning. */
+  --card: #f7f9fa;
+  --warn-line: #e8b48c;
+  --warn-card: #fdf3ec;
+  --afui-page-padding: 1.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --card: #1c2024;
+    --warn-line: #5a3722;
+    --warn-card: #241a14;
+  }
+}
+
+body > header,
+body > main,
+body > footer {
+  width: min(72rem, 100%);
+  margin-inline: auto;
+}
+
+body[data-ui-kind="send_confirm"] > header,
+body[data-ui-kind="send_confirm"] > main,
+body[data-ui-kind="send_confirm"] > footer,
+body[data-ui-kind="receive_inspect"] > header,
+body[data-ui-kind="receive_inspect"] > main,
+body[data-ui-kind="receive_inspect"] > footer {
+  width: min(48rem, 100%);
+}
+
+header {
+  margin-bottom: 1.25rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--afui-muted);
+}
+
+.subject {
+  margin: 0.15rem 0 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  font-family: var(--afui-mono);
+}
+
+/* Per-network totals. One card per (network, unit) — the wrap keeps a narrow
+   window from scrolling sideways. */
+.totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.total {
+  flex: 1 1 12rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--afui-line);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+/* A network with an unreachable wallet is marked, because its total is a
+   floor rather than the answer. */
+.total.degraded {
+  border-color: var(--warn-line);
+  background: var(--warn-card);
+}
+
+.total .network {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--afui-muted);
+}
+
+.total .amount {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-family: var(--afui-mono);
+  overflow-wrap: anywhere;
+}
+
+.unit {
+  margin-left: 0.35rem;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--afui-muted);
+}
+
+.total .meta {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 12px;
+  color: var(--afui-muted);
+}
+
+.total.degraded .meta {
+  color: var(--afui-warn-ink);
+}
+
+.group h2 {
+  margin: 0 0 0.5rem;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--afui-muted);
+}
+
+.wallets {
+  list-style: none;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  gap: 0.75rem;
+}
+
+.wallet {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--afui-line);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+/* A wallet whose provider did not answer stays on the page next to the ones
+   that did — dropping it would understate what the person holds. */
+.wallet.failed {
+  border-color: var(--warn-line);
+  background: var(--warn-card);
+}
+
+.ident {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.ident .id {
+  font-family: var(--afui-mono);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ident .label {
+  font-size: 12px;
+  color: var(--afui-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Addresses are long and must stay copyable, so they wrap rather than being
+   truncated with an ellipsis. */
+.address {
+  margin-top: 0.3rem;
+  font-family: var(--afui-mono);
+  font-size: 12px;
+  color: var(--afui-muted);
+  overflow-wrap: anywhere;
+}
+
+dl {
+  margin: 0.6rem 0 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.75rem;
+}
+
+dl > div {
+  display: contents;
+}
+
+dt {
+  font-size: 12px;
+  color: var(--afui-muted);
+}
+
+dd {
+  margin: 0;
+  font-family: var(--afui-mono);
+  overflow-wrap: anywhere;
+}
+
+dl.extras dd,
+dl.details dd {
+  font-size: 12px;
+}
+
+dl.details {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--afui-line);
+}
+
+/* The receive code. It is sized in absolute terms rather than stretched to the
+   window: a QR that fills a wide screen is harder to scan, not easier. */
+.qr {
+  margin: 0 0 1.25rem;
+  padding: 1rem;
+  width: max-content;
+  max-width: 100%;
+  border: 1px solid var(--afui-line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.qr img {
+  display: block;
+  width: 100%;
+  max-width: 20rem;
+  height: auto;
+}
+
+.qr figcaption {
+  margin-top: 0.6rem;
+  font-size: 12px;
+  color: #5b6570;
+  text-align: center;
+}
+
+/* Payloads are long and must stay selectable, so they wrap. */
+dl.payload dd {
+  font-size: 13px;
+}
+
+/* The payment being confirmed. */
+.quote {
+  padding: 1rem;
+  border: 1px solid var(--afui-line);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.payment-lead {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--afui-line);
+}
+
+.payment-amount {
+  margin: 0;
+  font-size: clamp(1.8rem, 8vw, 2.6rem);
+  font-weight: 650;
+  font-family: var(--afui-mono);
+  overflow-wrap: anywhere;
+}
+
+.payment-destination {
+  margin: 0.35rem 0 0;
+  font-family: var(--afui-mono);
+  overflow-wrap: anywhere;
+}
+
+.payment-destination > span {
+  margin-right: 0.35rem;
+  color: var(--afui-muted);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 12px;
+}
+
+.quote dl.terms {
+  margin-top: 0;
+}
+
+dl.debits {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--afui-line);
+}
+
+/* Refuse first in the source order and on screen: the safe answer should not
+   be the one a person has to travel past the dangerous one to reach.
+   `document.decisions` is in that order, so a template that iterates it keeps
+   the property without knowing it exists. */
+.decide {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.decide button {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.7rem 1.2rem;
+  border-radius: 8px;
+  border: 1px solid var(--afui-line);
+  cursor: pointer;
+  color: var(--afui-ink);
+  background: var(--card);
+}
+
+.decide button.approve {
+  border-color: var(--warn-line);
+  background: var(--warn-card);
+  color: var(--afui-warn-ink);
+}
+
+.decide button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.decision-status {
+  align-self: center;
+  color: var(--afui-muted);
+  font-size: 13px;
+}
+
+body[data-decision-pending] .decide {
+  cursor: wait;
+}
+
+.warn {
+  margin: 0.75rem 0;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--warn-line);
+  border-radius: 6px;
+  background: var(--warn-card);
+  color: var(--afui-warn-ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  color: var(--afui-muted);
+  font-size: 13px;
+}
+
+.error {
+  margin: 0.6rem 0 0;
+  color: var(--afui-warn-ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.no-balance {
+  margin: 0.6rem 0 0;
+  color: var(--afui-muted);
+  font-size: 13px;
+}
+
+.empty {
+  color: var(--afui-muted);
+  padding: 2rem;
+  text-align: center;
+  border: 1px dashed var(--afui-line);
+  border-radius: 6px;
+}
+
+footer {
+  margin-top: 1rem;
+  color: var(--afui-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 560px) {
+  body {
+    padding: 1rem;
+  }
+
+  .wallets {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  dl {
+    grid-template-columns: minmax(5rem, auto) minmax(0, 1fr);
+  }
+
+  .decide button {
+    flex: 1 1 10rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .decide button {
+    min-height: 44px;
+  }
+}

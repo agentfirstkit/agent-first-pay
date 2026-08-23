@@ -30,18 +30,18 @@ pub trait PayProvider: Send + Sync {
 Two backend types implement this trait:
 
 - **Local** — compiled with the corresponding feature flag (e.g. `cashu`, `ln`). Wallet SDK runs in-process.
-- **Remote** (`RemoteProvider`) — serializes trait method calls to JSON, encrypts with AES-256-GCM, and sends via gRPC to a remote `afpay --mode rpc` daemon.
+- **Remote** (`RemoteProvider`) — an HTTP client against another afpay node's `/v1` resource routes, carrying that node's Bearer API key. There is no afpay-specific transport: federation and `curl` use the same face, so a peer can only reach what any agent holding that token could reach.
 
-The coordinator's `config.toml` maps networks to named `afpay_rpc` nodes. Multiple networks can share the same node:
+The coordinator's `config.toml` maps networks to named peers. Multiple networks can share the same peer:
 
 ```toml
-[afpay_rpc.wallet-server]
-endpoint = "10.0.1.5:9400"
-endpoint_secret = "abc..."
+[peers.wallet-server]
+url = "http://10.0.1.5:9401"
+api_key_secret = "abc..."
 
-[afpay_rpc.chain-server]
-endpoint = "10.0.1.6:9400"
-endpoint_secret = "def..."
+[peers.chain-server]
+url = "http://10.0.1.6:9401"
+api_key_secret = "def..."
 
 [providers]
 cashu = "wallet-server"
@@ -60,39 +60,44 @@ Networks not listed in `[providers]` use their local implementation (if compiled
 All networks in one process. Simplest setup:
 
 ```bash
-# REST API server (curl-accessible, no specialized client needed)
+# HTTP API server (curl-accessible, no specialized client needed)
 afpay --mode rest --rest-api-key-secret "my-secret"       # 127.0.0.1:9401 by default
 
 # Or selective features
 cargo build --features cashu
-cargo build --features cashu,rest   # with REST API
+cargo build --features cashu,rest   # with the HTTP API
 cargo build --features btc-esplora
 ```
 
-### Multi-Level (Cascading RPC)
+### Multi-Level (Cascading Federation)
 
-Networks run as independent daemons. A coordinator connects to named `afpay_rpc` nodes via encrypted gRPC. Any node can itself forward to downstream nodes (cascading):
+Networks run as independent daemons. A coordinator forwards to named peers over
+their HTTP APIs. Any node can itself forward to downstream peers (cascading):
 
 ```
 Agent / Client
-  │ REST or gRPC
+  │ HTTP + Bearer
   ▼
-afpay --mode rest (or rpc)                 ← coordinator (config.toml below)
-  │ gRPC (AES-256-GCM PSK)
-  ├──→ afpay --mode rpc (wallet-server)    ← VPS-A: ln + cashu
-  └──→ afpay --mode rpc (chain-server)     ← VPS-B: sol + evm + btc
+afpay --mode rest                          ← coordinator (config.toml below)
+  │ HTTP + Bearer (the peers' own /v1 routes)
+  ├──→ afpay --mode rest (wallet-server)   ← VPS-A: ln + cashu
+  └──→ afpay --mode rest (chain-server)    ← VPS-B: sol + evm + btc
 ```
+
+Every hop is the same protocol, so a coordinator is just a client with a config
+file. Each leg needs its own encrypted path — see
+[Reaching a daemon that is not on this machine](../README.md#reaching-a-daemon-that-is-not-on-this-machine).
 
 Coordinator `config.toml`:
 
 ```toml
-[afpay_rpc.wallet-server]
-endpoint = "vps-a:9400"
-endpoint_secret = "abc..."
+[peers.wallet-server]
+url = "http://vps-a:9401"
+api_key_secret = "abc..."
 
-[afpay_rpc.chain-server]
-endpoint = "vps-b:9400"
-endpoint_secret = "def..."
+[peers.chain-server]
+url = "http://vps-b:9401"
+api_key_secret = "def..."
 
 [providers]
 ln = "wallet-server"
@@ -106,134 +111,191 @@ Benefits:
 - **Fault isolation** — one network crashing doesn't affect others
 - **Minimal attack surface** — each container only has the SDK for its network
 - **Independent scaling** — hot wallets on fast VPS, cold storage on secure hardware
-- **Cascading limits** — each RPC layer enforces its own spend limits independently
+- **Cascading limits** — each layer enforces its own spend limits independently
 
-### CLI Local vs Remote
+### CLI Local vs Federated
 
-The same CLI commands work locally or against a remote daemon:
+The same CLI commands work locally or against a peer:
 
 ```bash
-# Local (wallet on this machine)
+# Local (wallet on this machine). `send` resolves a plan and pays nothing.
 afpay ln send --to lnbc1...
-afpay ln send --to lno1... --amount-sats 1000   # BOLT12 offer (phoenixd only)
+afpay pay confirm --plan-id plan_… --idempotency-key pay-invoice-1
 
-# Remote (forward to rpc daemon)
-afpay ln send --to lnbc1... --rpc-endpoint 10.0.1.5:9400 --rpc-secret "abc..."
+# On a peer (forwarded over its HTTP API) — both halves, same as local
+afpay ln send --to lnbc1... --peer-url http://10.0.1.5:9401 --peer-api-key-secret "abc..."
+afpay pay confirm --plan-id plan_… --peer-url http://10.0.1.5:9401 --peer-api-key-secret "abc..."
 ```
 
-With `--rpc-endpoint`, the CLI forwards the request. Without it, the CLI executes locally. Transparent to the caller.
+With `--peer-url`, the CLI forwards the request. Without it, the CLI executes locally. Transparent to the caller.
 
-## RPC Protocol
+### Paying is two commands
 
-The RPC mode uses gRPC with PSK (Pre-Shared Key) payload encryption instead of TLS. The PSK must be a high-entropy 32+ byte secret; afpay derives the AES key with HKDF-SHA256, rejects duplicate request nonces during the daemon lifetime, and treats decrypt failure as auth failure. Suitable for internal process-to-process communication where the operator controls all nodes.
+`afpay <network> send` resolves the payment — the wallet it would use, what
+leaves it, the fee, the spend budgets it would debit, and any structured
+`warnings` — and prints a `plan_id`. Warnings are part of `pay_planned`, not a
+filterable log. It contacts nothing that could move value. `afpay pay confirm
+--plan-id …` is what pays, and it is the only command that does.
 
-### Proto Definition
+The split is not CLI politeness. `Input::Send` no longer exists: the dispatcher
+every mode shares has exactly one operation that moves money out of a wallet,
+and it takes a plan id. A plan is single-use, expires after 15 minutes, and is
+refused (`plan_stale`) if the workspace, daemon configuration, wallet metadata
+or spend-limit rules changed after it was resolved — so a payment that was
+reviewed and a payment that happens cannot be two different payments.
 
-```protobuf
-syntax = "proto3";
-package afpay;
+An explicit EVM `chain_id` mismatch is a hard refusal. Omitting it produces an
+`evm_chain_unpinned` plan warning. Solana cluster metadata is weaker: endpoint
+hostnames can offer evidence, but private or proxied RPC names cannot prove a
+cluster. Unpinned, unclassifiable, and apparently mismatched plans therefore
+carry review warnings instead of pretending that a hostname is an on-chain
+attestation.
 
-service AfPay {
-  rpc Call (EncryptedRequest) returns (EncryptedResponse);
-}
+If the network accepted a payment but the spend ledger could not confirm its
+reservation, the request has exactly one terminal outcome:
+`accounting_inconsistent`. It includes the transaction and reservation IDs,
+must not be retried, and is never followed by `sent` or `cashu_sent`. Reconcile
+the named reservations locally before making another payment.
 
-message EncryptedRequest {
-  bytes nonce = 1;       // 12 bytes, randomly generated per request
-  bytes ciphertext = 2;  // AES-256-GCM(HKDF(secret), JSON payload)
-}
+## Federation
 
-message EncryptedResponse {
-  bytes nonce = 1;
-  bytes ciphertext = 2;
-}
-```
-
-The proto does not define business fields. The internal payload is just Input/Output JSON, encrypted before transport.
-
-### Encryption Flow
-
-```
-Client                                Server
-  │                                     │
-  ├─ Input → serde_json::to_vec()       │
-  ├─ HKDF(secret) → AES-GCM encrypt    │
-  ├─ gRPC Call(nonce, ciphertext) ─────→│
-  │                                     ├─ reject replayed nonce, decrypt payload
-  │                                     ├─ failure → disconnect (decrypt fail = auth fail)
-  │                                     ├─ success → serde_json::from_slice() → handle
-  │                                     ├─ Output → serialize → encrypt
-  │ ←── gRPC Response(nonce, ct) ───────┤
-  ├─ decrypt → Output                   │
-```
-
-### Configuration
+`<command> --peer-url` runs a command on another afpay node. The wire is that
+node's own HTTP domain API — the routes documented below — authenticated with
+its `--rest-api-key-secret`. There is no handshake, no session table, and no
+payload cipher: one command is one HTTP request.
 
 ```bash
-# Daemon
-afpay --mode rpc --rpc-secret "64-char-hex"
+# Peer (the same daemon any HTTP client would talk to)
+afpay --mode rest --rest-api-key-secret "64-char-hex"
 
-# Public bind requires an explicit acknowledgement and network hardening
-afpay --mode rpc --rpc-listen 0.0.0.0:9400 --public-listen --rpc-secret "64-char-hex"
-
-# CLI direct to remote daemon
-afpay ln send --wallet w_01 ... --rpc-endpoint vps-a:9400 --rpc-secret "64-char-hex"
+# A command run on that peer
+afpay ln send --wallet w_01 ... \
+  --peer-url http://vps-a:9401 --peer-api-key-secret "64-char-hex"
 ```
 
-For multi-level (coordinator → daemon), configure `config.toml` with named `afpay_rpc` nodes (see Deployment Patterns above). Each node can have a different secret. Secrets use the `_secret` suffix and are auto-redacted in agent-first-data output.
+For a coordinator, put the peers in `config.toml` instead (see Deployment
+Patterns above). Each peer can have a different key; keys use the `_secret`
+suffix and are auto-redacted in agent-first-data output.
+
+### What federation can and cannot ask for
+
+A peer is reached through the published routes and nothing else. Every operation
+`Input::is_local_only` marks — seed material, spend-limit rule writes,
+reservation reconcile, wallet-config writes, `wallet restore` — is refused by the
+client *before any bytes are sent*, and has no route on the peer either. That
+symmetry is the point: a leaked bearer cannot raise its own spending limit,
+whether it belongs to an agent or to another afpay node.
+
+`limit list` is the one policy read that crosses the hop, and it crosses as
+`GET /v1/spend-limits` — a read any token holder already has.
+
+### Mismatched peers fail loudly
+
+There is no cross-version compatibility layer. A peer that is not this afpay is
+named, not guessed at:
+
+| `error_code` | Meaning |
+|--------------|---------|
+| `peer_unreachable` | Nothing answered. Retryable; names the URL. |
+| `peer_not_afpay` | Something answered, but not with afpay's protocol envelope. Reports the HTTP status, content type, and a snippet of the body. |
+| `peer_route_unsupported` | An afpay that does not serve this route — i.e. a different version. Names the method and path. |
+| `peer_unauthorized` | The credential was refused; names `--peer-api-key-secret`. |
+| `peer_mismatch` | `GET /health` reported a different afpay version or protocol version. Long-lived modes run this check at startup for every configured peer and refuse to serve. |
+
+### Transport security
+
+Federation carries no encryption of its own. Run each leg over Tailscale or
+WireGuard, an SSH tunnel, or a TLS reverse proxy — the same three arrangements
+any HTTP client uses, documented with copy-pasteable configuration in
+[Reaching a daemon that is not on this machine](../README.md#reaching-a-daemon-that-is-not-on-this-machine).
+Encryption is not authentication: the bearer token is required in every case.
 
 ### Dependencies
 
 ```toml
-tonic = "0.14"           # gRPC server/client
-prost = "0.14"           # protobuf
-tonic-build = "0.14"     # build.rs proto compilation
-aes-gcm = "0.10"         # AES-256-GCM encryption
-hkdf = "0.12"            # PSK key derivation
-sha2 = "0.10"            # HKDF-SHA256
-axum = "0.8"             # HTTP REST server (rest feature)
-tower-http = "0.6"       # CORS middleware (rest feature)
+axum = "0.8"             # HTTP server (rest feature)
+schemars = "1.2"         # OpenAPI / JSON Schema generation (rest feature)
+reqwest = "0.13"         # HTTP client (federation feature)
 ```
-
 
 ### Public Listen Policy
 
-`--rpc-listen` and `--rest-listen` default to `127.0.0.1`. Binding to `0.0.0.0`, `::`, or another non-loopback address fails unless `--public-listen` is also supplied. Treat `--public-listen` as an operational acknowledgement: REST still needs TLS at a reverse proxy, and RPC should remain on a trusted private network or tunnel.
+`--rest-listen` defaults to `127.0.0.1`. Binding to `0.0.0.0`, `::`, or another non-loopback address fails unless `--public-listen` is also supplied. Treat `--public-listen` as an operational acknowledgement, not a security control: afpay serves plain HTTP and terminates no TLS of its own. See the README section linked above for the three sanctioned ways to carry it.
 
-## REST API
+## HTTP API
 
-The REST mode (`--mode rest`) provides a plain HTTP API with Bearer token authentication. Unlike the RPC mode (gRPC + AES-256-GCM), REST mode is designed for direct access from any HTTP client — no specialized client or encryption library needed. REST listens on loopback by default; use `--public-listen` only behind TLS, firewall rules, or a trusted private network.
+`--mode rest` serves afpay's domain as HTTP resources, described by an OpenAPI 3.2 document the daemon serves and the repository commits. It is the only machine face afpay has: agents, containers, and other afpay nodes all speak it, and it needs no specialized client. It listens on loopback by default; reach it from elsewhere through Tailscale/WireGuard, an SSH tunnel, or a TLS reverse proxy — see [Reaching a daemon that is not on this machine](../README.md#reaching-a-daemon-that-is-not-on-this-machine).
 
-### Protocol
+### Discovery face
+
+Public, credential-free, and answerable offline — an agent can read the whole contract before it holds a token:
+
+| Method | Path | Meaning |
+|--------|------|---------|
+| `GET` | `/health` | Service name, version, protocol version, readiness |
+| `GET` | `/openapi.json` | The OpenAPI document this process actually serves |
+| `GET` | `/schemas/index.json` | Index of the standalone JSON Schemas |
+| `GET` | `/schemas/{schema_file}` | One `application/schema+json` document |
+
+`afpay api export --directory openapi --force` writes the same three artifacts without starting anything; they are committed under `openapi/` and a drift test fails if they disagree with the Rust DTOs they came from.
+
+### Resource routes
+
+Every route below requires `Authorization: Bearer <api-key>` and reaches the same dispatcher, spend ledger, and store the CLI reaches.
+
+| Method | Path | Operation |
+|--------|------|-----------|
+| `GET` | `/v1/wallets` | List wallets (`?network=`) |
+| `POST` | `/v1/wallets` | Create a wallet — closed tagged union on `network`, **`Idempotency-Key` required** |
+| `GET` | `/v1/wallets/{wallet}` | Read one wallet's stored configuration |
+| `DELETE` | `/v1/wallets/{wallet}` | Close a wallet |
+| `GET` | `/v1/balances` | Balances across wallets (`?wallet=`, `?network=`, `?check=`) |
+| `POST` | `/v1/receives` | Create an address, invoice, or mint quote — **`Idempotency-Key` required** |
+| `POST` | `/v1/receives/{quote_id}/claim` | Claim a paid mint quote |
+| `POST` | `/v1/send-plans` | Resolve a payment into a reviewable plan — nothing moves |
+| `POST` | `/v1/sends` | Pay by confirming a plan — body is `{"plan_id"}`, **`Idempotency-Key` required** |
+| `POST` | `/v1/cashu/token-plans` | Resolve a token mint into a reviewable plan — nothing moves |
+| `POST` | `/v1/cashu/tokens` | Mint by confirming a plan — body is `{"plan_id"}`, **`Idempotency-Key` required** |
+| `POST` | `/v1/cashu/redemptions` | Redeem a Cashu bearer token |
+| `GET` | `/v1/transactions` | List recorded payments |
+| `GET` | `/v1/transactions/{transaction_id}` | One payment's settlement status |
+| `POST` | `/v1/transactions/sync` | Re-read provider activity into local history |
+| `GET` | `/v1/spend-limits` | Read every rule and the spend consumed in its window |
+
+### Envelopes
+
+Every domain response is a strict AFDATA envelope, redacted at the serialization boundary, with the request correlation id in the `x-request-id` header:
 
 ```
-POST /v1/afpay
-Authorization: Bearer <api-key>
-Content-Type: application/json
-
-← Input JSON (same as pipe protocol, {"code":"...", ...})
-→ Output[] JSON array
+{"kind":"result","result":{…},"trace":{"duration_ms":3}}
+{"kind":"error","error":{"code":"wallet_not_found","message":"…","retryable":false,"hint":"…"},"trace":{"duration_ms":1}}
 ```
+
+The HTTP status and `error.code` are both load-bearing: `400` input, `401` credential, `403` operator policy, `404` resource, `405` method, `409` idempotency conflict, `413` body, `415` media type, `422` valid but inapplicable (a spend-limit refusal lands here), `429` rate limit, `500` internal or ledger failure, `503` provider unreachable.
+
+Two afpay outputs that the wire protocol carries as results become errors here, because reporting them as successes would misstate the business outcome: `limit_exceeded` (a spend rule refused the payment) and `accounting_inconsistent` (money left but the ledger could not record it). Both carry their payload as `error.details`.
 
 ### Enforcement
 
-Same as RPC mode:
-
 | Rule | Behavior |
 |------|----------|
-| Spend limits | Always enforced |
-| `is_local_only()` operations | Rejected with HTTP 403 |
-| Authentication | Bearer token or X-API-Key header |
+| Spend limits | Always enforced, through the same reserve/execute/confirm path as the CLI |
+| Plan/confirm | Money leaves a wallet only by confirming a plan afpay resolved and recorded. The confirm body carries the id and nothing else, so an approved payment and the payment made cannot differ |
+| Idempotency | `Idempotency-Key` becomes the ledger key `--idempotency-key` writes: same 24-hour window, same canonical body hash, same replay. Required on the four operations a retry could duplicate — both confirms, wallet creation, and receives |
+| `is_local_only()` operations | Not routed at all — seeds, spend-limit rules, reservation repair and daemon config exist only on the local CLI |
+| Authentication | `Authorization: Bearer` only; credentials in the query string are refused |
+| CORS | No header emitted; a browser origin is authorized by same-host proxying, not by afpay |
 
 ### Container Deployment
 
-The `container/docker/` directory provides the canonical single-container deployment using supervisord (one merged `Dockerfile` whose `AFPAY_BIN_FROM` build-arg selects a `downloader` or `builder` source stage). The `afpay container` command builds and runs it under Docker, Podman, or Apple `container`. The `AFPAY_MODE` environment variable selects the afpay run mode (`rest` or `rpc`):
+The `container/docker/` directory provides the canonical single-container deployment using supervisord (one merged `Dockerfile` whose `AFPAY_BIN_FROM` build-arg selects a `downloader` or `builder` source stage). The `afpay container` command builds and runs it under Docker, Podman, or Apple `container`:
 
 ```
 supervisord
   ├─ [priority=10] bitcoind (optional)
   ├─ [priority=10] phoenixd (optional)
-  ├─ [priority=20] afpay --mode $AFPAY_MODE
-  └─ [priority=30] container-setup.sh (one-shot, REST mode only: auto-creates wallets)
+  ├─ [priority=20] afpay --mode rest
+  └─ [priority=30] container-setup.sh (one-shot: auto-creates wallets)
 ```
 
 | Layer | Variable | Default | Description |
@@ -241,10 +303,8 @@ supervisord
 | Build | `FEATURES` | `btc-core,ln-phoenixd,cashu,redb,rest,exchange-rate` | cargo --features |
 | Build | `INSTALL_PHOENIXD` | `true` | Install phoenixd binary |
 | Build | `INSTALL_BITCOIND` | `false` | Install bitcoind binary |
-| Runtime | `AFPAY_MODE` | `rest` | afpay run mode: `rest` or `rpc` |
-| Runtime | `AFPAY_PORT` | `9401` | Listen port (rest/rpc) |
-| Runtime | `AFPAY_REST_API_KEY_SECRET` | auto-generated | REST Bearer token (rest mode); legacy `AFPAY_REST_API_KEY` remains a fallback |
-| Runtime | `AFPAY_RPC_SECRET` | auto-generated | RPC PSK secret (rpc mode; 32+ bytes) |
+| Runtime | `AFPAY_PORT` | `9401` | Listen port |
+| Runtime | `AFPAY_REST_API_KEY_SECRET` | auto-generated | HTTP API Bearer token; 32–512 bearer-safe ASCII characters |
 | Runtime | `ENABLE_PHOENIXD` | `true` | Start phoenixd process |
 | Runtime | `ENABLE_BITCOIND` | `false` | Start bitcoind process |
 | Runtime | `BTC_NETWORK` | `mainnet` | bitcoind network |
@@ -254,18 +314,13 @@ supervisord
 Secrets are auto-generated on first run and persisted to private files in the data volume. The entrypoint prints endpoint and secret file locations, but not secret values, and passes secrets through environment variables instead of process arguments.
 
 ```bash
-# REST mode (default) — curl-accessible
 docker compose -f container/docker/compose.yaml up --build
-
-# RPC mode — for afpay CLI clients
-AFPAY_MODE=rpc AFPAY_PORT=9400 docker compose -f container/docker/compose.yaml up --build
 ```
 
 All commands work with Podman — replace `docker compose` with `podman compose`:
 
 ```bash
 podman compose -f container/docker/compose.yaml up --build
-AFPAY_MODE=rpc AFPAY_PORT=9400 podman compose -f container/docker/compose.yaml up --build
 
 # macOS Apple Container CLI launcher
 ./container/apple-container/up.sh
@@ -274,12 +329,124 @@ AFPAY_MODE=rpc AFPAY_PORT=9400 podman compose -f container/docker/compose.yaml u
 podman build -t afpay -f container/docker/Dockerfile .
 podman run -d --name afpay -p 9401:9401 \
   -v afpay-data:/data/afpay -v bitcoind-data:/data/bitcoind -v phoenixd-data:/data/phoenixd \
-  -e AFPAY_MODE=rest afpay
+  afpay
 
 # Management
 podman exec -it afpay supervisorctl status
 podman logs afpay
 ```
+
+## Panels (`afpay ui`)
+
+`afpay ui …` opens a window on the person's machine and does not return until
+they are done with it. Each panel runs the same request as the command it
+mirrors, through the same handler, store, providers, spend ledger and
+idempotency, and renders afpay's own emitted event — already redacted by the
+`_secret` convention — rather than reaching back into the typed structs.
+
+| `ui_kind` | Panel | Shape | Deliveries |
+| --- | --- | --- | --- |
+| `wallet_inspect` | `afpay ui wallet` | Watch: read it, close it | window, link, session |
+| `receive_inspect` | `afpay ui receive` | Watch: point a phone at it | window, link, session |
+| `send_confirm` | `afpay ui send` | Decide: one typed answer, and only one of them sends | window, session |
+
+### Why the decision panel has one delivery fewer
+
+AFUI's `link` is a URL that is itself the credential: whoever holds it reaches
+the page. For a watch panel that is a view of balances or a receive code, bounded
+by AFUI's own attention policy — a fair trade for being able to point a phone at
+it, and the reason a receive panel exists at all.
+
+For `afpay ui send` it would be the authority to move money, held by whoever
+has the URL. So that panel does not offer it, and the refusal is in the argument
+parser rather than at run time: a person who asks for a delivery this panel does
+not do is told before a payment has been planned, not after. Answering a send
+from another device is still available — deliver it as `session` and open it
+through `afui session serve`, which is AFUI's front door with its own credential
+rather than a link that is one.
+
+### Replacing a panel (`afui frontend`)
+
+Every panel is a MiniJinja template rendered against a typed document, and any
+of them can be replaced without touching afpay. AFUI owns where an override
+lives and whether it is trusted; afpay owns what the files mean. Install one
+with `afui frontend init --provider-id afpay --ui-kind <KIND>` and turn it on
+with `afui frontend enable`. **`ui_api_version` is `1`**, and it covers all
+three panels: the documents below, the template names, the
+`<!-- afpay:trusted-runtime -->` marker and the `data-afpay-decision`
+declaration are one contract.
+
+Files an override may supply, each independently — a file it does not supply
+comes from afpay, so replacing one page keeps the rest:
+
+| Path | What it is |
+| --- | --- |
+| `templates/page.html.j2` | The panel body for this `ui_kind` |
+| `templates/layout.html.j2` | The frame every page extends |
+| `templates/fields.html.j2` | The name/value row partial |
+| `templates/decided.html.j2` | What `send_confirm` shows after an answer |
+| `templates/<anything>.j2` | Partials of your own, reachable with `{% include %}` |
+
+A template is registered under its full path, so `{% extends %}` and
+`{% include %}` name it that way too: `{% extends "templates/layout.html.j2" %}`,
+`{% include "templates/fields.html.j2" %}`. The same path a person edits is the
+path a template refers to.
+| `style.css` | The stylesheet |
+| `assets/**` | Stylesheets, images and fonts, served from the session origin |
+
+Templates render against `document`, which carries everything the panel worked
+out — already counted, grouped, ordered and written as text. Every value is a
+string, a boolean or a count; amounts are exact digits with no thousands
+separators, and a value afpay has no answer for is an em dash rather than an
+empty cell. Reorder it, regroup it, drop what you do not want; you cannot
+arrive at a different answer than the one `afpay balance` or `afpay receive`
+reports, because the panel and the command run the same request.
+
+Every document carries `ui_kind`, `title`, `heading`, `subject` and `footer`,
+plus:
+
+| `ui_kind` | Document |
+| --- | --- |
+| `wallet_inspect` | `wallet_count`, `unreachable_count`, `totals[]` (`network`, `unit`, `confirmed`, `pending`, `wallet_count`, `errors`, `degraded`), `groups[]` (`network`, `wallets[]`) |
+| | each wallet: `id`, `label`, `address`, `failed`, `error`, `balance` (`unit`, `confirmed`, `pending`, `extras[]`), `details[]` |
+| `receive_inspect` | `network`, `wallet`, `scannable`, `qr` (`kind`, `url`, `alt`), `warning`, `payload[]`, `details[]` |
+| `send_confirm` | `plan_id`, `operation`, `network`, `wallet`, `to`, `amount`, `fee`, `unit`, `debits[]` (`amount`, `token`), `details[]`, `decisions[]` (`id`, `label`) |
+| after an answer | `message` |
+
+`extras[]`, `details[]` and `payload[]` are lists of `{name, value}` — anything
+a provider returned that the card did not lay out by hand, so a field a backend
+starts reporting shows up rather than vanishing. `qr.url` is a route on the
+session: afpay draws the code and serves it, a template decides where it sits
+and how large it is.
+
+Three things an override cannot do, and they are enforced rather than
+requested:
+
+- **Ship JavaScript.** AFUI refuses a frontend file whose name says it is a
+  script, and refuses a `<script>`, an `onclick=`, or a `javascript:` URL
+  inside a template. The only script any panel loads is afpay's own.
+- **Decide what a control means.** `send_confirm` templates *declare* a control
+  with `data-afpay-decision="approve"` or `"refuse"`; afpay's runtime, spliced
+  in at the layout's `<!-- afpay:trusted-runtime -->` marker under a
+  per-session nonce, is what binds that declaration to the route that sends or
+  refuses. A declaration afpay does not recognise binds to nothing, and the
+  match is exact — `approve-all` is not `approve`. A page that does not declare
+  both controls, or leaves no room for the runtime, does not open. What gets
+  paid is the plan that was shown, submitted by `plan_id` from afpay's own
+  memory: a page cannot make an approval name a different payment.
+- **Turn escaping off.** `|safe`, a `filter safe` block and `autoescape` are
+  refused, and every value a panel prints — including anything a provider
+  returned — is escaped.
+
+A frontend afpay cannot load is an error naming safe mode
+(`ui_frontend_incompatible`, `ui_frontend_unreadable`, `ui_frontend_unsafe`,
+`ui_frontend_template`, `ui_frontend_incomplete`), never a quietly substituted
+built-in page: no window opens, no payment is resolved on the confirm panel,
+and nothing is sent. `AFUI_SAFE_MODE=1` ignores every override. A workspace
+frontend that has not been enabled is skipped in silence by design — the
+`ui_ready` progress event carries `ui_frontend_id` only when an override is
+actually serving, which is how an agent tells "my override is running" from
+"my override is inert" without opening a window to look.
 
 ## Spend Limits
 
@@ -291,16 +458,15 @@ Each node decides independently whether to enforce limits:
 
 | Mode | Enforcement | Rationale |
 |------|------------|-----------|
-| `--mode rpc` | Always enforced | Security boundary — agent cannot modify daemon config |
-| `--mode rest` | Always enforced | Security boundary — same as RPC mode |
+| `--mode rest` | Always enforced | Security boundary — agent cannot modify daemon config |
 | CLI/pipe + all local providers | Enforced | Only defense layer available |
-| CLI/pipe + any remote provider | Not enforced locally | Remote daemon handles it |
+| CLI/pipe + any peer provider | Not enforced locally | The peer handles it |
 
-In cascading deployments, each RPC daemon layer enforces its own limits. The coordinator delegates enforcement to downstream nodes.
+In cascading deployments, every layer enforces its own limits. The coordinator delegates enforcement to downstream peers.
 
 ### Downstream Limit Querying
 
-`limit list` queries this node's limits AND each downstream `afpay_rpc` node's limits recursively, assembling a tree:
+`limit list` queries this node's limits AND each downstream peer's limits recursively, assembling a tree:
 
 ```json
 {
@@ -309,7 +475,7 @@ In cascading deployments, each RPC daemon layer enforces its own limits. The coo
   "downstream": [
     {
       "name": "wallet-server",
-      "endpoint": "10.0.1.5:9400",
+      "endpoint": "http://10.0.1.5:9401",
       "limits": [ ... ],
       "downstream": []
     }
@@ -355,8 +521,8 @@ cargo build
 # PostgreSQL-only server (no local redb)
 cargo build --no-default-features --features postgres,exchange-rate
 
-# Pure coordinator (only RPC forwarding, no wallet SDK, no local storage)
-cargo build --no-default-features
+# Pure coordinator (only federation forwarding, no wallet SDK, no local storage)
+cargo build --no-default-features --features federation
 ```
 
 ### SDK Dependencies

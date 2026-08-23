@@ -1,0 +1,32 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/receive-claimed-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "amount": {
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value",
+        "token"
+      ],
+      "type": "object"
+    },
+    "wallet": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "wallet",
+    "amount"
+  ],
+  "title": "ReceiveClaimedResult",
+  "type": "object"
+}

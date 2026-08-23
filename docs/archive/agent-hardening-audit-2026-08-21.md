@@ -1,11 +1,21 @@
-# Agent-Hardening TODO
+# Agent-Hardening Audit (historical)
+
+> Closed 2026-08-21. This is evidence and design history, not an active work
+> queue. The final review kept the in-flight cap but rejected a generic cancel
+> after a payment may have reached a provider; treated the single-use claimed
+> plan as the fail-closed boundary for the idempotency crash window; kept error
+> codes as an enumerated string contract; and declined reservation enumeration
+> until a read/recovery consumer needs more than the IDs already returned by
+> payment and inconsistency results. Structured plan warnings replaced the SOL
+> hostname hard refusal, the wire schema now identifies its build, and ledger
+> confirmation failure now emits one `accounting_inconsistent` terminal result.
 
 Findings from an agent-perspective audit of afpay. Each item lists the priority,
 the file/symbol to change, the concrete fix, and the rationale. Items are
 ordered by priority within each section.
 
 The threat model assumed throughout: a possibly-confused agent calls the daemon
-over RPC/REST; the operator runs the daemon and configures the allowlist; the
+over its HTTP API; the operator runs the daemon and configures the allowlist; the
 agent must not be able to (a) drain funds beyond configured limits, (b) point a
 wallet at an attacker-controlled endpoint, or (c) cause silent double-spends on
 retry.
@@ -18,6 +28,24 @@ retry.
 > `Input::Quote` and #11 wallet-selection ambiguity were re-promoted to P1
 > because both have real reliability impact, not just UX.** See those items
 > for the concrete agent failure modes.
+>
+> **Update 2026-08-06 — the plan/confirm boundary landed.** Every operation
+> that moves value out of a wallet is now two steps: `send_plan` /
+> `cashu_send_plan` resolve the payment and record it, `pay_confirm` executes
+> exactly that record. That closed **#8** outright — the plan *is* the quote,
+> exposed on the CLI, the pipe, `POST /v1/send-plans`, the confirm window and
+> federation — and it moved **#11** from "the agent cannot predict which wallet
+> is debited" to "the plan names the wallet before anyone agrees", which is the
+> reliability half of that item. See both entries below for what is left.
+>
+> **Update 2026-08-06 — the gRPC mode is gone.** afpay now has one machine
+> face: the HTTP resource API. `RemoteProvider` federates over those same
+> `/v1` routes with a Bearer token, and `Mode::Rpc`, `src/mode/rpc/`, `proto/`,
+> and the tonic/prost/aes-gcm/hkdf/sha2 dependencies were deleted. Items whose
+> subject was the RPC transport are marked **resolved by removal** below —
+> the code they describe no longer exists, so there is nothing left to fix and
+> nothing left to regress. Items about the *domain* (limits, idempotency,
+> allowlists) are untouched: they were never transport-specific.
 >
 > **Post-hoc audit findings (2026-05-30):** the original list missed several
 > load-bearing items, and two landed changes need re-shaping rather than
@@ -34,8 +62,16 @@ retry.
 
 ## Scope creep — to roll back or downgrade
 
-### S1. ~~Revert per-session RPC handshake~~ — **withdrawn**
-- **Status:** the earlier recommendation to revert commit `58b16a9` was
+### S1. ~~Revert per-session RPC handshake~~ — **resolved by removal**
+- **Status (2026-08-06):** moot. The handshake, the per-session salt, the
+  replay cache, and the PSK it protected were deleted with the gRPC mode.
+  Federation is HTTP + Bearer over an operator-provided encrypted path
+  (Tailscale/WireGuard, an SSH tunnel, or a TLS reverse proxy), so there is no
+  afpay-owned cipher left to reason about — and the PSK-leak threat this item
+  was defending against no longer has a PSK. The historical reasoning is kept
+  below because it explains why the handshake was *not* reverted while it
+  existed.
+- **Status (2026-05-30):** the earlier recommendation to revert commit `58b16a9` was
   wrong. Three independent reasons surfaced during the 2026-05-30 audit:
   1. **PSK leak is in-scope.** Shell history / docker logs / config
      backups are real exfil paths the operator can't always prevent. With
@@ -50,10 +86,8 @@ retry.
   3. **The earlier "rainbow table" gloss was reductive.** The commit
      actually does two things — per-session salt isolation *and* replay
      cache rewrite. Both are load-bearing.
-- **Action:** keep `58b16a9` as-is. The real gap exposed by the audit is
-  unrelated — handshake itself is not behind the rate limiter, so the
-  session table can be flooded by an unauthenticated peer. Tracked as
-  item **#17** below, not as a revert.
+- **Action:** none. Superseded by the removal above; item **#17** (handshake
+  flood) is likewise resolved by removal.
 
 ### S2. SOL cluster pinning via RPC hostname heuristic
 - **Where:** commit `dc85f2b`, SOL half — `src/handler/pay.rs` (cluster
@@ -185,8 +219,13 @@ retry.
   pin the wiring). `WalletConfigSet` doesn't accept these fields today
   so there's no parallel mutation path to harden.
 
-### 17. Rate-limit the RPC `Handshake` call (session-table flood) ⚠️ partial
-- **Where:** `src/mode/rpc/mod.rs:339-354` (`open_session` /
+### 17. Rate-limit the RPC `Handshake` call (session-table flood) ✅ resolved by removal
+- **Resolved 2026-08-06:** there is no handshake and no session table. The gRPC
+  mode was deleted; the HTTP face has no per-connection state to flood, and its
+  own `RateLimiter` covers every route. The remaining sub-items below (separate
+  handshake quota, `MAX_SESSIONS` retune, soak test) describe code that no
+  longer exists and are closed with it.
+- **Where (historical):** `src/mode/rpc/mod.rs:339-354` (`open_session` /
   `Handshake` RPC entry).
 - **Problem:** Replaces the "revert handshake" recommendation that was
   withdrawn (see scope creep S1). The handshake call is gated only by the
@@ -247,8 +286,7 @@ retry.
 
 ### 5. `--public-listen` flips allowlist to fail-closed + banner
 - **Where:** `src/types/config.rs:88` (or call site in
-  `src/handler/wallet.rs:54-100`), `src/mode/rpc/mod.rs` and
-  `src/mode/rest.rs` startup banner.
+  `src/handler/wallet.rs:54-100`), `src/mode/rest.rs` startup banner.
 - **Problem:** Empty allowlist = "allow all" is acceptable for laptop use but
   dangerous when the daemon is exposed. Today a publicly-listening daemon with
   an empty list accepts any mint / esplora URL.
@@ -275,9 +313,9 @@ retry.
     the agent can drive reconciliation.
 
 ### 7. Unify schema discovery across all modes
-- **Where:** `src/mode/rest.rs:305-392` (existing `/v1/schema`); needs a peer
-  for pipe + RPC.
-- **Problem:** REST has `/v1/schema`; pipe and RPC agents must read the source
+- **Where:** `src/mode/rest.rs:305-392` (existing `/v1/schema`); needed a peer
+  for pipe.
+- **Problem:** REST had `/v1/schema`; pipe agents had to read the source
   to learn the input field set, error codes, and which inputs are
   local-only.
 - **Fix:**
@@ -287,7 +325,7 @@ retry.
     itself.
   - Have the REST `/v1/schema` reuse this same builder so the two never drift.
 
-### 8. `Input::Quote` for pre-send fee estimation 🔺 promoted P2 → P1
+### 8. `Input::Quote` for pre-send fee estimation ✅ done (as `send_plan`)
 - **Where:** new input variant; backends already have estimate APIs (EVM
   `eth_gasPrice`, BTC fee estimation, LN melt-quote, Cashu melt-quote).
 - **Problem:** `dry_run: true` validates a send but does not return the fee.
@@ -307,6 +345,15 @@ retry.
   - Quote does NOT reserve against spend limits (it's read-only).
   - Document quote TTL semantics so agents know not to plan against a stale
     quote.
+- **What landed (2026-08-06):** the quote is `Input::SendPlan` /
+  `Input::CashuSendPlan` → `Output::PayPlanned { plan_id, wallet, to,
+  amount_native, fee_estimate_native, fee_unit, spend_debits,
+  expires_at_epoch_ms }`. It is the same shape the item asked for plus the
+  thing that makes it load-bearing: the id it returns is what `pay_confirm`
+  submits, so a quote is not advice an agent may ignore, it is the only way to
+  pay. Resolving reserves nothing, `expires_at_epoch_ms` is the TTL the item
+  asked to be documented, and the daemon enforces it rather than trusting the
+  caller to notice.
 
 ### 18. Close the idempotency crash window between broadcast and finalize
 - **Where:** `src/spend/mod.rs:392` (`idempotency_claim`), `:427`
@@ -349,7 +396,7 @@ retry.
     `error.code: "busy"` with `retry_after_ms`.
   - `Input::Cancel { request_id }` cancels the tokio task and runs the
     reservation `cancel()` path if a spend was reserved.
-  - Same cancel verb in RPC/REST for parity.
+  - Same cancel verb on the HTTP face for parity.
 
 ### 10. History ↔ spend reservation cross-link
 - **Where:** `HistoryRecord` and `SpendReservation` schemas in
@@ -362,7 +409,7 @@ retry.
   - Persist `transaction_id` on the `SpendReservation` after confirm.
   - Expose both in `history status` / `limit list` outputs.
 
-### 11. Disambiguate wallet auto-selection 🔺 promoted P2 → P1
+### 11. Disambiguate wallet auto-selection ⚠️ partial (the reliability half is closed)
 - **Where:** mint-URL-based wallet selection in `cashu` send path
   (`src/provider/cashu.rs`); analogous EVM/SOL multi-wallet selection in
   `src/handler/pay.rs`.
@@ -385,6 +432,17 @@ retry.
     and require the agent to pick one.
   - Opt-in `--auto-select first-with-balance` for callers that genuinely
     want the old behaviour.
+- **What landed (2026-08-06):** the failure mode above is gone. Selection now
+  happens while resolving a plan, and `Output::PayPlanned.wallet` names the
+  wallet the provider picked *before* anything is confirmed — so the agent's
+  accounting can follow the daemon's rather than guess at it, and a plan whose
+  wallet metadata moves afterwards is refused with `plan_stale` rather than
+  paid. The wallet is also pinned into the plan record, so the confirm cannot
+  land on a different one than the plan named.
+- **Still open:** the *choice* is still afpay's. When several wallets match,
+  the plan reports the pick instead of returning `Output::Ambiguous` and
+  making the caller choose. That is now a UX gap rather than a correctness
+  one, so it stays open at P2 weight.
 
 ### 12. `error.code` becomes a closed enum ⚠️ partial
 - **Where:** `src/types/protocol.rs` `Output::Error`, all `emit_error` call
@@ -395,7 +453,7 @@ retry.
   - Define `pub enum ErrorCode { … }` with `Display`/`Serialize` to
     snake_case strings; require all `PayError` constructors to map to a
     variant.
-  - REST `/v1/schema` and the new `Output::Schema` enumerate the closed set.
+  - The HTTP contract and `Output::Schema` enumerate the closed set.
   - Add `retry_after_ms: Option<u64>` to `Output::Error` for `busy`,
     `rate_limited`, `temporary_network_error`.
 - **What landed (`83302ed`):** `retry_after_ms` half is done. The
@@ -416,7 +474,7 @@ retry.
 - **Where:** `container/docker/` entrypoint scripts (not covered by this
   audit).
 - **Verify:**
-  - `AFPAY_RPC_SECRET` / `AFPAY_REST_API_KEY_SECRET` generated from a CSPRNG
+  - `AFPAY_REST_API_KEY_SECRET` generated from a CSPRNG
     (`openssl rand -base64 32` or `/dev/urandom`), never `$RANDOM` /
     `date | md5`.
   - Persisted files are `chmod 600`, in the data volume only.
@@ -514,13 +572,13 @@ Legend: ✅ done · ⚠️ partial · ❌ open · 🔺 promoted on 2026-05-30 au
 | P0 | 2 | `idempotency_key` for sends                         | ✅     | `protocol.rs`, store, `handler/pay`     |
 | P0 | 3 | Allowlist on `WalletConfigSet`                      | ✅     | `handler/wallet.rs`                     |
 | P0 | 16| Allowlist BTC core/electrum + LN endpoint           | ✅     | `handler/wallet.rs`, `types/config.rs`  |
-| P0 | 17| Rate-limit RPC `Handshake` (session-table flood)    | ⚠️     | `mode/rpc/mod.rs` (sep quota + cap open)|
+| P0 | 17| Rate-limit RPC `Handshake` (session-table flood)    | ✅     | resolved by removal — gRPC mode deleted  |
 | P1 | 4 | EVM chain-id check; SOL cluster tag                 | ⚠️     | EVM done; SOL via S2; `handler/pay`     |
 | P1 | 5 | `--public-listen` ⇒ fail-closed + banner            | ✅     | `types/config`, mode startup            |
 | P1 | 6 | Per-network reservation TTL + reconcile API         | ✅     | `spend/mod`, `handler/spend_guard`      |
 | P1 | 7 | `Input::Schema` in all modes                        | ✅     | `protocol.rs`, all modes                |
-| P1 | 8 | `Input::Quote` for fee estimation                   | ❌🔺   | `protocol.rs`, all providers            |
-| P1 | 11| Multi-wallet selection ambiguity output             | ❌🔺   | `handler/pay`, `provider/cashu`         |
+| P1 | 8 | `Input::Quote` for fee estimation                   | ✅     | shipped as `send_plan` / `pay_planned`  |
+| P1 | 11| Multi-wallet selection ambiguity output             | ⚠️     | plan names the pick; no `Ambiguous` yet |
 | P1 | 18| Close idempotency crash window (Pending tombstone)  | ❌     | `spend/mod.rs`, `handler/pay.rs`        |
 | P2 | 9 | Pipe in-flight cap + `Input::Cancel`                | ⚠️     | `mode/pipe.rs` (cap done; Cancel open)  |
 | P2 | 10| History ↔ reservation cross-link                    | ✅     | `types/domain`, `spend/mod`             |
@@ -534,4 +592,46 @@ Legend: ✅ done · ⚠️ partial · ❌ open · 🔺 promoted on 2026-05-30 au
 | P3 | 14| Container secret-generation audit                   | ✅     | `container/docker/`                     |
 | P3 | 15| Pipe parse-error scrubbing under public-listen      | ✅     | `mode/pipe.rs`                          |
 
-Scope-creep section (above): S1 withdrawn · S2 still open · S3 logged · S4 (doc restructure) open.
+Scope-creep section (above): S1 resolved by removal (gRPC mode deleted) · S2 still open · S3 logged · S4 (doc restructure) open.
+
+---
+
+## 2026-08-06 re-check of every remaining item
+
+The plan/confirm work touched the pay path, the REST face and federation, so
+every open item was re-read against the current tree rather than carried
+forward on trust. What follows is what is actually true today.
+
+**Closed by this batch.** #8 (the plan is the quote, and it is mandatory).
+
+**Improved but not closed.** #11 — the plan names the wallet it picked, which
+removes the accounting divergence the item was promoted for. Choosing is still
+afpay's.
+
+**Verified still open, unchanged by this batch.** S2 (the SOL cluster check is
+still a hostname heuristic behind a hard `wrong_cluster` refuse; it moved from
+the send into `check_chain_pins` at plan time, which changes when it fires, not
+what it knows), #12's closed-enum half (`PayError` gained `plan_not_found`,
+`plan_expired` and `plan_stale` as ordinary variants; the codes are still
+`&'static str` at the edge), #18 (`Pending` idempotency rows are still swept at
+the 24h TTL with no tombstone — note the plan's own single-use claim now bounds
+the same window for payments, because a swept key cannot resurrect a plan that
+was already consumed), #19 (reservations are still expired by the write-path
+sweep, not on read), #20 (no `ListReservations`), #21 (`trace` is still
+`{duration_ms}`), #23 (`Output::Sent` still has no `commit_status`).
+
+**Re-checked and closed as already done.** #9's cap half — `mode/pipe.rs`
+enforces `PIPE_IN_FLIGHT_CAP` and answers `busy` with `retry_after_ms`;
+`Input::Cancel` is still absent. #22's `git_sha` half — `build.rs` embeds
+`GIT_SHA` and `--version` reports it, so the remaining gap is only that
+`Output::Schema` does not repeat it.
+
+**Newly relevant.** §8 of the Provider OpenAPI baseline required a persistent
+`Idempotency-Key` on every local mutation a retry could duplicate. `wallet
+create` and `receive` had none because the replay store was a closed enum over
+three payment outcomes. That store now carries `WalletCreated`, `ReceiveInfo`
+and `ReceiveClaimed` as well, both routes require the header, and
+`src/handler/idempotency.rs` is the single implementation the CLI and the HTTP
+face share. A replayed `wallet create` deliberately does not re-emit a
+generated mnemonic: a 24-hour replay record is not a place to keep key
+material.

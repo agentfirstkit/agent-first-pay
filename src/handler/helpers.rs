@@ -60,8 +60,8 @@ pub(crate) fn validate_url_in_allowlist(
 
 /// Heuristic detection of a Solana cluster from an RPC endpoint URL. Matches
 /// the official cluster hostnames; returns `None` for unknown hosts (e.g.
-/// self-hosted RPC, Quicknode, Triton). The send-time cluster check uses
-/// `None` as "skip — no opinion".
+/// self-hosted RPC, Quicknode, Triton). Payment plans use this as best-effort
+/// review evidence, never as proof.
 pub(crate) fn sol_cluster_from_endpoint(endpoint: &str) -> Option<&'static str> {
     let lower = endpoint.to_ascii_lowercase();
     // Order matters: "mainnet-beta" before bare "mainnet" if we ever add it.
@@ -164,9 +164,10 @@ pub(crate) fn extract_id(input: &Input) -> Option<String> {
         | Input::Balance { id, .. }
         | Input::Receive { id, .. }
         | Input::ReceiveClaim { id, .. }
-        | Input::CashuSend { id, .. }
+        | Input::CashuSendPlan { id, .. }
         | Input::CashuReceive { id, .. }
-        | Input::Send { id, .. }
+        | Input::SendPlan { id, .. }
+        | Input::PayConfirm { id, .. }
         | Input::Restore { id, .. }
         | Input::WalletShowSeed { id, .. }
         | Input::HistoryList { id, .. }
@@ -193,76 +194,29 @@ pub(crate) fn trace_from(start: Instant) -> Trace {
     Trace::from_duration(start.elapsed().as_millis() as u64)
 }
 
-/// Stable hex blake3 hash of the "what is this payment moving" subset of a
-/// Send/CashuSend. Two Send requests with the same idempotency_key are only
-/// considered equivalent if this hash matches — that way a daemon refuses to
-/// replay when the agent forgot to bump the key after editing the body, and
-/// agents who send the exact same body twice safely replay the first response.
+/// Query limits from each unique downstream afpay peer.
 ///
-/// Excludes: `id` (request correlation, varies per call), `idempotency_key`
-/// (it IS the key), `dry_run` (validation-only doesn't affect identity).
-pub(crate) fn canonical_send_hash(input: &Input) -> Option<String> {
-    let value = match input {
-        Input::Send {
-            wallet,
-            network,
-            to,
-            amount,
-            onchain_memo,
-            local_memo,
-            mints,
-            chain_id,
-            ..
-        } => serde_json::json!({
-            "kind": "send",
-            "wallet": wallet,
-            "network": network,
-            "to": to,
-            "amount": amount,
-            "onchain_memo": onchain_memo,
-            "local_memo": local_memo,
-            "mints": mints,
-            "chain_id": chain_id,
-        }),
-        Input::CashuSend {
-            wallet,
-            amount,
-            onchain_memo,
-            local_memo,
-            mints,
-            ..
-        } => serde_json::json!({
-            "kind": "cashu_send",
-            "wallet": wallet,
-            "amount": amount,
-            "onchain_memo": onchain_memo,
-            "local_memo": local_memo,
-            "mints": mints,
-        }),
-        _ => return None,
-    };
-    let bytes = serde_json::to_vec(&value).ok()?;
-    Some(hex::encode(blake3::hash(&bytes).as_bytes()))
-}
-
-/// Query limits from each unique downstream afpay_rpc node.
-#[cfg(feature = "rpc")]
+/// This is the one federation call that reads another node's *policy* rather
+/// than its wallets, and it stays inside the published surface: `limit list`
+/// is `GET /v1/spend-limits`, a read the peer already serves to any agent
+/// holding its token. Writing a rule is `is_local_only` and has no route —
+/// which is exactly why a leaked bearer cannot raise its own ceiling.
+#[cfg(feature = "federation")]
 pub(crate) async fn query_downstream_limits(config: &RuntimeConfig) -> Vec<DownstreamLimitNode> {
     let mut result = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (name, rpc_cfg) in &config.afpay_rpc {
-        if !seen.insert(rpc_cfg.endpoint.clone()) {
+    for (name, peer) in &config.peers {
+        if !seen.insert(peer.url.clone()) {
             continue;
         }
-        let secret = rpc_cfg.endpoint_secret.as_deref().unwrap_or("");
+        let api_key = peer.api_key_secret.as_deref().unwrap_or("");
         let limit_input = Input::LimitList {
             id: format!("downstream_{name}"),
         };
-        let outputs =
-            crate::provider::remote::rpc_call(&rpc_cfg.endpoint, secret, &limit_input).await;
+        let outputs = crate::provider::remote::peer_call(&peer.url, api_key, &limit_input).await;
         let mut node = DownstreamLimitNode {
             name: name.clone(),
-            endpoint: rpc_cfg.endpoint.clone(),
+            endpoint: peer.url.clone(),
             limits: vec![],
             error: None,
             downstream: vec![],
@@ -288,8 +242,8 @@ pub(crate) async fn query_downstream_limits(config: &RuntimeConfig) -> Vec<Downs
     result
 }
 
-/// Stub when rpc feature is disabled.
-#[cfg(not(feature = "rpc"))]
+/// Stub when the federation feature is disabled.
+#[cfg(not(feature = "federation"))]
 pub(crate) async fn query_downstream_limits(_config: &RuntimeConfig) -> Vec<DownstreamLimitNode> {
     Vec::new()
 }
@@ -545,7 +499,9 @@ pub(crate) async fn acquire_write_lock(
     let lock = tokio::task::spawn_blocking(move || crate::store::lock::acquire(&data_dir, None))
         .await
         .map_err(|e| PayError::internal_error(format!("lock task: {e}")))?
-        .map_err(PayError::internal_error)?;
+        // Waiting out another operation is a conflict, not a defect: it is
+        // retryable and the caller can be told so.
+        .map_err(|message| PayError::Busy { message })?;
     Ok(lock)
 }
 
@@ -558,9 +514,10 @@ pub(crate) fn needs_write_lock(input: &Input) -> bool {
             | Input::WalletClose { .. }
             | Input::Receive { .. }
             | Input::ReceiveClaim { .. }
-            | Input::CashuSend { .. }
+            | Input::CashuSendPlan { .. }
             | Input::CashuReceive { .. }
-            | Input::Send { .. }
+            | Input::SendPlan { .. }
+            | Input::PayConfirm { .. }
             | Input::Restore { .. }
             | Input::LimitAdd { .. }
             | Input::LimitRemove { .. }
@@ -597,9 +554,9 @@ pub(crate) fn resolve_wallet_labels(
         Input::Balance { wallet, .. } => resolve_opt(store, wallet),
         Input::Receive { wallet, .. } => resolve(store, wallet),
         Input::ReceiveClaim { wallet, .. } => resolve(store, wallet),
-        Input::CashuSend { wallet, .. } => resolve_opt(store, wallet),
+        Input::CashuSendPlan { wallet, .. } => resolve_opt(store, wallet),
         Input::CashuReceive { wallet, .. } => resolve_opt(store, wallet),
-        Input::Send { wallet, .. } => resolve_opt(store, wallet),
+        Input::SendPlan { wallet, .. } => resolve_opt(store, wallet),
         Input::Restore { wallet, .. } => resolve(store, wallet),
         Input::WalletShowSeed { wallet, .. } => resolve(store, wallet),
         Input::HistoryList { wallet, .. } | Input::HistoryUpdate { wallet, .. } => {

@@ -1,0 +1,41 @@
+{
+  "$id": "https://agentfirstkit.com/schemas/afpay/v1/transaction-sync-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "limit": {
+      "default": null,
+      "description": "Cap on records pulled from each provider.",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "network": {
+      "default": null,
+      "enum": [
+        "ln",
+        "sol",
+        "evm",
+        "cashu",
+        "btc",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wallet": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "TransactionSyncRequest",
+  "type": "object"
+}

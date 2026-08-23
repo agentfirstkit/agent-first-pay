@@ -28,22 +28,6 @@ pub(super) struct SpendOutcome<T> {
     pub unconfirmed_reservations: Vec<(u64, String)>,
 }
 
-/// Reserve spend budget, execute an async operation, then confirm or cancel.
-pub(super) async fn with_spend_reserve<F, Fut, T>(
-    app: &App,
-    id: &str,
-    op_prefix: &str,
-    spend_ctx: SpendContext,
-    start: Instant,
-    send_fn: F,
-) -> Option<SpendOutcome<T>>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<T, PayError>>,
-{
-    with_spend_reserves(app, id, op_prefix, vec![spend_ctx], start, send_fn).await
-}
-
 /// Reserve multiple asset debits for one payment, execute it, then confirm or cancel all debits.
 pub(super) async fn with_spend_reserves<F, Fut, T>(
     app: &App,
@@ -160,8 +144,8 @@ where
 
 /// Emit `Output::AccountingInconsistent` when the spend ledger could not confirm
 /// reservations after a successful send. Call this from the success branch of
-/// every `with_spend_reserves` caller BEFORE the normal success output, so an
-/// agent sees the inconsistency first and never retries the request.
+/// every `with_spend_reserves` caller as the only terminal output, so an agent
+/// never mistakes the network side effect for a fully committed payment.
 pub(super) async fn emit_accounting_inconsistent(
     app: &App,
     id: &str,

@@ -1,0 +1,10 @@
+{#-
+  A list of name/value rows, used wherever a panel prints fields it did not lay
+  out by hand — provider extras on a balance, everything a plan carries beyond
+  its terms.
+
+  Rendered with `{% with fields = …, class = … %}`, so one partial serves all
+  three panels. Nothing here decides what a field means: afpay already chose
+  which fields these are, what to call them and how to write their values.
+-#}
+{% if fields %}<dl class="{{ class }}">{% for field in fields %}<div><dt>{{ field.name }}</dt><dd>{{ field.value }}</dd></div>{% endfor %}</dl>{% endif %}
