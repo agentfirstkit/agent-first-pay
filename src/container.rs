@@ -795,9 +795,15 @@ mod tests {
         assert!(docker.contains(&format!("AFPAY_VERSION={VERSION}")));
         assert!(docker.contains(&"AFPAY_TARGET=x86_64-unknown-linux-gnu".to_string()));
         assert!(docker.contains(&"INSTALL_PHOENIXD=true".to_string()));
+        // The separator between the context and the Dockerfile is the host's,
+        // so what is pinned here is where the file sits under the context
+        // rather than how the platform spells the path to it.
+        let dockerfile = Path::new(&docker[docker.len() - 2]);
         assert_eq!(
-            docker[docker.len() - 2],
-            "/cache/ctx/container/docker/Dockerfile"
+            dockerfile
+                .strip_prefix(&ctx)
+                .expect("Dockerfile is under the context"),
+            Path::new("container/docker/Dockerfile")
         );
         assert_eq!(docker.last().unwrap(), "/cache/ctx");
     }

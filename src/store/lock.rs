@@ -89,6 +89,13 @@ pub fn acquire(data_dir: &str, timeout_ms: Option<u64>) -> Result<DataLock, Stri
 mod tests {
     use super::*;
 
+    // Reading the lock file while it is held is a Unix affordance: locks there
+    // are advisory, so another handle can still read the pid the holder wrote.
+    // Windows locks the bytes, and `read_to_string` on them fails — which is
+    // what `acquire` already calls out as the case where the pid hint is
+    // dropped. `second_acquire_reports_holder_pid_on_timeout` covers what that
+    // leaves on Windows.
+    #[cfg(unix)]
     #[test]
     fn lock_file_records_pid_and_is_mode_0600_on_unix() {
         let tmp = tempfile::tempdir().unwrap();
@@ -137,11 +144,29 @@ mod tests {
         let stderr = String::from_utf8_lossy(&helper.stderr);
         let stdout = String::from_utf8_lossy(&helper.stdout);
         let combined = format!("{stdout}{stderr}");
-        let expected_pid = std::process::id().to_string();
+        // The property that matters on both platforms is that the contender was
+        // refused: `__lock_contender_helper` asserts the timeout itself, so a
+        // second acquirer slipping through fails there rather than here.
         assert!(
-            combined.contains(&expected_pid),
-            "contender output must reference holder pid {expected_pid}; got:\n{combined}"
+            combined.contains("timeout acquiring lock"),
+            "contender must report a lock timeout; got:\n{combined}"
         );
+
+        // The pid hint on top of it is a Unix affordance. Windows holds the
+        // bytes of the lock file, so the holder's pid cannot be read out of it
+        // and `acquire` falls back to the bare error by design.
+        let expected_pid = std::process::id().to_string();
+        if cfg!(unix) {
+            assert!(
+                combined.contains(&expected_pid),
+                "contender output must reference holder pid {expected_pid}; got:\n{combined}"
+            );
+        } else {
+            assert!(
+                !combined.contains(&format!("current holder pid: {expected_pid}")),
+                "a pid hint here would mean the lock file was readable while held; got:\n{combined}"
+            );
+        }
     }
 
     // Invoked as a child process by `second_acquire_reports_holder_pid_on_timeout`.
