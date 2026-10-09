@@ -41,9 +41,6 @@ jobs:
       - name: Install afdata test toolkit
         run: cargo install agent-first-data --version 0.34.0 --locked --features skill
 
-      - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       # The same entrypoint covers local and CI checks. Its PostgreSQL mode
       # creates a disposable Docker database rather than using a shared service.
       - name: Fixed project gate
