@@ -30,8 +30,33 @@ pub(crate) trait BtcChainSource: Send + Sync {
     async fn sync(&self, wallet: &mut Wallet) -> Result<(), PayError>;
     /// Full scan (gap limit based).
     async fn full_scan(&self, wallet: &mut Wallet) -> Result<(), PayError>;
+    /// Estimate the fee in sat/vB for a six-block confirmation target.
+    async fn fee_rate_sat_per_vb(&self) -> Result<f64, PayError>;
     /// Broadcast a signed transaction.
     async fn broadcast(&self, tx: &Transaction) -> Result<(), PayError>;
+}
+
+/// Safety ceiling on a chain-source fee estimate, not a fee policy: it exists so
+/// a faulty or hijacked chain source cannot make a payment burn its inputs as
+/// fees. An estimate above it is treated like any other invalid estimate, which
+/// happens before signing, so nothing is broadcast.
+const MAX_FEE_RATE_SAT_PER_VB: f64 = 1000.0;
+
+fn fee_rate_from_sat_per_vb(
+    rate_sat_per_vb: f64,
+) -> Result<bdk_wallet::bitcoin::FeeRate, PayError> {
+    let rate_sat_per_kwu = (rate_sat_per_vb * 250.0).ceil();
+    if !rate_sat_per_vb.is_finite()
+        || rate_sat_per_vb <= 0.0
+        || rate_sat_per_vb > MAX_FEE_RATE_SAT_PER_VB
+        || !rate_sat_per_kwu.is_finite()
+        || rate_sat_per_kwu >= u64::MAX as f64
+    {
+        return Err(PayError::network_error("invalid Bitcoin fee estimate"));
+    }
+    Ok(bdk_wallet::bitcoin::FeeRate::from_sat_per_kwu(
+        rate_sat_per_kwu as u64,
+    ))
 }
 
 // ═══════════════════════════════════════════
@@ -183,6 +208,8 @@ fn chain_position_epoch_s(chain_position: ChainPosition<ConfirmationBlockTime>) 
 pub struct BtcProvider {
     data_dir: String,
     store: Arc<StorageBackend>,
+    #[cfg(test)]
+    chain_source_override: Option<Arc<dyn BtcChainSource>>,
 }
 
 impl BtcProvider {
@@ -190,6 +217,8 @@ impl BtcProvider {
         Self {
             data_dir: data_dir.to_string(),
             store,
+            #[cfg(test)]
+            chain_source_override: None,
         }
     }
 
@@ -208,14 +237,22 @@ impl BtcProvider {
         Ok(meta)
     }
 
+    fn chain_source(&self, meta: &WalletMetadata) -> Result<Arc<dyn BtcChainSource>, PayError> {
+        #[cfg(test)]
+        if let Some(source) = &self.chain_source_override {
+            return Ok(source.clone());
+        }
+        resolve_chain_source(meta).map(Arc::from)
+    }
+
     async fn sync_wallet(
-        data_dir: &str,
+        &self,
         meta: &WalletMetadata,
         wallet: &mut Wallet,
     ) -> Result<(), PayError> {
-        let source = resolve_chain_source(meta)?;
+        let source = self.chain_source(meta)?;
         source.sync(wallet).await?;
-        persist_changeset(data_dir, meta, wallet)?;
+        persist_changeset(&self.data_dir, meta, wallet)?;
         Ok(())
     }
 
@@ -353,7 +390,7 @@ impl PayProvider for BtcProvider {
         let meta = self.load_btc_wallet(&id)?;
 
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
-        Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
+        self.sync_wallet(&meta, &mut bdk_wallet).await?;
         let balance = bdk_wallet.balance();
         let total = balance.total().to_sat();
         if total > 0 {
@@ -381,7 +418,7 @@ impl PayProvider for BtcProvider {
         let id = self.resolve_wallet_id(wallet_id)?;
         let meta = self.load_btc_wallet(&id)?;
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
-        Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
+        self.sync_wallet(&meta, &mut bdk_wallet).await?;
         let balance = bdk_wallet.balance();
         Ok(BalanceInfo::new(
             balance.confirmed.to_sat(),
@@ -483,9 +520,24 @@ impl PayProvider for BtcProvider {
 
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
 
-        Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
+        self.sync_wallet(&meta, &mut bdk_wallet)
+            .await
+            .map_err(|error| match error {
+                PayError::NetworkError { message, .. } => PayError::network_not_submitted(message),
+                error => error,
+            })?;
 
+        let source = self.chain_source(&meta)?;
+        let fee_rate = source
+            .fee_rate_sat_per_vb()
+            .await
+            .and_then(fee_rate_from_sat_per_vb)
+            .map_err(|error| match error {
+                PayError::NetworkError { message, .. } => PayError::network_not_submitted(message),
+                error => error,
+            })?;
         let mut tx_builder = bdk_wallet.build_tx();
+        tx_builder.fee_rate(fee_rate);
         tx_builder.add_recipient(
             recipient.script_pubkey(),
             BtcAmount::from_sat(target.amount_sats),
@@ -495,9 +547,13 @@ impl PayProvider for BtcProvider {
             .finish()
             .map_err(|e| PayError::internal_error(format!("build tx: {e}")))?;
 
-        #[allow(deprecated)]
+        let [external_signers, internal_signers] = signers_for_wallet(&meta, &bdk_wallet)?;
         let finalized = bdk_wallet
-            .sign(&mut psbt, bdk_wallet::SignOptions::default())
+            .sign_with_signers(
+                &mut psbt,
+                &[&external_signers, &internal_signers],
+                bdk_wallet::SignOptions::default(),
+            )
             .map_err(|e| PayError::internal_error(format!("sign tx: {e}")))?;
 
         if !finalized {
@@ -510,14 +566,24 @@ impl PayProvider for BtcProvider {
             .extract_tx()
             .map_err(|e| PayError::internal_error(format!("extract tx: {e}")))?;
         let txid = tx.compute_txid().to_string();
+        let tx_id = wallet::generate_transaction_identifier()?;
 
         // Broadcast via resolved chain source
-        let source = resolve_chain_source(&meta)?;
-        source.broadcast(&tx).await?;
+        let source = self.chain_source(&meta)?;
+        source.broadcast(&tx).await.map_err(|error| {
+            PayError::submission_unknown(
+                format!("bitcoin broadcast outcome is unknown: {error}"),
+                Some(txid.clone()),
+            )
+        })?;
 
-        persist_changeset(&self.data_dir, &meta, &mut bdk_wallet)?;
+        persist_changeset(&self.data_dir, &meta, &mut bdk_wallet).map_err(|error| {
+            PayError::submission_unknown(
+                format!("bitcoin transaction was broadcast but wallet persistence failed: {error}"),
+                Some(txid.clone()),
+            )
+        })?;
 
-        let tx_id = wallet::generate_transaction_identifier()?;
         let fee_amount = bdk_wallet.calculate_fee(&tx).map(|f| f.to_sat()).ok();
 
         let record = HistoryRecord {
@@ -558,6 +624,7 @@ impl PayProvider for BtcProvider {
                 token: "sats".to_string(),
             }),
             preimage: None,
+            idempotency_finalize_failed: false,
         })
     }
 
@@ -583,9 +650,15 @@ impl PayProvider for BtcProvider {
             .map_err(|e| PayError::invalid_amount(format!("address network mismatch: {e}")))?;
 
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
-        Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
+        self.sync_wallet(&meta, &mut bdk_wallet).await?;
 
+        let source = self.chain_source(&meta)?;
+        let fee_rate = source
+            .fee_rate_sat_per_vb()
+            .await
+            .and_then(fee_rate_from_sat_per_vb)?;
         let mut tx_builder = bdk_wallet.build_tx();
+        tx_builder.fee_rate(fee_rate);
         tx_builder.add_recipient(
             recipient.script_pubkey(),
             BtcAmount::from_sat(target.amount_sats),
@@ -595,9 +668,13 @@ impl PayProvider for BtcProvider {
             .finish()
             .map_err(|e| PayError::internal_error(format!("build tx quote: {e}")))?;
 
-        #[allow(deprecated)]
+        let [external_signers, internal_signers] = signers_for_wallet(&meta, &bdk_wallet)?;
         let finalized = bdk_wallet
-            .sign(&mut psbt, bdk_wallet::SignOptions::default())
+            .sign_with_signers(
+                &mut psbt,
+                &[&external_signers, &internal_signers],
+                bdk_wallet::SignOptions::default(),
+            )
             .map_err(|e| PayError::internal_error(format!("sign tx quote: {e}")))?;
         if !finalized {
             return Err(PayError::internal_error(
@@ -611,7 +688,7 @@ impl PayProvider for BtcProvider {
         let fee_estimate_native = bdk_wallet
             .calculate_fee(&tx)
             .map(|fee| fee.to_sat())
-            .unwrap_or(0);
+            .map_err(|error| PayError::internal_error(format!("calculate quote fee: {error}")))?;
         persist_changeset(&self.data_dir, &meta, &mut bdk_wallet)?;
 
         Ok(SendQuoteInfo {
@@ -649,7 +726,7 @@ impl PayProvider for BtcProvider {
                     && let Ok(meta) = self.load_btc_wallet(&rec.wallet)
                 {
                     let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
-                    Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
+                    self.sync_wallet(&meta, &mut bdk_wallet).await?;
                     if let Some(wallet_tx) = bdk_wallet.get_tx(chain_txid) {
                         let tip_height = bdk_wallet.latest_checkpoint().height();
                         let (status, confirmations) =
@@ -706,7 +783,7 @@ impl PayProvider for BtcProvider {
         let id = self.resolve_wallet_id(wallet_id)?;
         let meta = self.load_btc_wallet(&id)?;
         let mut bdk_wallet = open_bdk_wallet_with_dir(&self.data_dir, &meta)?;
-        Self::sync_wallet(&self.data_dir, &meta, &mut bdk_wallet).await?;
+        self.sync_wallet(&meta, &mut bdk_wallet).await?;
 
         let local_records = self.store.load_wallet_transaction_records(&id)?;
         let mut local_by_chain_txid: HashMap<String, HistoryRecord> = HashMap::new();
@@ -804,19 +881,113 @@ impl PayProvider for BtcProvider {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::BtcProvider;
+    #[cfg(feature = "redb")]
+    use super::BtcChainSource;
     use super::common::*;
+    use super::{BtcProvider, fee_rate_from_sat_per_vb};
     use crate::provider::{PayError, PayProvider};
+    #[cfg(feature = "redb")]
+    use crate::store::PayStore;
     use crate::store::StorageBackend;
-    use crate::types::{BtcBackend, WalletCreateRequest};
-    use bdk_wallet::bitcoin::Network as BtcNetwork;
+    use crate::store::wallet::WalletMetadata;
+    use crate::types::{BtcBackend, Network, WalletCreateRequest};
+    #[cfg(feature = "redb")]
+    use crate::types::{Input, Output, Request, RuntimeConfig};
+    use bdk_wallet::bitcoin::hashes::Hash as _;
+    use bdk_wallet::bitcoin::{
+        Amount as BtcAmount, Network as BtcNetwork, OutPoint, Transaction, TxIn, TxOut, Txid,
+        absolute, transaction,
+    };
+    use bdk_wallet::{KeychainKind, Wallet};
     use std::sync::Arc;
+
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     #[cfg(feature = "redb")]
     fn test_store(data_dir: &str) -> Arc<StorageBackend> {
         Arc::new(StorageBackend::Redb(
             crate::store::redb_store::RedbStore::new(data_dir),
         ))
+    }
+
+    fn signing_test_metadata(address_type: &str) -> WalletMetadata {
+        WalletMetadata {
+            id: "btc-signing-test".to_string(),
+            network: Network::Btc,
+            label: None,
+            mint_url: None,
+            sol_rpc_endpoints: None,
+            evm_rpc_endpoints: None,
+            evm_chain_id: None,
+            sol_cluster: None,
+            seed_secret: Some(TEST_MNEMONIC.to_string()),
+            backend: None,
+            btc_esplora_url: None,
+            btc_network: Some("signet".to_string()),
+            btc_address_type: Some(address_type.to_string()),
+            btc_core_url: None,
+            btc_core_auth_secret: None,
+            btc_electrum_url: None,
+            custom_tokens: None,
+            created_at_epoch_s: 0,
+            error: None,
+        }
+    }
+
+    /// A send is only a send if the signed transaction finalizes. This asserts that
+    /// promise against a wallet funded entirely in memory, so it holds whichever API
+    /// happens to be doing the signing — the point that broke when bdk_wallet stopped
+    /// being the key store.
+    #[test]
+    fn a_built_transaction_finalizes_for_every_address_type() {
+        for address_type in ["taproot", "segwit"] {
+            let meta = signing_test_metadata(address_type);
+            let (external, internal) =
+                descriptors_from_mnemonic(TEST_MNEMONIC, BtcNetwork::Signet, address_type).unwrap();
+            let mut wallet = Wallet::create(external, internal)
+                .network(BtcNetwork::Signet)
+                .create_wallet_no_persist()
+                .unwrap();
+
+            let funded = wallet.reveal_next_address(KeychainKind::External);
+            let funding = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                // Some non-null previous output: an input that spends nothing is what a
+                // coinbase looks like, and bdk refuses to hold an unconfirmed coinbase.
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: Txid::from_byte_array([7u8; 32]),
+                        vout: 0,
+                    },
+                    ..TxIn::default()
+                }],
+                output: vec![TxOut {
+                    value: BtcAmount::from_sat(100_000),
+                    script_pubkey: funded.address.script_pubkey(),
+                }],
+            };
+            wallet.apply_unconfirmed_txs([(funding, 0u64)]);
+
+            let mut psbt = {
+                let mut builder = wallet.build_tx();
+                builder.add_recipient(funded.address.script_pubkey(), BtcAmount::from_sat(20_000));
+                builder.finish().unwrap()
+            };
+
+            let [external_signers, internal_signers] = signers_for_wallet(&meta, &wallet).unwrap();
+            let finalized = wallet
+                .sign_with_signers(
+                    &mut psbt,
+                    &[&external_signers, &internal_signers],
+                    bdk_wallet::SignOptions::default(),
+                )
+                .unwrap();
+
+            assert!(finalized, "{address_type}: signing did not finalize");
+            psbt.extract_tx()
+                .unwrap_or_else(|e| panic!("{address_type}: transaction not extractable: {e}"));
+        }
     }
 
     #[test]
@@ -1010,5 +1181,207 @@ mod tests {
 
         let wallet = provider.create_wallet(&req).await.unwrap();
         assert!(wallet.id.starts_with("w_"));
+    }
+    #[cfg(feature = "redb")]
+    struct FeeSource {
+        fail: std::sync::atomic::AtomicBool,
+        rate_sat_per_vb: std::sync::Mutex<f64>,
+        broadcasts: std::sync::Mutex<Vec<Transaction>>,
+    }
+
+    #[cfg(feature = "redb")]
+    #[async_trait::async_trait]
+    impl BtcChainSource for FeeSource {
+        async fn sync(&self, _: &mut Wallet) -> Result<(), PayError> {
+            Ok(())
+        }
+        async fn full_scan(&self, _: &mut Wallet) -> Result<(), PayError> {
+            Ok(())
+        }
+        async fn fee_rate_sat_per_vb(&self) -> Result<f64, PayError> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(PayError::network_error("fee estimate unavailable"))
+            } else {
+                self.rate_sat_per_vb
+                    .lock()
+                    .map(|rate| *rate)
+                    .map_err(|_| PayError::internal_error("fixture mutex poisoned"))
+            }
+        }
+        async fn broadcast(&self, tx: &Transaction) -> Result<(), PayError> {
+            self.broadcasts
+                .lock()
+                .map_err(|_| PayError::internal_error("fixture mutex poisoned"))?
+                .push(tx.clone());
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn btc_fee_estimate_controls_quote_and_signed_transaction_and_failed_plan() {
+        use std::sync::atomic::Ordering;
+        for address_type in ["taproot", "segwit"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().to_str().unwrap();
+            let store = Arc::new(StorageBackend::Redb(
+                crate::store::redb_store::RedbStore::new(path),
+            ));
+            let mut meta = signing_test_metadata(address_type);
+            meta.id = "w_fee_probe".to_owned();
+            store.save_wallet_metadata(&meta).unwrap();
+            let mut wallet = open_bdk_wallet_with_dir(path, &meta).unwrap();
+            let address = wallet.reveal_next_address(KeychainKind::External).address;
+            let funding = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: Txid::from_byte_array([7; 32]),
+                        vout: 0,
+                    },
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: BtcAmount::from_sat(100_000),
+                    script_pubkey: address.script_pubkey(),
+                }],
+            };
+            wallet.apply_unconfirmed_txs([(funding, 0)]);
+            persist_changeset(path, &meta, &mut wallet).unwrap();
+            let source = Arc::new(FeeSource {
+                fail: std::sync::atomic::AtomicBool::new(true),
+                rate_sat_per_vb: std::sync::Mutex::new(20.0),
+                broadcasts: std::sync::Mutex::new(Vec::new()),
+            });
+            let mut provider = BtcProvider::new(path, store);
+            provider.chain_source_override = Some(source.clone());
+            let target = format!("bitcoin:{address}?amount=20000");
+            assert!(matches!(
+                provider.send_quote(&meta.id, &target, None).await,
+                Err(PayError::NetworkError { .. })
+            ));
+            assert!(matches!(
+                provider.send(&meta.id, &target, None, None).await,
+                Err(PayError::NetworkNotSubmitted { .. })
+            ));
+            let (writer, mut receiver) = tokio::sync::mpsc::channel(32);
+            let mut app = crate::handler::App::new(
+                RuntimeConfig {
+                    data_dir: path.to_owned(),
+                    ..Default::default()
+                },
+                writer,
+                Some(true),
+                Some(StorageBackend::Redb(
+                    crate::store::redb_store::RedbStore::new(path),
+                )),
+            );
+            app.providers.insert(Network::Btc, Box::new(provider));
+            crate::handler::dispatch(
+                &app,
+                Request::from_input(Input::SendPlan {
+                    id: "failed_fee_plan".into(),
+                    wallet: Some(meta.id.clone()),
+                    network: Some(Network::Btc),
+                    to: target.clone(),
+                    amount: None,
+                    onchain_memo: None,
+                    local_memo: None,
+                    mints: None,
+                    chain_id: None,
+                }),
+            )
+            .await;
+            loop {
+                let output =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                if matches!(output, Output::Log { .. }) {
+                    continue;
+                }
+                assert!(
+                    matches!(output, Output::Error { error_code, .. } if error_code == "network_error")
+                );
+                break;
+            }
+            let plans = directory.path().join("pay-plans");
+            assert!(!plans.exists() || std::fs::read_dir(plans).unwrap().next().is_none());
+            assert!(source.broadcasts.lock().unwrap().is_empty());
+            source.fail.store(false, Ordering::SeqCst);
+            let provider = app.providers.get(&Network::Btc).unwrap();
+            let quote = provider.send_quote(&meta.id, &target, None).await.unwrap();
+            // The chain source turns hostile after the quote: the send must stop
+            // before signing rather than pay the inflated rate.
+            *source.rate_sat_per_vb.lock().unwrap() = 50_000.0;
+            let error = provider
+                .send(&meta.id, &target, None, None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, PayError::NetworkNotSubmitted { .. }),
+                "{address_type}: {error}"
+            );
+            assert_eq!(error.submission_transaction_id(), None);
+            assert!(source.broadcasts.lock().unwrap().is_empty());
+            assert!(
+                provider
+                    .history_list(&meta.id, 10, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                provider.send_quote(&meta.id, &target, None).await,
+                Err(PayError::NetworkError { .. })
+            ));
+            *source.rate_sat_per_vb.lock().unwrap() = 20.0;
+            let sent = provider.send(&meta.id, &target, None, None).await.unwrap();
+            let broadcasts = source.broadcasts.lock().unwrap();
+            assert_eq!(broadcasts.len(), 1);
+            let tx = &broadcasts[0];
+            let fee = 100_000
+                - tx.output
+                    .iter()
+                    .map(|output| output.value.to_sat())
+                    .sum::<u64>();
+            let actual_rate = fee as f64 / tx.vsize() as f64;
+            // BDK budgets weight units; rounding the final witness to vbytes can differ slightly.
+            assert!((actual_rate - 20.0).abs() < 0.25, "rate={actual_rate}");
+            assert!(quote.fee_estimate_native.abs_diff(fee) <= 40);
+            assert_eq!(sent.fee.unwrap().value, fee);
+        }
+    }
+
+    #[test]
+    fn btc_fee_estimate_rejects_invalid_values_and_preserves_fractional_rates() {
+        for rate in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::MAX,
+            1000.5,
+            50_000.0,
+        ] {
+            assert!(matches!(
+                fee_rate_from_sat_per_vb(rate),
+                Err(PayError::NetworkError { .. })
+            ));
+        }
+        assert_eq!(
+            fee_rate_from_sat_per_vb(20.0).unwrap().to_sat_per_kwu(),
+            5000
+        );
+        assert_eq!(
+            fee_rate_from_sat_per_vb(1.25).unwrap().to_sat_per_kwu(),
+            313
+        );
+        assert_eq!(
+            fee_rate_from_sat_per_vb(1000.0).unwrap().to_sat_per_kwu(),
+            250_000
+        );
     }
 }

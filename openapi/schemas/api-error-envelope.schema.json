@@ -10,7 +10,7 @@
           "type": "string"
         },
         "details": {
-          "description": "Typed conflict/recovery detail. Present on `limit_exceeded` and\n`accounting_inconsistent`, whose refusals carry ledger state the\ncaller needs in order to act."
+          "description": "Typed conflict/recovery detail. Present on `limit_exceeded` and\n`accounting_inconsistent`, whose refusals carry ledger state the\ncaller needs in order to act. An unresolved submission carries retained\nreservation_ids and confirm_errors; transaction_id is present only when\na real transaction or recovery identifier is known."
         },
         "hint": {
           "description": "A safe recovery step, when one exists.",

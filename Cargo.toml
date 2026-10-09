@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-pay"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 description = "A payment tool for AI agents — send and receive across five networks through one interface, with spending limits you control."
 license = "MIT"
@@ -98,14 +98,16 @@ name = "afpay"
 path = "src/main.rs"
 
 [dependencies]
+url = "2"
+percent-encoding = "2"
 # Local monorepo development uses sibling crates where needed; version keys keep
 # packaging tied to the matching published crates.
 # The document formats are what `--*-secret file:PATH#DOT_PATH` reads out of.
 # A build that declares the source without them advertises a credential store
 # it cannot open, and says so only when someone reaches for it.
-agent-first-data = { version = "0.34.0", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
+agent-first-data = { version = "0.35.0", default-features = false, features = ["cli", "skill-admin", "stream-redirect", "yaml", "toml", "dotenv", "ini"] }
 # `session`: a confirmation panel is a window over a served AFUI session.
-agent-first-ui = { version = "0.5.0", default-features = false, optional = true }
+agent-first-ui = { version = "0.6.1", default-features = false, optional = true }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -122,24 +124,24 @@ bs58 = { version = "0.5", optional = true }
 # 0.5 set together, and the matching `--exclude` flags in scripts/instance.sh,
 # are gone. Two copies of wincode is what broke `Transaction: SchemaWrite` —
 # if that error returns, check for a split graph before pinning anything.
-solana-address = { version = "2.7", optional = true }
-solana-hash = { version = "4.6", optional = true }
-solana-sdk = { version = "4", optional = true }
-solana-signature = { version = "3.5", optional = true }
+solana-address = { version = "2.9", optional = true }
+solana-hash = { version = "4.7", optional = true }
+solana-sdk = { version = "5", optional = true }
+solana-signature = { version = "3.6", optional = true }
 solana-short-vec = { version = "3.3", optional = true }
 solana-system-interface = { version = "3.3", features = ["wincode"], optional = true }
 base64 = { version = "0.23", optional = true }
 wincode = { version = "0.6", optional = true }
 
-alloy = { version = "2.4", default-features = false, features = ["provider-http", "signers", "signer-local", "signer-mnemonic", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
+alloy = { version = "2.5", default-features = false, features = ["provider-http", "signers", "signer-local", "signer-mnemonic", "network", "contract", "reqwest-rustls-tls", "rpc-types"], optional = true }
 bdk_wallet = { version = "3", default-features = false, features = ["std", "keys-bip39"], optional = true }
 bdk_esplora = { version = "0.22", default-features = false, features = ["async-https-rustls", "tokio"], optional = true }
 bdk_bitcoind_rpc = { version = "0.22", optional = true }
 bdk_electrum = { version = "0.24", default-features = false, features = ["use-rustls"], optional = true }
-bip39 = { version = "2", default-features = false, optional = true }
-cdk = { version = "0.17", default-features = false, features = ["wallet"], optional = true }
-cdk-redb = { version = "0.17", optional = true }
-cdk-postgres = { version = "0.17", optional = true }
+bip39 = { version = "3", default-features = false, optional = true }
+cdk = { version = "0.18", default-features = false, features = ["wallet"], optional = true }
+cdk-redb = { version = "0.18", optional = true }
+cdk-postgres = { version = "0.18", optional = true }
 fs2 = { version = "0.4", optional = true }
 getrandom = "0.4"
 blake3 = "1"
@@ -147,12 +149,12 @@ hex = "0.4"
 lightning-invoice = { version = "0.34", optional = true }
 # The panel template engine. The same one afmail and afpsql render their UIs
 # with — a second engine would be a second set of escaping rules to keep honest.
-minijinja = { version = "2", optional = true }
+minijinja = { version = "3", optional = true }
 rustyline = { version = "18", optional = true }
 qrcode = { version = "0.14", optional = true }
 crossterm = { version = "0.29", optional = true }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"], optional = true }
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14", optional = true }
 shell-words = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 toml = "1.1"
@@ -164,7 +166,7 @@ schemars = { version = "1.2", optional = true }
 [dev-dependencies]
 # `test-support` rather than a second copy of AFUI's fingerprint, trust store
 # and stub browser in this spore's tests.
-agent-first-ui = { version = "0.5.0", default-features = false, features = ["test-support"] }
+agent-first-ui = { version = "0.6.1", default-features = false, features = ["test-support"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }

@@ -18,6 +18,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
+#[cfg(all(feature = "redb", feature = "ln-phoenixd"))]
+#[path = "support/pay_submission.rs"]
+mod pay_submission;
+
 /// Satisfies the credential rule `--mode rest` enforces at startup, so the
 /// tests exercise a key a real daemon would accept.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -53,6 +57,100 @@ async fn start_peer() -> Peer {
         url: format!("http://{address}"),
         _directory: directory,
     }
+}
+
+#[cfg(all(feature = "redb", feature = "ln-phoenixd"))]
+#[tokio::test]
+async fn downstream_finalize_warning_survives_federation_rest_and_upstream_replay() {
+    use pay_submission::*;
+    let downstream = tempfile::tempdir().unwrap();
+    let fault_directory = downstream.path().to_string_lossy().into_owned();
+    let stub = PhoenixStub::start(
+        PaymentResponse::Success,
+        Some(Arc::new(move || {
+            fail_pending_finalization(&fault_directory);
+        })),
+    )
+    .await;
+    let downstream_config = RuntimeConfig {
+        data_dir: downstream.path().to_string_lossy().into_owned(),
+        ..RuntimeConfig::default()
+    };
+    let store = agent_first_pay::store::create_storage_backend(&downstream_config).unwrap();
+    let (fixture, _rx) = make_app(downstream_config.clone(), store, &stub.endpoint, true);
+    install_limit(&fixture).await;
+    drop(fixture);
+    let downstream_api = router(ApiState::new(downstream_config, TOKEN, Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, downstream_api).await.unwrap();
+    });
+    let upstream = tempfile::tempdir().unwrap();
+    let config = RuntimeConfig {
+        data_dir: upstream.path().to_string_lossy().into_owned(),
+        peers: [(
+            "payment-peer".into(),
+            PeerConfig {
+                url: peer_url,
+                api_key_secret: Some(TOKEN.into()),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: [("ln".into(), "payment-peer".into())].into_iter().collect(),
+        ..RuntimeConfig::default()
+    };
+    let api = router(ApiState::new(config.clone(), TOKEN, Vec::new()));
+    use tower::ServiceExt as _;
+    let planned = api
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/send-plans")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({"wallet":"w_submission", "network":"ln", "to":INVOICE})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(planned.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(planned.into_body(), 4 << 20)
+        .await
+        .unwrap();
+    let planned: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let body = serde_json::json!({"plan_id":planned["result"]["plan_id"]}).to_string();
+    for _ in 0..2 {
+        let receipt = api
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/sends")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "upstream-warning-key")
+                    .body(axum::body::Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(receipt.into_body(), 4 << 20)
+            .await
+            .unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(receipt["result"]["idempotency_finalize_failed"], true);
+    }
+    // The upstream persisted its successful replay despite the downstream
+    // warning. Repeating the request never contacts the payment provider again.
+    assert_eq!(stub.calls.load(Ordering::SeqCst), 1);
+    server.abort();
 }
 
 /// Bind a listener that answers every request with `body`, so the client's

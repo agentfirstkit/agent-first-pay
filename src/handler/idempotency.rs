@@ -22,8 +22,8 @@ use crate::spend::{IDEMPOTENCY_KEY_MAX_LEN, IdempotencyLookup, IdempotentReplayP
 use crate::types::{Input, Output};
 
 use super::App;
-use super::helpers::emit_error;
 use super::helpers::trace_from;
+use super::helpers::{emit_error, emit_log};
 
 /// Outcome of [`enter_idempotent`]. When `Proceed`, the handler continues
 /// with the real send flow and is responsible for calling
@@ -96,11 +96,9 @@ pub(super) async fn enter_idempotent(
                 .send(Output::Error {
                     id: Some(id.to_string()),
                     error_code: "idempotency_in_progress".to_string(),
-                    error: format!(
-                        "another request with idempotency_key='{key}' is still in flight"
-                    ),
+                    error: "the identical request is pending execution or reconciliation".to_string(),
                     hint: Some(
-                        "retry after the suggested delay; on completion the original response will replay".to_string(),
+                        "use the same key when checking for a completed replay; if submission remains unresolved, inspect the provider and reconcile retained reservations before sending again".to_string(),
                     ),
                     retryable: true,
                     retry_after_ms: Some(250),
@@ -144,6 +142,7 @@ async fn emit_replay(app: &App, id: &str, payload: IdempotentReplayPayload, star
             fee,
             preimage,
             reservation_ids,
+            idempotency_finalize_failed,
         } => {
             let _ = app
                 .writer
@@ -155,6 +154,7 @@ async fn emit_replay(app: &App, id: &str, payload: IdempotentReplayPayload, star
                     fee,
                     preimage,
                     reservation_ids,
+                    idempotency_finalize_failed,
                     trace: trace_from(start),
                 })
                 .await;
@@ -166,6 +166,7 @@ async fn emit_replay(app: &App, id: &str, payload: IdempotentReplayPayload, star
             fee,
             token,
             reservation_ids,
+            idempotency_finalize_failed,
         } => {
             let _ = app
                 .writer
@@ -177,6 +178,7 @@ async fn emit_replay(app: &App, id: &str, payload: IdempotentReplayPayload, star
                     fee,
                     token,
                     reservation_ids,
+                    idempotency_finalize_failed,
                     trace: trace_from(start),
                 })
                 .await;
@@ -279,17 +281,36 @@ pub(super) async fn finalize_idempotent(
     app: &App,
     ctx: Option<&(String, String)>,
     payload: IdempotentReplayPayload,
-) {
+) -> Result<(), PayError> {
     if let Some((key, hash)) = ctx {
-        let _ = app
+        let result = app
             .spend_ledger
             .idempotency_finalize(key, hash, payload)
             .await;
+        if let Err(error) = &result {
+            emit_log(app, "idempotency_finalize_failed", None, serde_json::json!({
+                "error": error.to_string(),
+                "message": "side effect completed but its replay could not be persisted; do not repeat the operation",
+            })).await;
+        }
+        return result;
     }
+    Ok(())
 }
 
-pub(super) async fn clear_idempotent(app: &App, ctx: Option<&(String, String)>) {
+pub(super) async fn clear_idempotent(
+    app: &App,
+    ctx: Option<&(String, String)>,
+) -> Result<(), PayError> {
     if let Some((key, hash)) = ctx {
-        let _ = app.spend_ledger.idempotency_clear(key, hash).await;
+        let result = app.spend_ledger.idempotency_clear(key, hash).await;
+        if let Err(error) = &result {
+            emit_log(app, "idempotency_clear_failed", None, serde_json::json!({
+                "error": error.to_string(),
+                "message": "the operation failed before a confirmed side effect, but its idempotency claim could not be released",
+            })).await;
+        }
+        return result;
     }
+    Ok(())
 }

@@ -83,14 +83,14 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                 match resolve_wallet_for_provider(app, Some(&wallet), network).await {
                     Ok(resolved) => resolved,
                     Err(e) => {
-                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                         emit_error(&app.writer, Some(id), &e, start).await;
                         return;
                     }
                 };
 
             let Some(provider) = get_provider(&app.providers, target_network) else {
-                clear_idempotent(app, idem_ctx.as_ref()).await;
+                let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                 emit_error(
                     &app.writer,
                     Some(id),
@@ -113,7 +113,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                     // Pending — a retry gets `idempotency_in_progress` rather
                     // than a second invoice. A non-waiting one is done here.
                     if !wait_requested {
-                        finalize_idempotent(
+                        let _ = finalize_idempotent(
                             app,
                             idem_ctx.as_ref(),
                             IdempotentReplayPayload::ReceiveInfo {
@@ -145,7 +145,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                     ) {
                         Ok(options) => options,
                         Err(e) => {
-                            clear_idempotent(app, idem_ctx.as_ref()).await;
+                            let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                             emit_error(&app.writer, Some(id), &e, start).await;
                             return;
                         }
@@ -155,7 +155,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                         // The chain watcher owns the rest of this request; its
                         // outcome is not something a later retry can replay, so
                         // the slot is released rather than finalised.
-                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                         wait_onchain_receive(
                             target_network,
                             ReceiveWatchRequest {
@@ -178,7 +178,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                     let poll_interval_ms = wait_options.poll_interval_ms;
 
                     let Some(quote_id) = quote_id else {
-                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                         let msg = if is_bolt12 {
                             "bolt12 offers are persistent and do not support --wait; \
                              share the offer and check balance manually"
@@ -199,7 +199,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                     value: claimed,
                                     token: "sats".to_string(),
                                 };
-                                finalize_idempotent(
+                                let _ = finalize_idempotent(
                                     app,
                                     idem_ctx.as_ref(),
                                     IdempotentReplayPayload::ReceiveClaimed {
@@ -221,7 +221,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                             }
                             Err(e) if e.retryable() => {
                                 if Instant::now() >= deadline {
-                                    clear_idempotent(app, idem_ctx.as_ref()).await;
+                                    let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                                     emit_error(
                                         &app.writer,
                                         Some(id),
@@ -236,7 +236,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                                 sleep(Duration::from_millis(poll_interval_ms)).await;
                             }
                             Err(e) => {
-                                clear_idempotent(app, idem_ctx.as_ref()).await;
+                                let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                                 emit_error(&app.writer, Some(id), &e, start).await;
                                 break;
                             }
@@ -244,7 +244,7 @@ pub(crate) async fn dispatch_pay(app: &App, input: Input) {
                     }
                 }
                 Err(e) => {
-                    clear_idempotent(app, idem_ctx.as_ref()).await;
+                    let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                     emit_error(&app.writer, Some(id), &e, start).await;
                 }
             }
@@ -846,9 +846,9 @@ fn sol_cluster_plan_warnings(expected: Option<&str>, endpoints: &[String]) -> Ve
 ///    never burns the plan it refused.
 /// 3. **Then the claim**, which is an atomic rename: exactly one confirm can
 ///    take a plan even when two callers with different keys race for it.
-/// 4. **Then the existing ledger path**, unchanged — reserve, execute,
-///    confirm or cancel, `AccountingInconsistent` when the money left but the
-///    ledger could not record it.
+/// 4. **Then the ledger path** — reserve and persist submission protection,
+///    execute, then confirm or cancel only a definite outcome. Unknown
+///    submissions retain their key and budget for reconciliation.
 async fn confirm_plan(
     app: &App,
     id: String,
@@ -883,13 +883,13 @@ async fn confirm_plan(
     let plan = match plan::peek(&data_dir, &plan_id) {
         Ok(plan) => plan,
         Err(e) => {
-            clear_idempotent(app, idem_ctx.as_ref()).await;
+            let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
             emit_error(&app.writer, Some(id), &e, start).await;
             return;
         }
     };
     if plan.expired(plan::now_epoch_ms()) {
-        clear_idempotent(app, idem_ctx.as_ref()).await;
+        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
         emit_error(
             &app.writer,
             Some(id),
@@ -910,14 +910,14 @@ async fn confirm_plan(
     let current = match plan_binding(app, &plan.wallet).await {
         Ok((_, binding)) => binding,
         Err(e) => {
-            clear_idempotent(app, idem_ctx.as_ref()).await;
+            let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
             emit_error(&app.writer, Some(id), &e, start).await;
             return;
         }
     };
     let drifted = plan.binding.drifted_from(&current);
     if !drifted.is_empty() {
-        clear_idempotent(app, idem_ctx.as_ref()).await;
+        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
         emit_error(
             &app.writer,
             Some(id),
@@ -937,7 +937,7 @@ async fn confirm_plan(
     if let Some(expect) = expect
         && expect != plan.operation
     {
-        clear_idempotent(app, idem_ctx.as_ref()).await;
+        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
         emit_error(
             &app.writer,
             Some(id),
@@ -955,7 +955,7 @@ async fn confirm_plan(
     let plan = match plan::claim(&data_dir, &plan_id) {
         Ok(plan) => plan,
         Err(e) => {
-            clear_idempotent(app, idem_ctx.as_ref()).await;
+            let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
             emit_error(&app.writer, Some(id), &e, start).await;
             return;
         }
@@ -999,15 +999,23 @@ async fn execute_send(
     let to = plan.to.clone().unwrap_or_default();
     let spend_contexts = spend_contexts_from_plan(&plan);
 
-    let outcome = with_spend_reserves(app, id, "send", spend_contexts, start, || {
-        provider.send_confirmed(
-            &plan.wallet,
-            &to,
-            plan.onchain_memo.as_deref(),
-            plan.mints.as_deref(),
-            plan.quote.upstream_plan_id.as_deref(),
-        )
-    })
+    let outcome = with_spend_reserves(
+        app,
+        id,
+        "send",
+        spend_contexts,
+        idem_ctx.as_ref(),
+        start,
+        || {
+            provider.send_confirmed(
+                &plan.wallet,
+                &to,
+                plan.onchain_memo.as_deref(),
+                plan.mints.as_deref(),
+                plan.quote.upstream_plan_id.as_deref(),
+            )
+        },
+    )
     .await;
 
     let Some(outcome) = outcome else {
@@ -1035,20 +1043,22 @@ async fn execute_send(
                     &outcome.confirmed_reservation_ids,
                 );
             }
-            if !outcome.unconfirmed_reservations.is_empty() {
+            let local_idempotency_finalize_failed = if !outcome.unconfirmed_reservations.is_empty()
+            {
                 let (reservation_ids, confirm_errors): (Vec<_>, Vec<_>) =
                     outcome.unconfirmed_reservations.iter().cloned().unzip();
                 finalize_idempotent(
                     app,
                     idem_ctx.as_ref(),
                     IdempotentReplayPayload::AccountingInconsistent {
-                        transaction_id: r.transaction_id.clone(),
+                        transaction_id: Some(r.transaction_id.clone()),
                         reservation_ids,
                         confirm_errors,
                         hint: ACCOUNTING_INCONSISTENT_HINT.to_string(),
                     },
                 )
-                .await;
+                .await
+                .is_err()
             } else {
                 finalize_idempotent(
                     app,
@@ -1060,10 +1070,14 @@ async fn execute_send(
                         fee: r.fee.clone(),
                         preimage: r.preimage.clone(),
                         reservation_ids: outcome.confirmed_reservation_ids.clone(),
+                        idempotency_finalize_failed: r.idempotency_finalize_failed,
                     },
                 )
-                .await;
-            }
+                .await
+                .is_err()
+            };
+            let idempotency_finalize_failed =
+                local_idempotency_finalize_failed || r.idempotency_finalize_failed;
             plan::consume(data_dir, &plan.plan_id);
             emit_accounting_inconsistent(
                 app,
@@ -1086,9 +1100,16 @@ async fn execute_send(
                     fee: r.fee,
                     preimage: r.preimage,
                     reservation_ids: outcome.confirmed_reservation_ids,
+                    idempotency_finalize_failed,
                     trace: trace_from(start),
                 })
                 .await;
+        }
+        Err(e) if outcome.submission_unknown => {
+            // The provider may have completed the payment. Retain its key and
+            // budget, and consume the reviewed plan so a fresh key cannot pay it.
+            plan::consume(data_dir, &plan.plan_id);
+            emit_submission_unknown(app, id, &e, outcome.retained_reservation_ids, start).await;
         }
         Err(e) => {
             settle_plan(app, data_dir, &plan.plan_id, idem_ctx.as_ref(), false).await;
@@ -1132,15 +1153,23 @@ async fn execute_cashu_send(
     };
     let spend_contexts = spend_contexts_from_plan(&plan);
 
-    let outcome = with_spend_reserves(app, id, "cashu_send", spend_contexts, start, || {
-        provider.cashu_send_confirmed(
-            &plan.wallet,
-            amount.clone(),
-            plan.onchain_memo.as_deref(),
-            plan.mints.as_deref(),
-            plan.quote.upstream_plan_id.as_deref(),
-        )
-    })
+    let outcome = with_spend_reserves(
+        app,
+        id,
+        "cashu_send",
+        spend_contexts,
+        idem_ctx.as_ref(),
+        start,
+        || {
+            provider.cashu_send_confirmed(
+                &plan.wallet,
+                amount.clone(),
+                plan.onchain_memo.as_deref(),
+                plan.mints.as_deref(),
+                plan.quote.upstream_plan_id.as_deref(),
+            )
+        },
+    )
     .await;
 
     let Some(outcome) = outcome else {
@@ -1171,20 +1200,22 @@ async fn execute_cashu_send(
             // AccountingInconsistent (money moved, ledger lost the debit) is
             // itself a terminal state for idempotency — replay must emit the
             // same inconsistency so the agent never retries.
-            if !outcome.unconfirmed_reservations.is_empty() {
+            let local_idempotency_finalize_failed = if !outcome.unconfirmed_reservations.is_empty()
+            {
                 let (reservation_ids, confirm_errors): (Vec<_>, Vec<_>) =
                     outcome.unconfirmed_reservations.iter().cloned().unzip();
                 finalize_idempotent(
                     app,
                     idem_ctx.as_ref(),
                     IdempotentReplayPayload::AccountingInconsistent {
-                        transaction_id: r.transaction_id.clone(),
+                        transaction_id: Some(r.transaction_id.clone()),
                         reservation_ids,
                         confirm_errors,
                         hint: ACCOUNTING_INCONSISTENT_HINT.to_string(),
                     },
                 )
-                .await;
+                .await
+                .is_err()
             } else {
                 finalize_idempotent(
                     app,
@@ -1196,10 +1227,14 @@ async fn execute_cashu_send(
                         fee: r.fee.clone(),
                         token: r.token.clone(),
                         reservation_ids: outcome.confirmed_reservation_ids.clone(),
+                        idempotency_finalize_failed: r.idempotency_finalize_failed,
                     },
                 )
-                .await;
-            }
+                .await
+                .is_err()
+            };
+            let idempotency_finalize_failed =
+                local_idempotency_finalize_failed || r.idempotency_finalize_failed;
             plan::consume(data_dir, &plan.plan_id);
             // Ledger inconsistency is the sole terminal output; a normal
             // success below is emitted only when every reservation committed.
@@ -1224,9 +1259,16 @@ async fn execute_cashu_send(
                     fee: r.fee,
                     token: r.token,
                     reservation_ids: outcome.confirmed_reservation_ids,
+                    idempotency_finalize_failed,
                     trace: trace_from(start),
                 })
                 .await;
+        }
+        Err(e) if outcome.submission_unknown => {
+            // The provider may have completed the payment. Retain its key and
+            // budget, and consume the reviewed plan so a fresh key cannot pay it.
+            plan::consume(data_dir, &plan.plan_id);
+            emit_submission_unknown(app, id, &e, outcome.retained_reservation_ids, start).await;
         }
         Err(e) => {
             settle_plan(app, data_dir, &plan.plan_id, idem_ctx.as_ref(), false).await;
@@ -1235,7 +1277,24 @@ async fn execute_cashu_send(
     }
 }
 
-const ACCOUNTING_INCONSISTENT_HINT: &str = "money left the wallet but the spend ledger could not record one or more debits; reconcile manually before issuing further sends to avoid double-spending the budget";
+async fn emit_submission_unknown(
+    app: &App,
+    id: &str,
+    error: &PayError,
+    reservation_ids: Vec<u64>,
+    start: Instant,
+) {
+    let _ = app.writer.send(Output::AccountingInconsistent {
+        id: id.to_string(),
+        transaction_id: error.submission_transaction_id().map(str::to_string),
+        reservation_ids,
+        confirm_errors: vec![format!("provider submission outcome is unknown: {error}")],
+        hint: "the provider may have completed this payment; do not submit it again. Inspect provider history using the recovery identifier when present, then reconcile retained reservations on the daemon host".to_string(),
+        trace: trace_from(start),
+    }).await;
+}
+
+const ACCOUNTING_INCONSISTENT_HINT: &str = "payment succeeded but one or more spend reservations could not be confirmed; reservations remain retained. Reconcile manually before issuing further sends";
 
 /// Give a claimed plan back, or keep it.
 ///
@@ -1254,7 +1313,7 @@ async fn settle_plan(
         plan::consume(data_dir, plan_id);
     } else {
         plan::release(data_dir, plan_id);
-        clear_idempotent(app, idem_ctx).await;
+        let _ = clear_idempotent(app, idem_ctx).await;
     }
 }
 

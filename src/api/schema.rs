@@ -88,7 +88,7 @@ pub(crate) fn openapi_document() -> Value {
         "info": {
             "title": "Agent-First Pay API",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "The HTTP domain API of an afpay daemon: wallets, balances, receives, sends, transactions, and the spend limits every payment is checked against. Sends move money and require an Idempotency-Key, which afpay persists for 24 hours and replays rather than re-broadcasting. Operations that read or write key material, spend-limit rules, or daemon config are deliberately absent from this transport: they exist only on the local CLI.",
+            "description": "The HTTP domain API of an afpay daemon: wallets, balances, receives, sends, transactions, and the spend limits every payment is checked against. Sends require an Idempotency-Key: completed outcomes replay for 24 hours, while an unknown submission retains its pending key and reservations for reconciliation. A successful receipt can report idempotency_finalize_failed when its replay could not be persisted. Operations that read or write key material, spend-limit rules, or daemon config exist only on the local CLI.",
         },
         "servers": [{"url": "/", "description": "The afpay daemon that served this document"}],
         "tags": [
@@ -115,7 +115,7 @@ pub(crate) fn openapi_document() -> Value {
                     "name": "Idempotency-Key",
                     "in": "header",
                     "required": true,
-                    "description": "Stable caller-generated key for this exact request. afpay persists it with a canonical hash of the body for 24 hours: the same key with the same body replays the first terminal outcome instead of doing the work twice, and the same key with a different body is refused with `idempotency_conflict`. Required on every operation a retry could duplicate — a payment, a wallet whose key material would be generated again, a receive whose invoice a payer may already hold.",
+                    "description": "Stable caller-generated key for this exact request. Completed outcomes replay for 24 hours; unknown submissions retain a pending key and require manual reconciliation. The same key with a different body is refused with idempotency_conflict. Required on every operation a retry could duplicate: a payment, generated wallet key material, or a receive invoice a payer may already hold.",
                     "schema": {
                         "type": "string",
                         "minLength": 8,

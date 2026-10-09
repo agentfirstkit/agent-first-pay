@@ -53,6 +53,9 @@ git clone https://github.com/agentfirstkit/agent-first-pay
 cargo install --path agent-first-pay
 ```
 
+Prebuilt archives are also available from
+[GitHub Releases](https://github.com/agentfirstkit/agent-first-pay/releases).
+
 The binary is `afpay`.
 
 Then install the embedded [Agent Skill](skills/agent-first-pay/SKILL.md) so the agent
@@ -113,12 +116,15 @@ See [Architecture](docs/architecture.md) for advanced multi-server deployment pa
 Default builds include the HTTP API and federation, redb + PostgreSQL, Cashu, Phoenixd Lightning, Solana, EVM, Bitcoin Esplora, exchange rates, interactive UI, and backup support. Selective compilation:
 
 ```bash
-cargo build --features cashu              # Cashu only (minimal binary)
-cargo build --features cashu,ln           # Cashu + Lightning
-cargo build --features btc-esplora        # Bitcoin on-chain (Esplora backend)
-cargo build --features btc-core           # Bitcoin on-chain (Bitcoin Core RPC)
-cargo build --features btc-electrum       # Bitcoin on-chain (Electrum)
-cargo build --no-default-features --features federation  # Coordinator only (no wallet SDK)
+cargo build --no-default-features --features redb,cashu       # Cashu only
+cargo build --no-default-features --features redb,ln-phoenixd # Phoenixd Lightning only
+cargo build --no-default-features --features redb,sol         # Solana only
+cargo build --no-default-features --features redb,evm         # EVM only
+cargo build --no-default-features --features redb,btc-esplora # Bitcoin (Esplora)
+cargo build --no-default-features --features postgres,federation # Coordinator (no wallet SDK)
+# Alternative Bitcoin backends:
+cargo build --no-default-features --features redb,btc-core
+cargo build --no-default-features --features redb,btc-electrum
 cargo build                               # Default production feature set
 ```
 
@@ -138,9 +144,16 @@ storage_backend = "postgres"   # PostgreSQL
 postgres_url_secret = "postgres://user:pass@localhost/afpay"
 ```
 
-PostgreSQL uses `pg_advisory_xact_lock` for spend limit concurrency safety. When `storage_backend = "postgres"`, all data — wallet metadata (including seed secrets), CDK proofs, transaction history, and spend accounting — is stored in PostgreSQL.
+PostgreSQL uses `pg_advisory_xact_lock` for spend limit concurrency safety. When `storage_backend = "postgres"`, wallet metadata (including seed secrets), CDK proofs, transaction history, and spend accounting are stored in PostgreSQL. Review plans remain private files under the confirming node's `{data_dir}/pay-plans/` directory; planning and confirming use that same workspace.
 
 ## Usage
+
+Credential flags accept `env:NAME` and `file:PATH#DOT_PATH`. Populate the named
+environment variables through your credential manager before using the examples.
+The daemon's `AFPAY_REST_API_KEY_SECRET` and its client's
+`AFPAY_PEER_KEY_SECRET` contain the same bearer value for that connection; each
+peer may have a different value. For a protected TOML credential file, the daemon
+can instead use `--rest-api-key-secret file:credentials.toml#rest_api_key_secret`.
 
 Default mode is CLI — one command per invocation:
 
@@ -149,7 +162,7 @@ Default mode is CLI — one command per invocation:
 afpay balance
 
 # On another afpay node (forwarded over its HTTP API)
-afpay balance --peer-url http://10.0.1.5:9401 --peer-api-key-secret "64-char-hex"
+afpay balance --peer-url http://10.0.1.5:9401 --peer-api-key-secret env:AFPAY_PEER_KEY_SECRET
 ```
 
 Other modes: `--mode interactive` (REPL), `--mode tui` (full-screen terminal UI), `--mode pipe` (JSONL stdin/stdout), `--mode rest` (the HTTP API). See [CLI Reference](docs/cli.md) for flags and subcommands, and [Architecture](docs/architecture.md) for deployment and protocol details.
@@ -182,10 +195,10 @@ interface only:
 ```bash
 # on the daemon host
 afpay --mode rest --rest-listen 100.64.0.7:9401 --public-listen \
-  --rest-api-key-secret "$(openssl rand -hex 32)"
+  --rest-api-key-secret env:AFPAY_REST_API_KEY_SECRET
 
 # from any other device on the tailnet
-afpay balance --peer-url http://100.64.0.7:9401 --peer-api-key-secret "…"
+afpay balance --peer-url http://100.64.0.7:9401 --peer-api-key-secret env:AFPAY_PEER_KEY_SECRET
 ```
 
 **2. SSH tunnel — the safest posture available.** afpay keeps listening only on
@@ -194,11 +207,11 @@ loopback, so nothing is exposed even if the firewall is wrong. No
 
 ```bash
 # on the daemon host: the default bind is already correct
-afpay --mode rest --rest-api-key-secret "$(openssl rand -hex 32)"
+afpay --mode rest --rest-api-key-secret env:AFPAY_REST_API_KEY_SECRET
 
 # on the client: forward the loopback port over SSH
 ssh -N -L 9401:127.0.0.1:9401 user@daemon-host &
-afpay balance --peer-url http://127.0.0.1:9401 --peer-api-key-secret "…"
+afpay balance --peer-url http://127.0.0.1:9401 --peer-api-key-secret env:AFPAY_PEER_KEY_SECRET
 ```
 
 **3. TLS reverse proxy — when you want a stable hostname.** Caddy's internal CA
@@ -214,8 +227,8 @@ afpay.home.arpa {
 ```
 
 ```bash
-afpay --mode rest --rest-api-key-secret "$(openssl rand -hex 32)"   # loopback only
-afpay balance --peer-url https://afpay.home.arpa --peer-api-key-secret "…"
+afpay --mode rest --rest-api-key-secret env:AFPAY_REST_API_KEY_SECRET   # loopback only
+afpay balance --peer-url https://afpay.home.arpa --peer-api-key-secret env:AFPAY_PEER_KEY_SECRET
 ```
 
 **Why afpay does not do TLS itself.** No public CA will issue for a LAN name, so
@@ -230,174 +243,46 @@ The HTTP face is narrower than the CLI by design. Reading a seed, editing spend-
 
 ## Quick Start
 
-Every `send` below resolves a plan and returns a `plan_id`; `afpay pay confirm
---plan-id …` is what actually pays. See [Paying is two steps](#paying-is-two-steps).
-
-### Cashu
+Use a running Lightning backend and keep its credential in an environment
+variable. Wallet creation returns a wallet ID; use that ID in later commands.
 
 ```bash
-# Setup
-afpay wallet create --network cashu --cashu-mint https://mint.minibits.cash/Bitcoin --label cashu-main
+afpay ln wallet create --backend phoenixd --endpoint-url http://localhost:9740 --password-secret env:AFPAY_PHOENIXD_PASSWORD_SECRET --label ln-main --idempotency-key create-ln-main
 
-# Deposit (Lightning → Cashu)
-afpay receive --network cashu --amount 1000
-# → returns invoice + quote_id; pay the invoice, then claim:
-afpay receive --network cashu --ln-quote-id <quote_id>
+# Request a 500-sat invoice; this does not confirm receipt.
+afpay ln receive --wallet <wallet_id> --amount-sats 500 --idempotency-key invoice-1
 
-# Send P2P cashu token
-afpay send --wallet cashu-main --amount 21 --local-memo "coffee"
-# → returns cashu token string
-# Or filter by mint URL (picks first wallet with sufficient balance):
-afpay send --network cashu --cashu-mint https://mint.minibits.cash/Bitcoin --amount 21
-
-# Receive cashu token (auto-matches wallet by mint URL in token)
-afpay receive --cashu-token "cashuBo2F..."
-
-# Send to Lightning invoice
-afpay send --network cashu --to lnbc1...
-
-afpay balance --network cashu
+# Resolve a payment plan, then review its amount, fee, spend debits and warnings.
+afpay ln send --wallet <wallet_id> --to <bolt11_invoice>
+# Only confirm after reviewing the returned plan.
+afpay pay confirm --plan-id <plan_id> --idempotency-key payment-1
 ```
 
-### Lightning
+Every network's `send` returns a plan. Confirmation pays; for a Cashu P2P
+send, confirmation is also the step that returns the token. See
+[Paying is two steps](#paying-is-two-steps) for retry and recovery rules.
+
+Read `afpay <network> receive --help` before waiting for payment. Lightning,
+Solana and Bitcoin support waiting; Cashu token redemption and EVM address
+lookup do not. Solana waiting has no amount or token filter. Bitcoin alone
+accepts `--wait-sync-limit`; its waiting result includes an on-chain transaction
+ID that can be queried with `afpay history status --transaction-id <id>`.
+An invoice or address alone does not prove that funds arrived.
+
+The [generated CLI reference](docs/cli.md) gives every network's wallet setup,
+receive, token configuration and send shapes. The complete command path comes
+before arguments, including `config token-add` and `limit add`.
 
 ```bash
-# Setup (choose one backend)
-afpay wallet create --network ln --backend nwc --nwc-uri-secret "nostr+walletconnect://..."
-afpay wallet create --network ln --backend phoenixd --endpoint-url http://localhost:9740 --password-secret "hunter2"
-afpay wallet create --network ln --backend lnbits --endpoint-url https://legend.lnbits.com --admin-key-secret "abc123"
-
-# Receive — BOLT11 invoice (one-time, amount-specific)
-afpay receive --network ln --amount 500
-
-# Receive — BOLT12 offer (persistent, reusable — phoenixd only)
-afpay receive --network ln
-
-# Send — pay BOLT11 invoice
-afpay send --network ln --to lnbc1...
-
-# Send — pay BOLT12 offer (phoenixd only, --amount required)
-afpay send --network ln --to lno1... --amount 1000
-
-afpay balance --network ln
-```
-
-### Solana
-
-```bash
-# Setup
-afpay wallet create --network sol --sol-rpc-endpoint https://api.mainnet-beta.solana.com --label sol-main
-
-# Native SOL
-afpay send --network sol --to <address> --amount 1000000 --token native
-afpay receive --wallet sol-main --wait --amount 1000000 --token native
-
-# SPL token (USDC — built-in)
-afpay send --network sol --to <address> --amount 1000000 --token usdc
-afpay receive --wallet sol-main --wait --amount 1000000 --token usdc
-
-# Custom SPL token (register first, then use by symbol)
-afpay sol config --wallet sol-main token-add --symbol bonk --address DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 --decimals 5
-afpay send --network sol --to <address> --amount 100000 --token bonk
-afpay receive --wallet sol-main --wait --amount 100000 --token bonk
-
-afpay balance --network sol
-```
-
-### EVM Chain
-
-```bash
-# Setup
-afpay wallet create --network evm --evm-rpc-endpoint https://mainnet.base.org --label evm-base
-afpay wallet create --network evm --evm-rpc-endpoint https://arb1.arbitrum.io/rpc --evm-chain-id 42161 --label evm-arb
-
-# Native ETH
-afpay send --wallet evm-base --to <address> --amount 1000000000000 --token native
-afpay receive --wallet evm-base --wait --amount 1000000000000 --token native
-
-# ERC-20 token (USDC — built-in)
-afpay send --wallet evm-base --to <address> --amount 1000000 --token usdc
-afpay receive --wallet evm-base --wait --amount 1000000 --token usdc
-
-# Optional: match afpay-encoded on-chain memo while waiting (amount is still required)
-afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --onchain-memo "order:abc"
-
-# Optional: increase per-poll history scan window when waiting (default 500, clamp 1..5000)
-afpay receive --wallet evm-base --wait --amount 1000000 --token usdc --wait-sync-limit 1500
-
-# Custom ERC-20 token (register first, then use by symbol)
-afpay evm config --wallet evm-base token-add --symbol dai --address 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb --decimals 18
-afpay send --wallet evm-base --to <address> --amount 1000000 --token dai
-afpay receive --wallet evm-base --wait --amount 1000000 --token dai
-
-afpay balance --network evm
-```
-
-### Bitcoin On-Chain
-
-```bash
-# Setup — Esplora backend (default)
-afpay wallet create --network btc --btc-network signet --label btc-signet
-afpay wallet create --network btc --btc-network mainnet --btc-address-type taproot --label btc-main
-
-# Setup — Bitcoin Core RPC backend
-afpay wallet create --network btc --btc-backend core-rpc --btc-core-url http://127.0.0.1:8332 --btc-core-auth-secret "user:pass" --label btc-core
-
-# Setup — Electrum backend
-afpay wallet create --network btc --btc-backend electrum --btc-electrum-url ssl://electrum.blockstream.info:60002 --label btc-electrum
-
-# Receive address
-afpay receive --network btc
-
-# Optional: wait for incoming funds (exact amount match)
-afpay receive --network btc --amount 1000 --wait --wait-timeout-s 120 --wait-poll-interval-ms 1000
-
-# Optional: increase per-poll history scan window when waiting (default 500, clamp 1..5000)
-afpay receive --network btc --amount 1000 --wait --wait-sync-limit 1500
-
-# Send (amount in satoshis)
-afpay send --network btc --to tb1q... --amount 5000
-
-# Restore from mnemonic
-afpay wallet create --network btc --btc-network signet --mnemonic-secret "word1 word2 ... word12"
-
-# Custom Esplora endpoint
-afpay wallet create --network btc --btc-network mainnet --btc-esplora-url https://my-esplora.example/api
-
-afpay balance --network btc
-afpay history status --transaction-id <txid>
-```
-
-`receive --wait` for EVM/BTC emits on-chain transaction IDs in `history_status.transaction_id`, so they can be re-queried with `history status --transaction-id ...`.
-
-BTC backend options are validated at wallet creation time:
-
-- `--btc-backend core-rpc` requires `--btc-core-url`
-- `--btc-backend electrum` requires `--btc-electrum-url`
-- if provided, `--btc-esplora-url` must be non-empty
-- the selected backend feature must be compiled in (`btc-esplora` / `btc-core` / `btc-electrum`)
-
-When restoring from `--mnemonic-secret`, afpay runs one full chain scan and persists scan progress before returning.
-
-### Cross-Network
-
-```bash
-afpay wallet list                    # All wallets
-afpay balance                        # All balances
-afpay balance --network sol          # Filter by network
-afpay balance --wallet w_1a2b3c4d   # Filter by wallet
-afpay history update                 # Incrementally sync backend/chain history to local store
-afpay history update --network sol   # Sync one network
-afpay history update --wallet <id>   # Sync one wallet
-afpay history list                   # Query local history store
-afpay history list --network sol     # Local filter by network
-afpay history list --wallet <id>     # Local filter by wallet
-afpay history status --transaction-id <id>
+afpay wallet list
+afpay balance
+afpay history update --network ln
+afpay history list --network ln
 ```
 
 ## Token Support
 
-USDC and USDT are built-in for sol and evm. Other tokens (DAI, WBTC, BONK, WIF, JUP, etc.) can be registered per-wallet via `<network> config --wallet <id> token-add`.
+USDC and USDT are built-in for sol and evm. Other tokens (DAI, WBTC, BONK, WIF, JUP, etc.) can be registered per-wallet via `afpay <network> config token-add --wallet <id> --symbol <name> --address <address> --decimals <decimals>`.
 
 Balance queries automatically show all known tokens:
 
@@ -412,7 +297,7 @@ Balance queries automatically show all known tokens:
 }
 ```
 
-Built-in tokens: EVM — USDC/USDT on Base (8453), Arbitrum (42161), Ethereum (1). SOL — USDC/USDT on mainnet-beta, USDC on devnet. Raw contract/mint addresses can also be passed to `--token`.
+Built-in tokens: EVM — USDC/USDT on Base (8453), Arbitrum (42161), Ethereum (1). SOL — USDC/USDT on mainnet-beta, USDC on devnet. Register other contract/mint addresses first, then pass the registered symbol to `--token`.
 
 ## Paying is two steps
 
@@ -435,6 +320,25 @@ confirmable exactly once, and is refused outright if the workspace, daemon
 configuration, wallet, or spend rules changed after it was resolved. What was
 reviewed and what happens cannot be two different payments.
 
+A confirm that answers `network_error` did not submit the payment: the plan
+and its idempotency key are handed back, so the same confirm can be retried
+as-is. An outcome afpay cannot establish is reported differently, below, and
+must not be retried blindly.
+
+If submission may have reached a provider but its response is lost,
+`accounting_inconsistent` reports the uncertainty and any known recovery ID.
+The plan is consumed, its idempotency key remains Pending, and pending spend
+reservations remain reserved within their normal spend windows until locally
+reconciled. Check provider or chain history before reconciling; a new plan is
+for a subsequent payment, not an automatic retry of the uncertain one.
+Reconciliation settles the reservation without clearing the original Pending
+key or inventing a missing receipt.
+
+A successful `sent` or `cashu_sent` receipt may include
+`idempotency_finalize_failed: true`. Payment succeeded, but at least one node
+could not store its replay receipt. Keep the successful receipt and resolve
+that node's local idempotency record; do not repeat the payment.
+
 ## Spend Limits
 
 Multi-tier spend limits — all rules checked before every send, any breach rejects the transaction:
@@ -442,7 +346,7 @@ Multi-tier spend limits — all rules checked before every send, any breach reje
 ```bash
 afpay cashu limit add --window 1h --max-spend 10000
 afpay sol limit add --token native --window 1h --max-spend 1000000
-afpay cashu limit --wallet w_1a2b3c4d add --window 24h --max-spend 50000
+afpay cashu limit add --wallet w_1a2b3c4d --window 24h --max-spend 50000
 afpay global limit add --window 24h --max-spend 500000   # requires exchange rate config
 afpay limit remove --rule-id r_1a2b3c4d
 afpay limit list
@@ -483,7 +387,7 @@ afpay container install --with phoenixd --allow ln=http://127.0.0.1:9740
 
 # Status / logs / teardown
 afpay container status        # endpoint + redacted credential fields
-afpay container logs -f
+afpay container logs --follow
 afpay container uninstall --purge
 ```
 
@@ -515,8 +419,12 @@ The bearer API key is auto-generated on first run, persisted to the data volume 
 ## Testing
 
 ```bash
-cargo test
+./scripts/test.sh all
 ```
+
+The fixed entrypoint runs static checks, offline tests, isolated feature checks,
+and PostgreSQL regressions against a disposable database. See [Testing](docs/testing.md)
+for individual modes and prerequisites.
 
 ## Docs
 

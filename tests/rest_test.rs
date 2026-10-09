@@ -19,6 +19,10 @@ use serde_json::Value;
 use std::net::SocketAddr;
 use tower::ServiceExt as _;
 
+#[cfg(all(feature = "redb", feature = "ln-phoenixd"))]
+#[path = "support/pay_submission.rs"]
+mod pay_submission;
+
 /// Long enough to satisfy the credential rule `--mode rest` enforces at
 /// startup, so tests exercise a key the daemon would actually accept.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -66,6 +70,110 @@ fn keyed_json(method: &str, uri: &str, key: &str, body: &str) -> Request<Body> {
         .header("idempotency-key", key)
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+#[tokio::test]
+async fn receipt_schemas_accept_and_default_the_finalize_warning() {
+    let (router, _dir) = test_router();
+    for name in ["send-result", "cashu-token-result"] {
+        let schema = body_json(
+            router
+                .clone()
+                .oneshot(get(&format!("/schemas/{name}.schema.json")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            schema["properties"]["idempotency_finalize_failed"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            schema["properties"]["idempotency_finalize_failed"]["default"],
+            false
+        );
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "idempotency_finalize_failed")
+        );
+    }
+}
+
+#[cfg(all(feature = "redb", feature = "ln-phoenixd"))]
+#[tokio::test]
+async fn response_loss_over_http_reports_an_unresolved_payment_without_retrying_it() {
+    use pay_submission::*;
+    let dir = tempfile::tempdir().unwrap();
+    let stub = PhoenixStub::start(PaymentResponse::Lost, None).await;
+    let config = RuntimeConfig {
+        data_dir: dir.path().to_string_lossy().into_owned(),
+        ..RuntimeConfig::default()
+    };
+    let store = agent_first_pay::store::create_storage_backend(&config).unwrap();
+    let (fixture, _rx) = make_app(config.clone(), store, &stub.endpoint, true);
+    install_limit(&fixture).await;
+    drop(fixture);
+    let app = router(ApiState::new(config, TOKEN, Vec::new()));
+    let planned = app
+        .clone()
+        .oneshot(authed_json(
+            "POST",
+            "/v1/send-plans",
+            &serde_json::json!({
+                "wallet": "w_submission", "network": "ln", "to": INVOICE,
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(planned.status(), StatusCode::OK);
+    let planned = body_json(planned).await;
+    let body = serde_json::json!({"plan_id": planned["result"]["plan_id"]}).to_string();
+    let sent = app
+        .clone()
+        .oneshot(keyed_json("POST", "/v1/sends", "http-lost-key", &body))
+        .await
+        .unwrap();
+    assert_eq!(sent.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error = body_json(sent).await;
+    assert_eq!(error["error"]["code"], "accounting_inconsistent");
+    assert_eq!(error["error"]["retryable"], false);
+    let invoice: lightning_invoice::Bolt11Invoice = INVOICE.parse().unwrap();
+    assert_eq!(
+        error["error"]["details"]["transaction_id"],
+        invoice.payment_hash().to_string()
+    );
+    assert!(
+        error["error"]["details"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("may have completed")
+    );
+    assert!(
+        !error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("money already moved")
+    );
+    assert!(
+        !error["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("money already moved")
+    );
+    let retry = app
+        .oneshot(keyed_json("POST", "/v1/sends", "http-lost-key", &body))
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body_json(retry).await["error"]["code"],
+        "idempotency_in_progress"
+    );
+    assert_eq!(stub.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 // ═══════════════════════════════════════════

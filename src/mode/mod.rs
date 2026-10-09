@@ -96,21 +96,8 @@ pub async fn run(mode: Mode) {
         Mode::Rest(init) => rest::run_rest(init).await,
         #[cfg(feature = "rest")]
         Mode::ApiExport(request) => std::process::exit(run_api_export(request)),
-        Mode::Ui(_init) => {
-            #[cfg(feature = "ui")]
-            {
-                ui::run(*_init).await;
-            }
-            #[cfg(not(feature = "ui"))]
-            {
-                cli::emit_cli_error(
-                    "feature_unavailable",
-                    "ui panels require feature 'ui'; rebuild with: cargo build --features ui",
-                    _init.output,
-                );
-                std::process::exit(1);
-            }
-        }
+        #[cfg(feature = "ui")]
+        Mode::Ui(init) => ui::run(*init).await,
         Mode::SkillAdmin(req) => std::process::exit(crate::skill_admin::run(req)),
         Mode::Container(req) => std::process::exit(crate::container::run(req)),
         Mode::Data(_op) => {

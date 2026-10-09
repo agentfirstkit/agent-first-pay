@@ -22,6 +22,11 @@
         "null"
       ]
     },
+    "idempotency_finalize_failed": {
+      "default": false,
+      "description": "Token creation succeeded but at least one node could not persist its replay.",
+      "type": "boolean"
+    },
     "reservation_ids": {
       "default": [],
       "items": {

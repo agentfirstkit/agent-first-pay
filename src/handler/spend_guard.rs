@@ -10,8 +10,8 @@ use super::helpers::{emit_error, emit_log, trace_from};
 /// Outcome of `with_spend_reserves`.
 ///
 /// * `result` — what the underlying send/cashu_send returned. `Some(Ok(_))` means
-///   the network operation succeeded; `Some(Err(_))` means it failed (and any
-///   reservations were cancelled cleanly).
+///   the network operation succeeded. Errors whose submission outcome is
+///   unknown retain their reservations rather than releasing the budget.
 /// * `confirmed_reservation_ids` — populated on success with the reservation
 ///   ids that the ledger acknowledged. Surface these in `Output::Sent` /
 ///   `Output::CashuSent` so an agent can drive future reconciliation /
@@ -20,12 +20,14 @@ use super::helpers::{emit_error, emit_log, trace_from};
 ///   succeeded but one or more `confirm` attempts on the ledger failed even
 ///   after a retry. Each entry is `(reservation_id, last_error)`. When this is
 ///   non-empty, the caller MUST surface `Output::AccountingInconsistent` to the
-///   agent before emitting any "success" output: the money left the wallet but
-///   the ledger does not reflect it, so retrying would double-spend the budget.
+///   agent before emitting any "success" output: the payment succeeded but
+///   its reservations remain Pending and require reconciliation.
 pub(super) struct SpendOutcome<T> {
     pub result: Result<T, PayError>,
     pub confirmed_reservation_ids: Vec<u64>,
     pub unconfirmed_reservations: Vec<(u64, String)>,
+    pub retained_reservation_ids: Vec<u64>,
+    pub submission_unknown: bool,
 }
 
 /// Reserve multiple asset debits for one payment, execute it, then confirm or cancel all debits.
@@ -34,6 +36,7 @@ pub(super) async fn with_spend_reserves<F, Fut, T>(
     id: &str,
     op_prefix: &str,
     spend_contexts: Vec<SpendContext>,
+    idempotency: Option<&(String, String)>,
     start: Instant,
     send_fn: F,
 ) -> Option<SpendOutcome<T>>
@@ -76,7 +79,22 @@ where
         Vec::new()
     };
 
+    // Commit this before the first side effect, so a crash or an upstream
+    // timeout cannot make TTL sweeping release a potentially spent budget.
+    if let Err(error) = app
+        .spend_ledger
+        .protect_submission(&reservation_ids, idempotency)
+        .await
+    {
+        cancel_reservations(app, id, &reservation_ids).await;
+        emit_reservation_error(app, id, &error, start).await;
+        return None;
+    }
     let result = send_fn().await;
+    let submission_unknown = result.as_ref().err().is_some_and(|error| {
+        matches!(error, PayError::SubmissionUnknown { .. })
+            || (error.retryable() && !matches!(error, PayError::NetworkNotSubmitted { .. }))
+    });
 
     let mut unconfirmed_reservations: Vec<(u64, String)> = Vec::new();
     let mut confirmed_reservation_ids: Vec<u64> = Vec::new();
@@ -87,8 +105,8 @@ where
                     // One short-backoff retry: spend_ledger writes can fail on
                     // transient lock contention or storage hiccups; a second
                     // attempt usually clears them. If both fail the money has
-                    // left the wallet AND the ledger lost the debit — the caller
-                    // surfaces AccountingInconsistent so an operator can fix it.
+                    // left the wallet while the debit remains Pending — the
+                    // caller surfaces AccountingInconsistent for reconciliation.
                     let first = app.spend_ledger.confirm(*rid).await;
                     match first {
                         Ok(()) => {
@@ -129,6 +147,7 @@ where
                     }
                 }
             }
+            Err(_) if submission_unknown => {}
             Err(_) => {
                 cancel_reservations(app, id, &reservation_ids).await;
             }
@@ -139,6 +158,12 @@ where
         result,
         confirmed_reservation_ids,
         unconfirmed_reservations,
+        retained_reservation_ids: if submission_unknown {
+            reservation_ids
+        } else {
+            Vec::new()
+        },
+        submission_unknown,
     })
 }
 
@@ -161,10 +186,10 @@ pub(super) async fn emit_accounting_inconsistent(
         .writer
         .send(Output::AccountingInconsistent {
             id: id.to_string(),
-            transaction_id: transaction_id.to_string(),
+            transaction_id: Some(transaction_id.to_string()),
             reservation_ids,
             confirm_errors,
-            hint: "money left the wallet but the spend ledger could not record one or more debits; reconcile manually before issuing further sends to avoid double-spending the budget".to_string(),
+            hint: "payment succeeded but one or more spend reservations could not be confirmed; reservations remain retained. Reconcile manually before issuing further sends".to_string(),
             trace: trace_from(start),
         })
         .await;

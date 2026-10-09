@@ -62,6 +62,15 @@ impl BtcChainSource for ElectrumSource {
         Ok(())
     }
 
+    async fn fee_rate_sat_per_vb(&self) -> Result<f64, PayError> {
+        let client = electrum_client::Client::new(&self.url)
+            .map_err(|error| PayError::network_error(format!("electrum client: {error}")))?;
+        let rate_btc_per_kvb = client
+            .estimate_fee(6, None)
+            .map_err(|error| PayError::network_error(format!("electrum fee estimate: {error}")))?;
+        Ok(rate_btc_per_kvb * 100_000.0)
+    }
+
     async fn broadcast(&self, tx: &Transaction) -> Result<(), PayError> {
         let inner = electrum_client::Client::new(&self.url)
             .map_err(|e| PayError::network_error(format!("electrum client: {e}")))?;

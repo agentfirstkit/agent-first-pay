@@ -30,7 +30,7 @@ jobs:
         run: ./scripts/release-assets.sh "$TAG"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - name: Install afdata skill validator
-        run: cargo install agent-first-data --version 0.33.0 --locked --features skill
+        run: cargo install agent-first-data --version 0.34.0 --locked --features skill
       - name: Validate Agent Skill
         run: afdata skill validate skills/agent-first-pay
 
@@ -83,7 +83,7 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --features rest
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
         shell: bash

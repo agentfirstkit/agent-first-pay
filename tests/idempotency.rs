@@ -6,8 +6,8 @@
 //! The spend-ledger unit tests cover the claim/finalize/clear state machine
 //! directly. These tests prove the wiring: that a confirm short-circuits on
 //! replay, returns `idempotency_conflict` when the same key is aimed at a
-//! different plan, and that a transient failure clears the slot so a retry
-//! runs fresh.
+//! different plan, and that only a definite pre-submission failure releases
+//! the slot. Unknown submissions retain their key and budget for reconciliation.
 //!
 //! Every payment here is two dispatches — plan, then confirm — because that is
 //! the only way afpay moves money. The mock provider counts `cashu_send`
@@ -27,6 +27,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
+#[cfg(feature = "ln-phoenixd")]
+#[path = "support/pay_submission.rs"]
+mod pay_submission;
+
 /// Mock Cashu provider: counts cashu_send calls, returns either a canned
 /// success or a controlled error per the mode set at construction.
 struct ControlledCashuProvider {
@@ -37,10 +41,27 @@ struct ControlledCashuProvider {
 #[derive(Clone)]
 enum Behavior {
     /// Every call returns a fresh success with this transaction_id template.
-    Success { tx_id: String },
-    /// Every call fails with a network error so the handler is forced down
-    /// the idempotency_clear path.
+    Success {
+        tx_id: String,
+    },
+    SuccessWithWarning {
+        tx_id: String,
+    },
+    /// A definite refusal releases the idempotency claim and reviewed plan.
     AlwaysError,
+    Unknown {
+        transaction_id: Option<String>,
+        directory: String,
+    },
+    SuccessWithLedgerHeld {
+        tx_id: String,
+        directory: String,
+        held: Arc<std::sync::Mutex<Option<redb::Database>>>,
+    },
+    RefusalWithLedgerHeld {
+        directory: String,
+        held: Arc<std::sync::Mutex<Option<redb::Database>>>,
+    },
 }
 
 #[async_trait]
@@ -106,15 +127,43 @@ impl PayProvider for ControlledCashuProvider {
         _mints: Option<&[String]>,
     ) -> Result<CashuSendResult, PayError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        if let Behavior::SuccessWithLedgerHeld {
+            directory, held, ..
+        }
+        | Behavior::RefusalWithLedgerHeld { directory, held } = &self.behavior
+        {
+            *held.lock().unwrap() = Some(
+                redb::Database::open(std::path::Path::new(directory).join("spend/spend.redb"))
+                    .unwrap(),
+            );
+        }
         match &self.behavior {
-            Behavior::Success { tx_id } => Ok(CashuSendResult {
+            Behavior::Success { tx_id }
+            | Behavior::SuccessWithWarning { tx_id }
+            | Behavior::SuccessWithLedgerHeld { tx_id, .. } => Ok(CashuSendResult {
                 wallet: "w_mock".to_string(),
                 transaction_id: tx_id.clone(),
                 status: TxStatus::Confirmed,
                 fee: None,
                 token: format!("cashuT_{}", amount.value),
+                idempotency_finalize_failed: matches!(
+                    &self.behavior,
+                    Behavior::SuccessWithWarning { .. }
+                ),
             }),
-            Behavior::AlwaysError => Err(PayError::network_error("mock send failed".to_string())),
+            Behavior::AlwaysError | Behavior::RefusalWithLedgerHeld { .. } => {
+                Err(PayError::invalid_amount("mock refused before submission"))
+            }
+            Behavior::Unknown {
+                transaction_id,
+                directory,
+            } => {
+                assert_redb_submission_is_protected(directory);
+                Err(PayError::submission_unknown(
+                    "mock accepted the payment but lost its response",
+                    transaction_id.clone(),
+                ))
+            }
         }
     }
 
@@ -161,6 +210,10 @@ impl PayProvider for ControlledCashuProvider {
 fn make_app(data_dir: String, provider: Box<dyn PayProvider>) -> (App, mpsc::Receiver<Output>) {
     let config = RuntimeConfig {
         data_dir,
+        log: vec![
+            "idempotency_finalize_failed".into(),
+            "idempotency_clear_failed".into(),
+        ],
         ..RuntimeConfig::default()
     };
     let store = create_storage_backend(&config).expect("storage backend");
@@ -374,7 +427,7 @@ async fn confirm_idempotency_conflict_when_the_key_is_aimed_at_another_plan() {
 }
 
 #[tokio::test]
-async fn confirm_idempotency_clears_on_transient_error_and_hands_the_plan_back() {
+async fn confirm_idempotency_clears_on_definite_refusal_and_hands_the_plan_back() {
     let tmp = tempfile::tempdir().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = Box::new(ControlledCashuProvider {
@@ -404,8 +457,482 @@ async fn confirm_idempotency_clears_on_transient_error_and_hands_the_plan_back()
     assert_eq!(
         calls.load(Ordering::Relaxed),
         2,
-        "a transient failure must release both the idempotency slot and the plan"
+        "a definite refusal must release both the idempotency slot and the plan"
     );
+}
+
+#[tokio::test]
+async fn unknown_cashu_submission_retains_keys_budget_and_recovery_ids_after_restart() {
+    use agent_first_pay::types::{SpendLimit, SpendScope};
+    for key in [Some("unknown-key"), None] {
+        for recovery_id in [Some("real-melt-id".to_string()), None] {
+            let tmp = tempfile::tempdir().unwrap();
+            let directory = tmp.path().to_string_lossy().into_owned();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let make_provider = || {
+                Box::new(ControlledCashuProvider {
+                    calls: calls.clone(),
+                    behavior: Behavior::Unknown {
+                        transaction_id: recovery_id.clone(),
+                        directory: directory.clone(),
+                    },
+                }) as Box<dyn PayProvider>
+            };
+            let (mut app, mut rx) = make_app(directory.clone(), make_provider());
+            app.enforce_limits = true;
+            app.spend_ledger
+                .set_limits(&[SpendLimit {
+                    rule_id: None,
+                    scope: SpendScope::Network,
+                    network: Some("cashu".into()),
+                    wallet: None,
+                    window_s: 3600,
+                    max_spend: 50,
+                    token: None,
+                }])
+                .await
+                .unwrap();
+            let plan = plan_cashu_send(&app, &mut rx, 50, "unknown-plan").await;
+            dispatch(
+                &app,
+                Request::from_input(confirm_with_key(&plan, key, "unknown-confirm")),
+            )
+            .await;
+            let output = drain_until(&mut rx, |o| {
+                matches!(o, Output::AccountingInconsistent { .. })
+            })
+            .await;
+            let wire = serde_json::to_value(&output).unwrap();
+            let Output::AccountingInconsistent {
+                transaction_id,
+                reservation_ids,
+                confirm_errors,
+                hint,
+                ..
+            } = output
+            else {
+                unreachable!()
+            };
+            assert_eq!(transaction_id, recovery_id);
+            assert_eq!(wire.get("transaction_id").is_some(), recovery_id.is_some());
+            assert_eq!(reservation_ids.len(), 1);
+            assert!(confirm_errors[0].contains("unknown"));
+            assert!(hint.contains("may have completed"));
+            assert!(!hint.contains("money left"));
+            age_redb_reservation(&directory, reservation_ids[0], 90_000);
+            assert_eq!(app.spend_ledger.get_status().await.unwrap()[0].spent, 50);
+            drop(app);
+
+            let (mut app, mut rx) = make_app(directory.clone(), make_provider());
+            app.enforce_limits = true;
+            // Existing reservation crossed Cashu's 60-second TTL, but remains
+            // within the rule's ordinary one-hour window after a process restart.
+            assert_eq!(app.spend_ledger.get_status().await.unwrap()[0].spent, 50);
+            for (retry_key, expected) in [
+                (
+                    key,
+                    if key.is_some() {
+                        "idempotency_in_progress"
+                    } else {
+                        "plan_not_found"
+                    },
+                ),
+                (Some("different-key"), "plan_not_found"),
+                (None, "plan_not_found"),
+            ] {
+                dispatch(
+                    &app,
+                    Request::from_input(confirm_with_key(&plan, retry_key, "retry-original")),
+                )
+                .await;
+                let output = drain_until(&mut rx, |o| matches!(o, Output::Error { .. })).await;
+                let Output::Error { error_code, .. } = output else {
+                    unreachable!()
+                };
+                assert_eq!(error_code, expected);
+            }
+            let second_plan = plan_cashu_send(&app, &mut rx, 50, "new-plan").await;
+            dispatch(
+                &app,
+                Request::from_input(confirm_with_key(
+                    &second_plan,
+                    Some("new-plan-key"),
+                    "new-confirm",
+                )),
+            )
+            .await;
+            let _ = drain_until(&mut rx, |o| matches!(o, Output::LimitExceeded { .. })).await;
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                1,
+                "no retry may reach the provider"
+            );
+            app.spend_ledger
+                .force_cancel(reservation_ids[0], "provider confirms no payment completed")
+                .await
+                .unwrap();
+            assert_eq!(app.spend_ledger.get_status().await.unwrap()[0].spent, 0);
+        }
+    }
+}
+
+fn age_redb_reservation(directory: &str, reservation_id: u64, age_ms: u64) {
+    use redb::ReadableTable;
+    let db =
+        redb::Database::open(std::path::Path::new(directory).join("spend/spend.redb")).unwrap();
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx
+            .open_table(redb::TableDefinition::<u64, &str>::new("reservation_by_id"))
+            .unwrap();
+        let bytes = table
+            .get(reservation_id)
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_string();
+        let mut value: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(value["expires_at_epoch_ms"], i64::MAX as u64);
+        let created = value["created_at_epoch_ms"].as_u64().unwrap();
+        value["created_at_epoch_ms"] = serde_json::json!(created - age_ms);
+        let encoded = serde_json::to_string(&value).unwrap();
+        table.insert(reservation_id, encoded.as_str()).unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+fn assert_redb_submission_is_protected(directory: &str) {
+    use redb::{ReadableDatabase, ReadableTable};
+    let db =
+        redb::Database::open(std::path::Path::new(directory).join("spend/spend.redb")).unwrap();
+    let tx = db.begin_read().unwrap();
+    let reservations = tx
+        .open_table(redb::TableDefinition::<u64, &str>::new("reservation_by_id"))
+        .unwrap();
+    for entry in reservations.iter().unwrap() {
+        let (_, bytes) = entry.unwrap();
+        let value: serde_json::Value = serde_json::from_str(bytes.value()).unwrap();
+        if value["status"] == "Pending" {
+            assert_eq!(
+                value["expires_at_epoch_ms"],
+                i64::MAX as u64,
+                "reservation protection must precede the provider call"
+            );
+        }
+    }
+    let Ok(keys) = tx.open_table(redb::TableDefinition::<&str, &str>::new(
+        "idempotency_by_key_v1",
+    )) else {
+        return;
+    };
+    for entry in keys.iter().unwrap() {
+        let (_, bytes) = entry.unwrap();
+        let value: serde_json::Value = serde_json::from_str(bytes.value()).unwrap();
+        if value["state"] == "pending" {
+            assert_eq!(
+                value["expires_at_epoch_ms"],
+                i64::MAX as u64,
+                "key protection must precede the provider call"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn successful_cashu_send_reports_redb_finalize_failure_without_losing_the_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    let directory = tmp.path().to_string_lossy().into_owned();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let held = Arc::new(std::sync::Mutex::new(None));
+    let provider = Box::new(ControlledCashuProvider {
+        calls: calls.clone(),
+        behavior: Behavior::SuccessWithLedgerHeld {
+            tx_id: "successful-mint-id".into(),
+            directory: directory.clone(),
+            held: held.clone(),
+        },
+    });
+    let (app, mut rx) = make_app(directory, provider);
+    let plan = plan_cashu_send(&app, &mut rx, 10, "mint-finalize-plan").await;
+    dispatch(
+        &app,
+        Request::from_input(confirm_with_key(
+            &plan,
+            Some("mint-finalize-key"),
+            "mint-finalize-confirm",
+        )),
+    )
+    .await;
+    let mut saw_failure_log = false;
+    loop {
+        match rx.recv().await.unwrap() {
+            Output::Log { event, .. } if event == "idempotency_finalize_failed" => {
+                saw_failure_log = true
+            }
+            Output::CashuSent {
+                idempotency_finalize_failed,
+                token,
+                ..
+            } => {
+                assert!(idempotency_finalize_failed);
+                assert_eq!(token, "cashuT_10");
+                break;
+            }
+            Output::Log { .. } => {}
+            other => panic!("unexpected mint receipt: {other:?}"),
+        }
+    }
+    assert!(saw_failure_log);
+    held.lock().unwrap().take();
+    dispatch(
+        &app,
+        Request::from_input(confirm_with_key(
+            &plan,
+            Some("mint-finalize-key"),
+            "mint-retry",
+        )),
+    )
+    .await;
+    let output = drain_until(&mut rx, |o| matches!(o, Output::Error { .. })).await;
+    let Output::Error { error_code, .. } = output else {
+        unreachable!()
+    };
+    assert_eq!(error_code, "idempotency_in_progress");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn downstream_finalize_warning_survives_successful_local_finalization_and_replay() {
+    let tmp = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Box::new(ControlledCashuProvider {
+        calls: calls.clone(),
+        behavior: Behavior::SuccessWithWarning {
+            tx_id: "downstream-success".into(),
+        },
+    });
+    let (app, mut rx) = make_app(tmp.path().to_string_lossy().into_owned(), provider);
+    let plan = plan_cashu_send(&app, &mut rx, 10, "warning-plan").await;
+    for id in ["warning-first", "warning-replay"] {
+        dispatch(
+            &app,
+            Request::from_input(confirm_with_key(&plan, Some("warning-key"), id)),
+        )
+        .await;
+        let output = drain_until(&mut rx, |o| matches!(o, Output::CashuSent { .. })).await;
+        let Output::CashuSent {
+            transaction_id,
+            idempotency_finalize_failed,
+            ..
+        } = output
+        else {
+            unreachable!()
+        };
+        assert_eq!(transaction_id, "downstream-success");
+        assert!(
+            idempotency_finalize_failed,
+            "local success cannot erase a downstream warning"
+        );
+    }
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "upstream must still finalize its replay even when downstream warned"
+    );
+}
+
+#[tokio::test]
+async fn redb_clear_failure_is_logged_and_does_not_release_the_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let directory = tmp.path().to_string_lossy().into_owned();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let held = Arc::new(std::sync::Mutex::new(None));
+    let provider = Box::new(ControlledCashuProvider {
+        calls: calls.clone(),
+        behavior: Behavior::RefusalWithLedgerHeld {
+            directory: directory.clone(),
+            held: held.clone(),
+        },
+    });
+    let (app, mut rx) = make_app(directory, provider);
+    let plan = plan_cashu_send(&app, &mut rx, 10, "clear-plan").await;
+    dispatch(
+        &app,
+        Request::from_input(confirm_with_key(&plan, Some("clear-key"), "clear-confirm")),
+    )
+    .await;
+    let mut saw_failure_log = false;
+    loop {
+        match rx.recv().await.unwrap() {
+            Output::Log { event, .. } if event == "idempotency_clear_failed" => {
+                saw_failure_log = true
+            }
+            Output::Error { error_code, .. } => {
+                assert_eq!(error_code, "invalid_amount");
+                break;
+            }
+            Output::Log { .. } => {}
+            other => panic!("unexpected refusal output: {other:?}"),
+        }
+    }
+    assert!(saw_failure_log);
+    held.lock().unwrap().take();
+    dispatch(
+        &app,
+        Request::from_input(confirm_with_key(&plan, Some("clear-key"), "clear-retry")),
+    )
+    .await;
+    let output = drain_until(&mut rx, |o| matches!(o, Output::Error { .. })).await;
+    let Output::Error { error_code, .. } = output else {
+        unreachable!()
+    };
+    assert_eq!(error_code, "idempotency_in_progress");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(feature = "ln-phoenixd")]
+#[tokio::test]
+async fn real_phoenixd_response_loss_retains_the_send_budget_and_plan() {
+    use pay_submission::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let stub = PhoenixStub::start(PaymentResponse::Lost, None).await;
+    let config = RuntimeConfig {
+        data_dir: tmp.path().to_string_lossy().into_owned(),
+        ..RuntimeConfig::default()
+    };
+    let store = create_storage_backend(&config).unwrap();
+    let (app, mut rx) = pay_submission::make_app(config.clone(), store, &stub.endpoint, true);
+    install_limit(&app).await;
+    let plan_id = plan(&app, &mut rx, "lost-plan").await;
+    let output = terminal(
+        &app,
+        &mut rx,
+        confirm(&plan_id, Some("lost-key"), "lost-confirm"),
+    )
+    .await;
+    let Output::AccountingInconsistent {
+        reservation_ids,
+        transaction_id,
+        ..
+    } = output
+    else {
+        panic!("unexpected output: {output:?}")
+    };
+    let invoice: lightning_invoice::Bolt11Invoice = INVOICE.parse().unwrap();
+    assert_eq!(transaction_id, Some(invoice.payment_hash().to_string()));
+    assert_eq!(reservation_ids.len(), 1);
+    assert_eq!(app.spend_ledger.get_status().await.unwrap()[0].spent, 2);
+    age_redb_reservation(&config.data_dir, reservation_ids[0], 120_000);
+    drop(app);
+    let store = create_storage_backend(&config).unwrap();
+    let (app, mut rx) = pay_submission::make_app(config, store, &stub.endpoint, true);
+    assert_eq!(app.spend_ledger.get_status().await.unwrap()[0].spent, 2);
+    assert_error(
+        terminal(
+            &app,
+            &mut rx,
+            confirm(&plan_id, Some("lost-key"), "retry-key"),
+        )
+        .await,
+        "idempotency_in_progress",
+    );
+    assert_error(
+        terminal(
+            &app,
+            &mut rx,
+            confirm(&plan_id, Some("fresh-key"), "retry-fresh"),
+        )
+        .await,
+        "plan_not_found",
+    );
+    assert_error(
+        terminal(&app, &mut rx, confirm(&plan_id, None, "retry-no-key")).await,
+        "plan_not_found",
+    );
+    let second = plan(&app, &mut rx, "new-lost-plan").await;
+    assert!(matches!(
+        terminal(
+            &app,
+            &mut rx,
+            confirm(&second, Some("second-key"), "second-confirm")
+        )
+        .await,
+        Output::LimitExceeded { .. }
+    ));
+    assert_eq!(stub.calls.load(Ordering::SeqCst), 1);
+    app.spend_ledger
+        .force_cancel(reservation_ids[0], "provider confirms absent payment")
+        .await
+        .unwrap();
+    assert_eq!(app.spend_ledger.get_status().await.unwrap()[0].spent, 0);
+}
+
+#[cfg(feature = "ln-phoenixd")]
+#[tokio::test]
+async fn successful_send_reports_redb_finalize_failure_without_resubmission() {
+    use pay_submission::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let directory = tmp.path().to_string_lossy().into_owned();
+    let held_db = Arc::new(std::sync::Mutex::new(None));
+    let fault_db = held_db.clone();
+    let db_path = tmp.path().join("spend/spend.redb");
+    let stub = PhoenixStub::start(
+        PaymentResponse::Success,
+        Some(Arc::new(move || {
+            *fault_db.lock().unwrap() = Some(redb::Database::open(&db_path).unwrap());
+        })),
+    )
+    .await;
+    let config = RuntimeConfig {
+        data_dir: directory,
+        ..RuntimeConfig::default()
+    };
+    let store = create_storage_backend(&config).unwrap();
+    let (app, mut rx) = pay_submission::make_app(config, store, &stub.endpoint, false);
+    let plan_id = plan(&app, &mut rx, "finalize-plan").await;
+    dispatch(
+        &app,
+        Request::from_input(confirm(&plan_id, Some("finalize-key"), "finalize-confirm")),
+    )
+    .await;
+    let mut saw_failure_log = false;
+    loop {
+        match rx.recv().await.unwrap() {
+            Output::Log { event, .. } if event == "idempotency_finalize_failed" => {
+                saw_failure_log = true
+            }
+            Output::Sent {
+                idempotency_finalize_failed,
+                ..
+            } => {
+                assert!(idempotency_finalize_failed);
+                break;
+            }
+            Output::Log { .. } => {}
+            other => panic!("unexpected receipt: {other:?}"),
+        }
+    }
+    assert!(saw_failure_log);
+    held_db.lock().unwrap().take();
+    assert_error(
+        terminal(
+            &app,
+            &mut rx,
+            confirm(&plan_id, Some("finalize-key"), "retry-finalize"),
+        )
+        .await,
+        "idempotency_in_progress",
+    );
+    assert_error(
+        terminal(
+            &app,
+            &mut rx,
+            confirm(&plan_id, Some("fresh-finalize-key"), "retry-fresh-finalize"),
+        )
+        .await,
+        "plan_not_found",
+    );
+    assert_eq!(stub.calls.load(Ordering::SeqCst), 1);
 }
 
 /// Without a key there is no replay record — but the plan is still single-use,

@@ -78,6 +78,18 @@ impl BtcChainSource for CoreRpcSource {
         self.sync_blocks(wallet)
     }
 
+    async fn fee_rate_sat_per_vb(&self) -> Result<f64, PayError> {
+        let estimate = self
+            .make_client()?
+            .estimate_smart_fee(6, None)
+            .map_err(|error| PayError::network_error(format!("bitcoind fee estimate: {error}")))?;
+        let rate = estimate
+            .fee_rate
+            .ok_or_else(|| PayError::network_error("bitcoind has no six-block fee estimate"))?;
+        // Core quotes BTC/kvB; Amount exposes the equivalent sat/kvB.
+        Ok(rate.to_sat() as f64 / 1000.0)
+    }
+
     async fn broadcast(&self, tx: &Transaction) -> Result<(), PayError> {
         let client = self.make_client()?;
         client

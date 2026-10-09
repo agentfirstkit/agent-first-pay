@@ -26,6 +26,7 @@
 //! when two callers with different idempotency keys race for it.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -299,16 +300,33 @@ fn not_found(plan_id: &str, claimed: bool) -> PayError {
     }
 }
 
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), PayError> {
-    std::fs::write(path, bytes)
-        .map_err(|e| PayError::internal_error(format!("write {}: {e}", path.display())))?;
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), PayError> {
+    let temporary = path.with_extension(format!("{}.tmp", generate_plan_identifier()?));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| PayError::internal_error(format!("chmod {}: {e}", path.display())))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(())
+    let mut file = options
+        .open(&temporary)
+        .map_err(|e| PayError::internal_error(format!("create {}: {e}", temporary.display())))?;
+    let result = (|| {
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| PayError::internal_error(format!("write {}: {e}", temporary.display())))?;
+        // Close before rename so the same operation works on Windows too.
+        drop(file);
+        std::fs::rename(&temporary, path)
+            .map_err(|e| PayError::internal_error(format!("publish {}: {e}", path.display())))
+    })();
+    if result.is_err() {
+        // Only this call's create_new file is removed; a failed publication
+        // leaves the prior file untouched.
+        let _cleanup = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn set_private_directory_permissions(path: &Path) -> Result<(), PayError> {
@@ -381,6 +399,37 @@ fn limits_fingerprint_source(limits: &[SpendLimitStatus]) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::types::{SpendDebit, SpendScope};
+
+    #[test]
+    fn plan_publication_failure_removes_only_its_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("existing-directory");
+        std::fs::create_dir(&destination).unwrap();
+        assert!(write_private_file(&destination, b"complete plan").is_err());
+        assert!(destination.is_dir());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_plan_publication_is_private_and_does_not_follow_a_destination_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let foreign = directory.path().join("foreign");
+        std::fs::write(&foreign, b"untouched").unwrap();
+        let destination = directory.path().join("plan.plan.json");
+        symlink(&foreign, &destination).unwrap();
+        write_private_file(&destination, b"complete plan").unwrap();
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete plan");
+        assert!(!destination.is_symlink());
+        assert_eq!(
+            std::fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
 
     fn quote() -> SendQuoteInfo {
         SendQuoteInfo {

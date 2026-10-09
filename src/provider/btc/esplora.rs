@@ -64,6 +64,18 @@ impl BtcChainSource for EsploraSource {
         Ok(())
     }
 
+    async fn fee_rate_sat_per_vb(&self) -> Result<f64, PayError> {
+        let estimates = self
+            .make_client()?
+            .get_fee_estimates()
+            .await
+            .map_err(|error| PayError::network_error(format!("esplora fee estimate: {error}")))?;
+        estimates
+            .get(&6)
+            .copied()
+            .ok_or_else(|| PayError::network_error("esplora has no six-block fee estimate"))
+    }
+
     async fn broadcast(&self, tx: &Transaction) -> Result<(), PayError> {
         let client = self.make_client()?;
         client

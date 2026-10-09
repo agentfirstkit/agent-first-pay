@@ -484,6 +484,14 @@ async fn send(peer_url: &str, api_key_secret: &str, plan: &RoutePlan) -> Result<
     }
 
     let response = request.send().await.map_err(|error| {
+        if matches!(plan.result_code, "sent" | "cashu_sent") {
+            return peer_error(
+                "submission_unknown",
+                format!("afpay peer payment submission at {url} has an unknown outcome: {error}"),
+                Some("inspect the peer's retained payment and reservations before reconciliation; do not resubmit"),
+                false,
+            );
+        }
         peer_error(
             "peer_unreachable",
             format!("cannot reach afpay peer at {url}: {error}"),
@@ -502,6 +510,14 @@ async fn send(peer_url: &str, api_key_secret: &str, plan: &RoutePlan) -> Result<
         .unwrap_or("(none)")
         .to_string();
     let bytes = response.bytes().await.map_err(|error| {
+        if matches!(plan.result_code, "sent" | "cashu_sent") {
+            return peer_error(
+                "submission_unknown",
+                format!("afpay peer at {url} closed a payment response early: {error}"),
+                Some("inspect the peer's retained payment and reservations before reconciliation; do not resubmit"),
+                false,
+            );
+        }
         peer_error(
             "peer_unreachable",
             format!("afpay peer at {url} closed the response early: {error}"),
@@ -640,6 +656,9 @@ fn peer_failure(envelope: &Value, plan: &RoutePlan, url: &str, status: StatusCod
     if let Some(retry_after_ms) = error.get("retry_after_ms").and_then(Value::as_u64) {
         value["retry_after_ms"] = json!(retry_after_ms);
     }
+    if let Some(details) = error.get("details") {
+        value["details"] = details.clone();
+    }
     if let Some(trace) = envelope.get("trace") {
         value["trace"] = trace.clone();
     }
@@ -668,6 +687,20 @@ fn not_afpay(
     content_type: &str,
     body: &str,
 ) -> Value {
+    if matches!(plan.result_code, "sent" | "cashu_sent") {
+        return peer_error(
+            "submission_unknown",
+            format!(
+                "the peer payment response to `{}` at {url} could not be read \
+                 (HTTP {status}, content-type {content_type}): {body}",
+                plan.describe()
+            ),
+            Some(
+                "inspect the peer's retained payment and reservations before reconciliation; do not resubmit",
+            ),
+            false,
+        );
+    }
     peer_error(
         "peer_not_afpay",
         format!(
@@ -848,6 +881,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static REMOTE_REQUEST_FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn payment_recovery_id(value: &Value) -> Option<String> {
+    value
+        .get("transaction_id")
+        .or_else(|| {
+            value
+                .get("details")
+                .and_then(|details| details.get("transaction_id"))
+        })
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 #[derive(Deserialize)]
 struct WalletCreatedOut {
     wallet: String,
@@ -889,6 +935,8 @@ struct CashuSentOut {
     #[serde(default)]
     fee: Option<Amount>,
     token: String,
+    #[serde(default)]
+    idempotency_finalize_failed: bool,
 }
 
 #[derive(Deserialize)]
@@ -923,6 +971,8 @@ struct SentOut {
     fee: Option<Amount>,
     #[serde(default)]
     preimage: Option<String>,
+    #[serde(default)]
+    idempotency_finalize_failed: bool,
 }
 
 #[derive(Deserialize)]
@@ -1084,6 +1134,9 @@ impl RemoteProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("remote_error");
                 Some(match error_code {
+                    "submission_unknown" | "accounting_inconsistent" => {
+                        PayError::submission_unknown(msg, payment_recovery_id(value))
+                    }
                     "wallet_not_found" => PayError::wallet_not_found(msg.to_string()),
                     "invalid_amount" | "invalid_request" => {
                         PayError::invalid_amount(msg.to_string())
@@ -1116,6 +1169,12 @@ impl RemoteProvider {
                 })
             }
             "limit_exceeded" => Some(self.parse_limit_exceeded(value)),
+            "accounting_inconsistent" => Some(PayError::submission_unknown(
+                value.get("hint").and_then(Value::as_str).unwrap_or(
+                    "the peer retained an unresolved payment; inspect it before reconciliation",
+                ),
+                payment_recovery_id(value),
+            )),
             _ => None,
         }
     }
@@ -1158,6 +1217,22 @@ impl RemoteProvider {
                  read <peer-url>/health and match the two versions"
                     .to_string(),
             ),
+        })
+    }
+
+    fn parse_payment_output<T: DeserializeOwned>(
+        &self,
+        value: Value,
+        label: &str,
+    ) -> Result<T, PayError> {
+        let recovery_id = payment_recovery_id(&value);
+        self.parse_output(value, label).map_err(|error| {
+            PayError::submission_unknown(
+                format!(
+                    "the peer reported payment success but its receipt could not be read: {error}"
+                ),
+                recovery_id,
+            )
         })
     }
 
@@ -1532,13 +1607,14 @@ impl PayProvider for RemoteProvider {
             .await,
             &["cashu_sent"],
         )?;
-        let parsed: CashuSentOut = self.parse_output(out, "cashu_sent")?;
+        let parsed: CashuSentOut = self.parse_payment_output(out, "cashu_sent")?;
         Ok(CashuSendResult {
             wallet: parsed.wallet,
             transaction_id: parsed.transaction_id,
             status: parsed.status,
             fee: parsed.fee,
             token: parsed.token,
+            idempotency_finalize_failed: parsed.idempotency_finalize_failed,
         })
     }
 
@@ -1626,13 +1702,14 @@ impl PayProvider for RemoteProvider {
             .await,
             &["sent"],
         )?;
-        let parsed: SentOut = self.parse_output(out, "sent")?;
+        let parsed: SentOut = self.parse_payment_output(out, "sent")?;
         Ok(SendResult {
             wallet: parsed.wallet,
             transaction_id: parsed.transaction_id,
             amount: parsed.amount,
             fee: parsed.fee,
             preimage: parsed.preimage,
+            idempotency_finalize_failed: parsed.idempotency_finalize_failed,
         })
     }
 
@@ -1728,6 +1805,36 @@ mod tests {
     }
 
     #[test]
+    fn payment_receipts_preserve_finalize_warning_and_accept_legacy_receipts() {
+        for warning in [None, Some(true)] {
+            let mut sent = json!({
+                "wallet": "w_receipt",
+                "transaction_id": "native-hash",
+                "amount": {"value": 10, "token": "sats"}
+            });
+            let mut cashu_sent = json!({
+                "wallet": "w_receipt",
+                "transaction_id": "token-receipt",
+                "status": "confirmed",
+                "token": "cashuA_fixture"
+            });
+            if let Some(warning) = warning {
+                sent["idempotency_finalize_failed"] = json!(warning);
+                cashu_sent["idempotency_finalize_failed"] = json!(warning);
+            }
+            let sent: SentOut = provider().parse_payment_output(sent, "sent").unwrap();
+            let cashu_sent: CashuSentOut = provider()
+                .parse_payment_output(cashu_sent, "cashu_sent")
+                .unwrap();
+            assert_eq!(sent.idempotency_finalize_failed, warning.unwrap_or(false));
+            assert_eq!(
+                cashu_sent.idempotency_finalize_failed,
+                warning.unwrap_or(false)
+            );
+        }
+    }
+
+    #[test]
     fn first_output_skips_log_events() {
         let out = provider()
             .first_output(
@@ -1753,6 +1860,68 @@ mod tests {
             )
             .expect_err("error output should be mapped");
         assert!(matches!(err, PayError::WalletNotFound { .. }));
+    }
+
+    #[test]
+    fn remote_unknown_and_accounting_keep_real_recovery_identifiers() {
+        for value in [
+            json!({"code":"error", "error_code":"submission_unknown", "error":"reply lost", "details":{"transaction_id":"native-hash"}}),
+            json!({"code":"accounting_inconsistent", "transaction_id":"native-hash", "confirm_errors":["reply lost"], "hint":"inspect the peer"}),
+        ] {
+            let error = provider().first_output(vec![value], &["sent"]).unwrap_err();
+            assert!(matches!(&error, PayError::SubmissionUnknown { .. }));
+            assert_eq!(error.submission_transaction_id(), Some("native-hash"));
+            assert!(!error.retryable());
+        }
+        let error = provider()
+            .first_output(
+                vec![json!({"code":"accounting_inconsistent", "confirm_errors":["reply lost"]})],
+                &["sent"],
+            )
+            .unwrap_err();
+        assert_eq!(error.submission_transaction_id(), None);
+    }
+
+    #[test]
+    fn malformed_success_receipt_is_unknown_with_its_recovery_identifier() {
+        let error = provider()
+            .parse_payment_output::<SentOut>(
+                json!({"code":"sent", "transaction_id":"native-hash"}),
+                "sent",
+            )
+            .err()
+            .expect("missing payment fields must fail");
+        assert!(matches!(&error, PayError::SubmissionUnknown { .. }));
+        assert_eq!(error.submission_transaction_id(), Some("native-hash"));
+        assert!(!error.retryable());
+    }
+
+    #[test]
+    fn unreadable_confirm_response_cannot_become_an_ordinary_peer_mismatch() {
+        let value = not_afpay(
+            "http://peer:9401/v1/sends",
+            &RoutePlan::post("/v1/sends", json!({"plan_id":"plan_fixture"}), "sent"),
+            StatusCode::OK,
+            "application/json",
+            "truncated",
+        );
+        let error = provider().map_remote_error(&value).unwrap();
+        assert!(matches!(&error, PayError::SubmissionUnknown { .. }));
+        assert_eq!(error.submission_transaction_id(), None);
+        assert!(!error.retryable());
+    }
+
+    #[test]
+    fn peer_unknown_envelope_retains_recovery_details() {
+        let value = peer_failure(
+            &json!({"kind":"error", "error":{"code":"submission_unknown", "message":"reply lost", "retryable":false, "details":{"transaction_id":"native-hash"}}}),
+            &RoutePlan::get("/v1/pay/confirm", "sent"),
+            "http://peer:9401",
+            StatusCode::CONFLICT,
+        );
+        let error = provider().map_remote_error(&value).unwrap();
+        assert_eq!(error.submission_transaction_id(), Some("native-hash"));
+        assert!(!error.retryable());
     }
 
     #[test]

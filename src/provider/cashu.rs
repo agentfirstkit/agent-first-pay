@@ -152,7 +152,7 @@ impl CashuProvider {
                 }
             } else {
                 Err(PayError::wallet_not_found(format!(
-                    "no wallet on accepted mints: {}; create one with: afpay cashu wallet create --mint-url <mint>",
+                    "no wallet on accepted mints: {}; create one with: afpay cashu wallet create --cashu-mint <mint>",
                     mint_list.join(", ")
                 )))
             };
@@ -602,13 +602,13 @@ impl PayProvider for CashuProvider {
             .await
             .map_err(|e| PayError::network_error(format!("confirm send: {e}")))?;
 
-        let balance_after_send = w
-            .total_balance()
-            .await
-            .map_err(|e| PayError::network_error(format!("balance after send: {e}")))?
-            .to_u64();
-        let total_spent = balance_before_send.saturating_sub(balance_after_send);
-        let fee_sats = total_spent.saturating_sub(amount.value);
+        // The token already exists. A supplementary fee lookup must never
+        // discard it and let the caller mint another one on retry.
+        let fee_sats = w.total_balance().await.ok().map(|balance| {
+            balance_before_send
+                .saturating_sub(balance.to_u64())
+                .saturating_sub(amount.value)
+        });
 
         // Inject memo into token (cdk SendOptions.memo does not embed it)
         let token_str = match (onchain_memo, token) {
@@ -619,14 +619,10 @@ impl PayProvider for CashuProvider {
             (_, token) => token.to_string(),
         };
 
-        let fee_amount = if fee_sats > 0 {
-            Some(Amount {
-                value: fee_sats,
-                token: "sats".to_string(),
-            })
-        } else {
-            None
-        };
+        let fee_amount = fee_sats.filter(|fee| *fee > 0).map(|value| Amount {
+            value,
+            token: "sats".to_string(),
+        });
         let record = HistoryRecord {
             transaction_id: transaction_id.clone(),
             wallet: resolved.clone(),
@@ -652,6 +648,7 @@ impl PayProvider for CashuProvider {
             status: TxStatus::Confirmed,
             fee: fee_amount,
             token: token_str,
+            idempotency_finalize_failed: false,
         })
     }
 
@@ -873,6 +870,7 @@ impl PayProvider for CashuProvider {
             amount,
             fee: fee_amount,
             preimage: None,
+            idempotency_finalize_failed: false,
         })
     }
 

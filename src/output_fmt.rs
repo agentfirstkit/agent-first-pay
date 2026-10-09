@@ -8,33 +8,7 @@ use std::sync::OnceLock;
 
 static OUTPUT_TO: OnceLock<agent_first_data::OutputTo> = OnceLock::new();
 
-pub fn install_output_to<I, S>(args: I) -> Result<(), String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let args = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect::<Vec<_>>();
-    let mut value = "split".to_string();
-    let mut index = 1;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--" {
-            break;
-        }
-        if let Some(candidate) = arg.strip_prefix("--output-to=") {
-            value = candidate.to_string();
-        } else if arg == "--output-to" {
-            index += 1;
-            value = args.get(index).cloned().ok_or_else(|| {
-                "--output-to requires a value: split, stdout, or stderr".to_string()
-            })?;
-        }
-        index += 1;
-    }
-    let selector = agent_first_data::OutputTo::parse(&value)?;
+pub fn install_output_to(selector: agent_first_data::OutputTo) -> Result<(), String> {
     OUTPUT_TO
         .set(selector)
         .map_err(|_| "AFDATA output routing was initialized more than once".to_string())
@@ -96,6 +70,14 @@ pub fn emit_process_output(output: &Output, format: OutputFormat) -> Result<(), 
 
 pub fn emit_process_event(value: Value, format: OutputFormat) -> Result<(), CliEmitterError> {
     let mut emitter = CliEmitter::from_output_to(output_to(), format).with_strict_protocol();
+    emitter.emit_validated_value(value)
+}
+
+/// Unresolved output arguments cannot select the channel for a CLI rejection.
+pub fn emit_stderr_error(value: Value) -> Result<(), CliEmitterError> {
+    let mut emitter =
+        CliEmitter::from_output_to(agent_first_data::OutputTo::Stderr, OutputFormat::Json)
+            .with_strict_protocol();
     emitter.emit_validated_value(value)
 }
 
@@ -287,5 +269,48 @@ mod tests {
             event["log"]["args"]["endpoint_url"],
             "https://example.test/"
         );
+    }
+
+    #[test]
+    fn successful_receipts_only_emit_the_finalize_warning_when_it_failed() {
+        for failed in [false, true] {
+            let receipt = Output::Sent {
+                id: "receipt".into(),
+                wallet: "w_test".into(),
+                transaction_id: "real-id".into(),
+                amount: crate::types::Amount {
+                    value: 1,
+                    token: "sats".into(),
+                },
+                fee: None,
+                preimage: None,
+                reservation_ids: Vec::new(),
+                idempotency_finalize_failed: failed,
+                trace: crate::types::Trace::from_duration(1),
+            };
+            let event = protocol_event(&receipt).expect("valid receipt");
+            assert_eq!(
+                event["result"].get("idempotency_finalize_failed").is_some(),
+                failed
+            );
+            if failed {
+                assert_eq!(event["result"]["idempotency_finalize_failed"], true);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_submission_without_a_recovery_id_does_not_invent_one() {
+        let output = Output::AccountingInconsistent {
+            id: "unknown".into(),
+            transaction_id: None,
+            reservation_ids: vec![1],
+            confirm_errors: vec!["provider response lost; submission outcome is unknown".into()],
+            hint: "inspect provider history before reconciling".into(),
+            trace: crate::types::Trace::from_duration(1),
+        };
+        let event = protocol_event(&output).expect("valid unknown outcome");
+        assert_eq!(event["result"]["code"], "accounting_inconsistent");
+        assert!(event["result"].get("transaction_id").is_none());
     }
 }

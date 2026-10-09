@@ -38,42 +38,17 @@ jobs:
         shell: bash
         run: ./scripts/install-shellcheck.sh --install
 
-      # This spore has no single test script to call the check from, so it is
-      # its own step. The container entry points and the backup/restore helpers
-      # are the scripts that matter here.
-      - name: ShellCheck
+      - name: Install afdata test toolkit
+        run: cargo install agent-first-data --version 0.34.0 --locked --features skill
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # The same entrypoint covers local and CI checks. Its PostgreSQL mode
+      # creates a disposable Docker database rather than using a shared service.
+      - name: Fixed project gate
         shell: bash
-        run: ./scripts/install-shellcheck.sh --check .
-
-      - name: Install afdata skill validator
-        run: cargo install agent-first-data --locked --features skill
-
-      - name: Validate Agent Skill
-        run: afdata skill validate skills/agent-first-pay
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Build
-        run: cargo build
-
-      # `--lib --bins --tests` is what the release gate runs for this spore, so
-      # anything that can fail a release fails here too. The integration suites
-      # are included deliberately: every test that wants a network, a wallet or
-      # a daemon is `#[ignore]`d, so what remains runs offline.
-      #
-      # Both home variables point at a throwaway directory, as the release gate
-      # does. Without them the suites would read and write the runner's real
-      # HOME, which makes results depend on what a previous step left behind.
-      - name: Tests
-        shell: bash
-        run: |
-          TEST_TMP="$(mktemp -d)"
-          export AFPAY_TEST_HOME="$TEST_TMP" AFPAY_HOME="$TEST_TMP"
-          cargo test --lib --bins --tests
+        run: ./scripts/test.sh all
 
       # The container image pins bitcoind and phoenixd, and `cargo upgrade`
       # cannot see them; both sat several releases behind before anything
@@ -106,8 +81,13 @@ jobs:
             target
           key: ${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build what the release builds
-        run: cargo build --release --features rest
+      - name: Install afdata test toolkit
+        run: cargo install agent-first-data --version 0.34.0 --locked --features skill
 
-      - name: Unit suites
-        run: cargo test --features rest --lib --bins
+      - name: Unit and offline integration suites
+        shell: bash
+        run: ./scripts/test.sh unit
+
+      - name: Isolated provider features
+        shell: bash
+        run: ./scripts/test.sh features

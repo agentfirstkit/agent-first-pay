@@ -554,10 +554,71 @@ fn try_pg_dump(data_dir: &str) -> Result<Option<Vec<u8>>, String> {
     run_pg_dump(&url).map(Some)
 }
 
+// Passwords belong in the child environment, never in process arguments.
+fn pg_command(program: &str, connection_url_secret: &str) -> Result<std::process::Command, String> {
+    let mut url = url::Url::parse(connection_url_secret)
+        .map_err(|_| "invalid PostgreSQL connection URL".to_string())?;
+    if !matches!(url.scheme(), "postgres" | "postgresql") {
+        return Err("invalid PostgreSQL connection URL scheme".to_string());
+    }
+    let mut password_secret = url
+        .password()
+        .map(|password| {
+            percent_encoding::percent_decode_str(password)
+                .decode_utf8()
+                .map(|value| value.into_owned())
+                .map_err(|_| "invalid PostgreSQL password encoding".to_string())
+        })
+        .transpose()?;
+    let mut parameters = Vec::new();
+    for parameter in url
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|value| !value.is_empty())
+    {
+        let (key, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+        let key = percent_encoding::percent_decode_str(key)
+            .decode_utf8()
+            .map_err(|_| "invalid PostgreSQL parameter encoding".to_string())?;
+        if key == "sslpassword" {
+            // libpq has no environment variable for the client-key passphrase,
+            // so there is no way to hand it to the child off the command line.
+            return Err(
+                "PostgreSQL connection URL sets sslpassword, which backup and restore cannot \
+                 pass to pg_dump/psql without exposing it in process arguments; use a client \
+                 key without a passphrase"
+                    .to_string(),
+            );
+        }
+        if key == "password" {
+            password_secret = Some(
+                percent_encoding::percent_decode_str(value)
+                    .decode_utf8()
+                    .map_err(|_| "invalid PostgreSQL password encoding".to_string())?
+                    .into_owned(),
+            );
+        } else {
+            parameters.push(parameter.to_string());
+        }
+    }
+    if url.password().is_some() {
+        url.set_password(None)
+            .map_err(|_| "invalid PostgreSQL connection URL userinfo".to_string())?;
+    }
+    let query = parameters.join("&");
+    url.set_query(if query.is_empty() { None } else { Some(&query) });
+    let mut command = std::process::Command::new(program);
+    command.arg(format!("--dbname={url}"));
+    if let Some(password_secret) = password_secret {
+        command.env("PGPASSWORD", password_secret);
+    }
+    Ok(command)
+}
+
 fn run_pg_dump(url: &str) -> Result<Vec<u8>, String> {
     // Explicitly close stdin so pg_dump never reads from the terminal.
-    let out = std::process::Command::new("pg_dump")
-        .arg(format!("--dbname={url}"))
+    let out = pg_command("pg_dump", url)?
         .arg("--no-password")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -577,10 +638,10 @@ fn run_pg_dump(url: &str) -> Result<Vec<u8>, String> {
 fn run_pg_restore(url: &str, sql: &[u8]) -> Result<(), String> {
     // stdin is piped so we can write the SQL; stdout/stderr are also redirected
     // so psql never interacts with the calling terminal (important in TUI mode).
-    let mut child = std::process::Command::new("psql")
-        .arg(format!("--dbname={url}"))
+    let mut child = pg_command("psql", url)?
         .arg("--no-password")
         .arg("--quiet")
+        .arg("--set=ON_ERROR_STOP=1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -896,4 +957,82 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 
 fn is_leap(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+#[cfg(test)]
+mod pg_command_tests {
+    use super::pg_command;
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires the disposable PostgreSQL database from scripts/test.sh postgres"]
+    fn postgres_backup_password_round_trip() {
+        let url = std::env::var("AFPAY_TEST_POSTGRES_DSN_SECRET").unwrap();
+        super::run_pg_restore(&url, b"CREATE TABLE backup_password_probe (value integer); INSERT INTO backup_password_probe VALUES (42);").unwrap();
+        let dump = super::run_pg_dump(&url).unwrap();
+        assert!(!dump.is_empty());
+        super::run_pg_restore(&url, b"DROP TABLE backup_password_probe;").unwrap();
+        super::run_pg_restore(&url, &dump).unwrap();
+        super::run_pg_restore(&url, b"DO $$ BEGIN IF (SELECT value FROM backup_password_probe) <> 42 THEN RAISE EXCEPTION 'backup round trip failed'; END IF; END $$; DROP TABLE backup_password_probe;").unwrap();
+    }
+
+    #[test]
+    fn pg_command_moves_passwords_to_environment() {
+        for program in ["pg_dump", "psql"] {
+            for (url, expected_password) in [
+                (
+                    "postgresql://reviewer:p%40ss%2B%E9%9B%AA@localhost/db?sslmode=require",
+                    "p@ss+雪",
+                ),
+                (
+                    "postgresql://reviewer:discarded@localhost/db?password=query+secret&sslmode=require",
+                    "query+secret",
+                ),
+            ] {
+                let command = pg_command(program, url).unwrap();
+                assert_eq!(
+                    command.get_args().next().unwrap(),
+                    "--dbname=postgresql://reviewer@localhost/db?sslmode=require"
+                );
+                let (_, password) = command
+                    .get_envs()
+                    .find(|(key, _)| *key == "PGPASSWORD")
+                    .unwrap();
+                assert_eq!(password.unwrap(), expected_password);
+            }
+        }
+        let command = pg_command("psql", "postgresql://localhost/db").unwrap();
+        assert!(command.get_envs().next().is_none());
+        let local = pg_command("psql", "postgresql:///db?host=%2Ftmp").unwrap();
+        assert_eq!(
+            local.get_args().next().unwrap(),
+            "--dbname=postgresql:///db?host=%2Ftmp"
+        );
+        let empty = pg_command("psql", "postgresql://localhost/db?password=").unwrap();
+        assert_eq!(empty.get_envs().next().unwrap().1.unwrap(), "");
+        assert_eq!(
+            pg_command("psql", "invalid secret-password").unwrap_err(),
+            "invalid PostgreSQL connection URL"
+        );
+    }
+
+    #[test]
+    fn pg_command_refuses_a_client_key_passphrase_without_echoing_it() {
+        for program in ["pg_dump", "psql"] {
+            for url in [
+                "postgresql://reviewer@localhost/db?sslmode=verify-full&sslpassword=key-passphrase-7731",
+                "postgresql://reviewer:pw@localhost/db?sslpassword=key-passphrase-7731&sslmode=require",
+                "postgresql://reviewer@localhost/db?%73slpassword=key-passphrase-7731",
+            ] {
+                let error = pg_command(program, url).unwrap_err();
+                assert_eq!(
+                    error,
+                    "PostgreSQL connection URL sets sslpassword, which backup and restore cannot \
+                     pass to pg_dump/psql without exposing it in process arguments; use a client \
+                     key without a passphrase"
+                );
+                assert!(!error.contains("key-passphrase-7731"));
+            }
+        }
+    }
 }

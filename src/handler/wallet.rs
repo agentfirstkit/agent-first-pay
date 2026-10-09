@@ -166,7 +166,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             let meta = metadata_from_wallet_create(&info, &request);
                             let _ = store.save_wallet_metadata(&meta);
                         }
-                        finalize_idempotent(
+                        let _ = finalize_idempotent(
                             app,
                             idem_ctx.as_ref(),
                             IdempotentReplayPayload::WalletCreated {
@@ -189,12 +189,12 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             .await;
                     }
                     Err(e) => {
-                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                         emit_error(&app.writer, Some(id), &e, start).await;
                     }
                 },
                 None => {
-                    clear_idempotent(app, idem_ctx.as_ref()).await;
+                    let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                     emit_error(
                         &app.writer,
                         Some(id),
@@ -268,7 +268,7 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             let meta = metadata_from_ln_wallet_create(&info, &request_for_meta);
                             let _ = store.save_wallet_metadata(&meta);
                         }
-                        finalize_idempotent(
+                        let _ = finalize_idempotent(
                             app,
                             idem_ctx.as_ref(),
                             IdempotentReplayPayload::WalletCreated {
@@ -291,12 +291,12 @@ pub(crate) async fn dispatch_wallet(app: &App, input: Input) {
                             .await;
                     }
                     Err(e) => {
-                        clear_idempotent(app, idem_ctx.as_ref()).await;
+                        let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                         emit_error(&app.writer, Some(id), &e, start).await;
                     }
                 },
                 None => {
-                    clear_idempotent(app, idem_ctx.as_ref()).await;
+                    let _ = clear_idempotent(app, idem_ctx.as_ref()).await;
                     emit_error(
                         &app.writer,
                         Some(id),

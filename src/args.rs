@@ -10,10 +10,13 @@
 use crate::mode::rest::RestInit;
 use crate::types::*;
 use agent_first_data::{
-    ArgSpec, ArgSyntax, ArgValueType, BoundOutcome, BuiltCliSpec, CliSpec, CliSpecError, CliValue,
-    Combination, CommandSpec, OutputFormat, OutputSpec, ResolvedInvocation, SourceSet,
-    build_afdata_cli, cli_help_event, cli_parse_output, cli_version_event, render_cli_reference,
+    ArgSpec, BoundOutcome, BuiltCliSpec, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,
+    OutputFormat, OutputSpec, ResolvedInvocation, SourceSet, build_afdata_cli, cli_help_event,
+    cli_parse_output, cli_version_event, render_cli_reference,
 };
+#[cfg(feature = "interactive")]
+use agent_first_data::{ArgSyntax, ArgValueType};
+#[cfg(feature = "ui")]
 use agent_first_ui::cli::UiDeliveryOffer;
 // The unbound registry still resolves to `CliOutcome`; only the parts of this
 // file that reuse it without a handler binding need the name.
@@ -67,6 +70,7 @@ pub enum Mode {
     /// Schemas the HTTP API is described by.
     #[cfg(feature = "rest")]
     ApiExport(ApiExportRequest),
+    #[cfg(feature = "ui")]
     Ui(Box<UiInit>),
     Data(DataOp),
     SkillAdmin(SkillAdminRequest),
@@ -210,6 +214,7 @@ pub struct InteractiveInit {
 /// `balance`, so the window and the agent read one request. What differs is
 /// only the ending — a person closing a window instead of a result on stdout.
 #[allow(dead_code)]
+#[cfg(feature = "ui")]
 pub struct UiInit {
     pub input: Input,
     /// What the person typed as `--mode`, unresolved. `None` means they typed
@@ -793,9 +798,13 @@ fn build_cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
 /// Each session is its own shape, so the arguments that only configure the HTTP
 /// daemon cannot be passed to the REPL, and vice versa.
 fn root_command() -> CommandSpec {
-    let mut modes = vec!["pipe", "interactive", "tui"];
+    let modes = vec!["pipe", "interactive", "tui"];
     #[cfg(feature = "rest")]
-    modes.push("rest");
+    let modes = {
+        let mut modes = modes;
+        modes.push("rest");
+        modes
+    };
 
     let mut command =
         CommandSpec::new(Vec::<String>::new())
@@ -1592,6 +1601,7 @@ fn skill_command(verb: &str, about: &str, force: bool) -> CommandSpec {
 /// against this machine's wallets. Driving another node is what
 /// `<verb> --peer-url` is for. `--dry-run` is absent for the same reason it
 /// is meaningless here — a panel is not a result to preview.
+#[cfg(feature = "ui")]
 fn ui_commands() -> Vec<CommandSpec> {
     vec![
         group(
@@ -1625,13 +1635,20 @@ fn ui_commands() -> Vec<CommandSpec> {
     ]
 }
 
+#[cfg(not(feature = "ui"))]
+fn ui_commands() -> Vec<CommandSpec> {
+    Vec::new()
+}
+
 /// The network a `ui` panel works on, fixed to one value by every shape.
+#[cfg(feature = "ui")]
 fn ui_network_arg(about: &str) -> ArgSpec {
     ArgSpec::option_enum("--network", NETWORKS)
         .value_name("NETWORK")
         .about(about)
 }
 
+#[cfg(feature = "ui")]
 fn ui_shape(id: &str, action: &str, network: &str, about: &str) -> Combination {
     Combination::new(format!("ui-{id}-{network}"))
         .action(action)
@@ -1646,6 +1663,7 @@ fn ui_shape(id: &str, action: &str, network: &str, about: &str) -> Combination {
 ///
 /// The same value builds the flag here and the plan in `mode::ui`, so the
 /// words in `--help` and the deliveries that actually work cannot drift.
+#[cfg(feature = "ui")]
 pub(crate) const WATCH_PANEL_DELIVERY: UiDeliveryOffer = UiDeliveryOffer::WithLink;
 
 /// A panel that *authorizes* a payment may not. AFUI's link URL is a bearer
@@ -1653,6 +1671,7 @@ pub(crate) const WATCH_PANEL_DELIVERY: UiDeliveryOffer = UiDeliveryOffer::WithLi
 /// approve from their phone can still register the session and reach it
 /// through `afui session serve`, which is AFUI's own front door rather than a
 /// URL that is itself the credential.
+#[cfg(feature = "ui")]
 pub(crate) const DECISION_PANEL_DELIVERY: UiDeliveryOffer = UiDeliveryOffer::Local;
 
 /// `afpay ui receive`: the address or invoice, drawn as a code to scan.
@@ -1664,6 +1683,7 @@ pub(crate) const DECISION_PANEL_DELIVERY: UiDeliveryOffer = UiDeliveryOffer::Loc
 /// window is the wait: the code is on screen the moment it opens, and the
 /// person closes it when they have been paid. An agent that needs the blocking
 /// form still has `<net> receive --wait`, which returns a result it can read.
+#[cfg(feature = "ui")]
 fn ui_receive_command() -> CommandSpec {
     CommandSpec::new(["ui", "receive"])
         .about("Open a panel showing the receive address or invoice as a code to scan")
@@ -1700,6 +1720,7 @@ fn ui_receive_command() -> CommandSpec {
         )
 }
 
+#[cfg(feature = "ui")]
 fn ui_receive_shape(network: &str, about: &str) -> Combination {
     ui_shape("receive", "ui_receive", network, about)
 }
@@ -1710,6 +1731,7 @@ fn ui_receive_shape(network: &str, about: &str) -> Combination {
 /// Every shape mirrors the `<net> send` it corresponds to, argument for
 /// argument, and resolves through the same builder. The panel is a place to
 /// answer a question about a send, never a second way to describe one.
+#[cfg(feature = "ui")]
 fn ui_send_command() -> CommandSpec {
     let mut command = CommandSpec::new(["ui", "send"])
         .about("Open a panel showing a resolved payment and wait for a person to approve it")
@@ -1771,6 +1793,7 @@ fn ui_send_command() -> CommandSpec {
         )
 }
 
+#[cfg(feature = "ui")]
 fn ui_send_shape(network: &str, about: &str) -> Combination {
     ui_shape("send", "ui_send", network, about)
 }
@@ -1989,7 +2012,7 @@ fn cli() -> Result<&'static BuiltCliSpec, CliError> {
 /// against the registry at startup, so a shape without a handler — or a handler
 /// without a shape — fails before any argv is read.
 fn action_ids() -> Vec<&'static str> {
-    let mut ids = vec![
+    let ids = vec![
         "mode_pipe",
         "mode_interactive",
         "mode_tui",
@@ -2030,8 +2053,11 @@ fn action_ids() -> Vec<&'static str> {
         "btc_receive",
         "balance",
         "pay_confirm",
+        #[cfg(feature = "ui")]
         "ui_wallet",
+        #[cfg(feature = "ui")]
         "ui_receive",
+        #[cfg(feature = "ui")]
         "ui_send",
         "history_list",
         "history_status",
@@ -2049,10 +2075,12 @@ fn action_ids() -> Vec<&'static str> {
         "container_logs",
     ];
     #[cfg(feature = "rest")]
-    {
+    let ids = {
+        let mut ids = ids;
         ids.push("mode_rest");
         ids.push("api_export");
-    }
+        ids
+    };
     ids
 }
 
@@ -2153,6 +2181,7 @@ fn opt_usize(invocation: &ResolvedInvocation, id: &str) -> Result<Option<usize>,
 
 /// The `--mode` word a person typed. Absent means absent — see
 /// [`UiInit::delivery`].
+#[cfg(feature = "ui")]
 fn delivery_of(
     invocation: &ResolvedInvocation,
 ) -> Result<Option<agent_first_ui::UiDeliveryMode>, CliError> {
@@ -2375,7 +2404,12 @@ fn resolve_peer_args(
 // Entry point
 // ═══════════════════════════════════════════
 
-pub fn parse_args() -> Result<Mode, CliError> {
+pub struct Parsed {
+    pub mode: Mode,
+    pub redirect: Option<agent_first_data::stream_redirect::InstalledStreamRedirect>,
+}
+
+pub fn parse_args() -> Result<Parsed, CliError> {
     let cli = cli()?;
     let handlers = action_ids()
         .into_iter()
@@ -2390,7 +2424,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
         // `error.code`, so there is no generic `cli_error` to branch on.
         Err(error) => {
             let event = agent_first_data::cli_error_event(&error);
-            if crate::output_fmt::emit_process_event(event.into(), OutputFormat::Json).is_err() {
+            if crate::output_fmt::emit_stderr_error(event.into()).is_err() {
                 std::process::exit(4);
             }
             std::process::exit(error.exit_code().into());
@@ -2398,14 +2432,20 @@ pub fn parse_args() -> Result<Mode, CliError> {
     };
 
     match outcome {
-        BoundOutcome::Run(invocation) => invocation.run(),
+        BoundOutcome::Run(invocation) => {
+            let redirect = install_output_plan_or_exit(invocation.output_plan());
+            let mode = invocation.run()?;
+            Ok(Parsed { mode, redirect })
+        }
         // `--docs` renders the whole registry as raw Markdown, so it carries no
         // format of its own and never becomes a protocol event.
-        BoundOutcome::Docs(_) => {
+        BoundOutcome::Docs(docs) => {
+            let _redirect = install_output_plan_or_exit(docs.output_plan());
             write_or_exit(&render_cli_reference(cli));
             std::process::exit(0);
         }
         BoundOutcome::Help(help) => {
+            let _redirect = install_output_plan_or_exit(help.output_plan());
             if format_of_plan(help.output_plan()) == OutputFormat::Plain {
                 write_or_exit(&help.plain());
             } else {
@@ -2417,6 +2457,7 @@ pub fn parse_args() -> Result<Mode, CliError> {
             std::process::exit(0);
         }
         BoundOutcome::Version(version) => {
+            let _redirect = install_output_plan_or_exit(version.output_plan());
             emit_or_exit(
                 cli_version_event(&version).into(),
                 format_of_plan(version.output_plan()),
@@ -2424,6 +2465,32 @@ pub fn parse_args() -> Result<Mode, CliError> {
             std::process::exit(0);
         }
     }
+}
+
+fn install_output_plan_or_exit(
+    plan: &agent_first_data::OutputPlan,
+) -> Option<agent_first_data::stream_redirect::InstalledStreamRedirect> {
+    let redirect = match agent_first_data::stream_redirect::install_from_plan(plan) {
+        Ok(redirect) => redirect,
+        Err(error) => exit_output_setup_failed(&error.to_string()),
+    };
+    if let Err(error) = crate::output_fmt::install_output_to(
+        plan.output_to()
+            .unwrap_or(agent_first_data::OutputTo::Split),
+    ) {
+        // Restore the original streams before reporting a setup failure.
+        drop(redirect);
+        exit_output_setup_failed(&error);
+    }
+    redirect
+}
+
+fn exit_output_setup_failed(message: &str) -> ! {
+    let event = crate::output_fmt::coded_error_event("output_setup_failed", message, None);
+    if crate::output_fmt::emit_stderr_error(event).is_err() {
+        std::process::exit(4);
+    }
+    std::process::exit(1);
 }
 
 fn format_of_plan(plan: &agent_first_data::OutputPlan) -> OutputFormat {
@@ -2491,6 +2558,7 @@ fn dispatch(invocation: &ResolvedInvocation) -> Result<Mode, CliError> {
                 output: format_of(invocation),
             }))
         }
+        #[cfg(feature = "ui")]
         "ui_wallet" | "ui_receive" | "ui_send" => {
             let id = crate::store::wallet::generate_request_identifier()
                 .map_err(|error| CliError::new("request_id_unavailable", error.to_string()))?;
@@ -2872,6 +2940,7 @@ fn network_send_input(
 /// Every such shape pins exactly one, so the only way this fails is a registry
 /// edit that forgot to — reported as a value error rather than defaulted to a
 /// network the caller never named.
+#[cfg(feature = "ui")]
 fn ui_network_of(invocation: &ResolvedInvocation) -> Result<Network, CliError> {
     network_from_str(&req_str(invocation, "network"))
         .ok_or_else(|| CliError::invalid_value("--network must be one of cashu, ln, sol, evm, btc"))
@@ -3127,7 +3196,9 @@ fn invocation_to_input(invocation: &ResolvedInvocation, id: &str) -> Result<Inpu
         // from the same flags — the same reason `ui wallet` shares `balance`'s
         // arm. What a person is shown and what an agent asked for are one
         // request, resolved once.
+        #[cfg(feature = "ui")]
         "ui_receive" => network_receive_input(invocation, id, ui_network_of(invocation)?),
+        #[cfg(feature = "ui")]
         "ui_send" => network_send_input(invocation, id, ui_network_of(invocation)?),
         other => Err(CliError::new(
             "cli_action_unreachable",
@@ -4190,6 +4261,7 @@ mod tests {
     /// arm, so the window an agent's person is looking at and the result the
     /// agent read cannot describe different money.
     #[test]
+    #[cfg(feature = "ui")]
     fn the_wallet_panel_and_afpay_balance_build_the_same_request() {
         let flags = ["--wallet", "w_abc", "--network", "sol", "--cashu-check"];
         let mut balance_argv = vec!["balance"];
@@ -4212,6 +4284,7 @@ mod tests {
     /// a result and exits, the other blocks until a person closes a window, and
     /// one verb cannot own both endings.
     #[test]
+    #[cfg(feature = "ui")]
     fn the_panel_is_its_own_verb_rather_than_a_flag_on_balance() {
         assert_eq!(
             rejection(&["afpay", "balance", "--ui"]).rule,
@@ -4244,6 +4317,7 @@ mod tests {
     /// The receive panel is a second *ending* for `<net> receive`, never a
     /// second data path.
     #[test]
+    #[cfg(feature = "ui")]
     fn the_receive_panel_and_afpay_receive_build_the_same_request() {
         // One case per network, because each `<net> receive` accepts a
         // different argument set and the panel mirrors each of them.
@@ -4294,6 +4368,7 @@ mod tests {
     /// panel the open window is the wait, so the flag is simply not part of the
     /// command — accepted-then-rejected is the failure `evm receive` already had.
     #[test]
+    #[cfg(feature = "ui")]
     fn the_receive_panel_has_no_wait() {
         for argument in ["--wait", "--wait-timeout-s", "--wait-poll-interval-ms"] {
             assert_eq!(
@@ -4321,6 +4396,7 @@ mod tests {
     /// A second destination builder is not a maintenance cost here, it is a way
     /// to pay the wrong address.
     #[test]
+    #[cfg(feature = "ui")]
     fn the_send_panel_and_afpay_send_build_the_same_request() {
         for (network, verb, flags) in [
             (
@@ -4390,6 +4466,7 @@ mod tests {
     /// Argument applicability follows the network on the panel exactly as it
     /// does on the command, so a shape cannot accept a value it would ignore.
     #[test]
+    #[cfg(feature = "ui")]
     fn the_send_panel_rejects_arguments_the_network_has_no_use_for() {
         // Lightning carries no on-chain memo, and `ln send` does not offer one.
         assert_eq!(

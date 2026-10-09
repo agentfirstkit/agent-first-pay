@@ -418,6 +418,9 @@ pub struct CashuSendResult {
     pub status: TxStatus,
     pub fee: Option<Amount>,
     pub token: String,
+    /// At least one node could not persist this successful payment's replay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotency_finalize_failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -519,6 +522,9 @@ pub struct SendResult {
     pub amount: Amount,
     pub fee: Option<Amount>,
     pub preimage: Option<String>,
+    /// At least one node could not persist this successful payment's replay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotency_finalize_failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -5,7 +5,7 @@ use crate::store::{PayStore, StorageBackend};
 use crate::types::*;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::{Provider, ProviderBuilder, SendableTx};
 use alloy::signers::local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use async_trait::async_trait;
 use bip39::Mnemonic;
@@ -28,7 +28,7 @@ fn evm_wallet_summary(meta: WalletMetadata, address: String) -> WalletSummary {
 
 pub struct EvmProvider {
     _data_dir: String,
-    http_client: reqwest::Client,
+    http_client: Result<reqwest::Client, String>,
     store: Arc<StorageBackend>,
 }
 
@@ -55,10 +55,16 @@ struct EvmTransferTarget {
 }
 
 impl EvmProvider {
+    fn http_client(&self) -> Result<&reqwest::Client, PayError> {
+        self.http_client
+            .as_ref()
+            .map_err(|error| PayError::internal_error(error.clone()))
+    }
+
     pub fn new(data_dir: &str, store: Arc<StorageBackend>) -> Self {
         Self {
             _data_dir: data_dir.to_string(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::provider::bounded_http_client(true),
             store,
         }
     }
@@ -272,7 +278,7 @@ impl EvmProvider {
                 "params": [address, "latest"],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
@@ -340,7 +346,7 @@ impl EvmProvider {
                 ],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
@@ -439,7 +445,8 @@ impl EvmProvider {
             "id": 1
         });
         let resp = self
-            .http_client
+            .http_client()
+            .map_err(|error| error.to_string())?
             .post(endpoint)
             .json(&body)
             .send()
@@ -493,11 +500,28 @@ impl EvmProvider {
                     continue;
                 }
             };
-            let gas = u128::from_str_radix(gas_hex.strip_prefix("0x").unwrap_or(&gas_hex), 16)
-                .unwrap_or(21000);
-            let price =
-                u128::from_str_radix(price_hex.strip_prefix("0x").unwrap_or(&price_hex), 16)
-                    .unwrap_or(0);
+            let gas = match u128::from_str_radix(gas_hex.strip_prefix("0x").unwrap_or(&gas_hex), 16)
+            {
+                Ok(gas) => gas,
+                Err(error) => {
+                    last_error = Some(format!(
+                        "endpoint={endpoint} eth_estimateGas: invalid hex quantity: {error}"
+                    ));
+                    continue;
+                }
+            };
+            let price = match u128::from_str_radix(
+                price_hex.strip_prefix("0x").unwrap_or(&price_hex),
+                16,
+            ) {
+                Ok(price) => price,
+                Err(error) => {
+                    last_error = Some(format!(
+                        "endpoint={endpoint} eth_gasPrice: invalid hex quantity: {error}"
+                    ));
+                    continue;
+                }
+            };
             let fee_wei = gas
                 .checked_mul(price)
                 .ok_or_else(|| PayError::InvalidAmount {
@@ -532,7 +556,7 @@ impl EvmProvider {
                 "params": [],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -574,7 +598,7 @@ impl EvmProvider {
                 "params": [tx_hash],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -616,7 +640,7 @@ impl EvmProvider {
                 "params": [tx_hash],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -661,7 +685,7 @@ impl EvmProvider {
                 "params": [block_hex, true],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -704,7 +728,7 @@ impl EvmProvider {
                 "params": [block_hex, false],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -767,7 +791,7 @@ impl EvmProvider {
                 }],
                 "id": 1
             });
-            match self.http_client.post(endpoint).json(&body).send().await {
+            match self.http_client()?.post(endpoint).json(&body).send().await {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -1473,9 +1497,35 @@ impl PayProvider for EvmProvider {
 
         let signer = Self::wallet_signer(&meta)?;
 
-        let mut last_error: Option<String> = None;
-        let mut transaction_id: Option<String> = None;
+        let request = if let Some(token_contract) = transfer_target.token_contract {
+            // ERC-20 transfer
+            let call_data = append_memo_payload(
+                encode_erc20_transfer(
+                    transfer_target.recipient_address,
+                    transfer_target.amount_wei,
+                ),
+                memo_bytes.as_deref(),
+            );
+            alloy::rpc::types::TransactionRequest::default()
+                .to(token_contract)
+                .input(call_data.into())
+        } else {
+            // Native ETH transfer (memo as raw calldata bytes)
+            let mut tx = alloy::rpc::types::TransactionRequest::default()
+                .to(transfer_target.recipient_address)
+                .value(transfer_target.amount_wei);
+            if let Some(memo) = memo_payload {
+                tx = tx.input(memo.to_vec().into());
+            }
+            tx
+        };
 
+        // Filling nonce, gas and chain id only reads from the endpoint, so any
+        // endpoint may do it. The transaction is then signed exactly once and
+        // every broadcast below carries the same raw bytes and the same nonce.
+        let wallet = EthereumWallet::from(signer.clone());
+        let mut last_error: Option<String> = None;
+        let mut envelope = None;
         for endpoint in &endpoints {
             let url: reqwest::Url = match endpoint.parse() {
                 Ok(u) => u,
@@ -1484,50 +1534,64 @@ impl PayProvider for EvmProvider {
                     continue;
                 }
             };
-            let wallet = EthereumWallet::from(signer.clone());
-            let provider = ProviderBuilder::new().wallet(wallet).connect_http(url);
-
-            let tx_result = if let Some(token_contract) = transfer_target.token_contract {
-                // ERC-20 transfer
-                let call_data = append_memo_payload(
-                    encode_erc20_transfer(
-                        transfer_target.recipient_address,
-                        transfer_target.amount_wei,
-                    ),
-                    memo_bytes.as_deref(),
-                );
-                let tx = alloy::rpc::types::TransactionRequest::default()
-                    .to(token_contract)
-                    .input(call_data.into());
-                provider.send_transaction(tx).await
-            } else {
-                // Native ETH transfer (memo as raw calldata bytes)
-                let mut tx = alloy::rpc::types::TransactionRequest::default()
-                    .to(transfer_target.recipient_address)
-                    .value(transfer_target.amount_wei);
-                if let Some(memo) = memo_payload {
-                    tx = tx.input(memo.to_vec().into());
+            let provider = ProviderBuilder::new()
+                .wallet(wallet.clone())
+                .connect_reqwest(self.http_client()?.clone(), url);
+            let filled = match provider.fill(request.clone()).await {
+                Ok(SendableTx::Envelope(signed)) => signed,
+                Ok(SendableTx::Builder(_)) => {
+                    last_error = Some(format!(
+                        "endpoint={endpoint} fill transaction: wallet filler returned an unsigned request"
+                    ));
+                    continue;
                 }
-                provider.send_transaction(tx).await
+                Err(e) => {
+                    last_error = Some(format!("endpoint={endpoint} fill transaction: {e}"));
+                    continue;
+                }
             };
+            envelope = Some(filled);
+            break;
+        }
+        let envelope = envelope.ok_or_else(|| {
+            PayError::network_not_submitted(format!(
+                "all evm rpc endpoints failed for withdraw: {}",
+                last_error.clone().unwrap_or_default()
+            ))
+        })?;
+        let tx_hash = format!("{:?}", envelope.tx_hash());
 
-            match tx_result {
-                Ok(pending) => {
-                    let tx_hash = format!("{:?}", pending.tx_hash());
-                    transaction_id = Some(tx_hash);
+        // Re-broadcasting identical signed bytes cannot create a second
+        // payment: the nonce is already spent by this transaction. A failed
+        // call may still have reached its endpoint, so once any broadcast was
+        // attempted the outcome is unknown rather than failed.
+        let mut transaction_id: Option<String> = None;
+        for endpoint in &endpoints {
+            let url: reqwest::Url = match endpoint.parse() {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let provider = ProviderBuilder::new().connect_reqwest(self.http_client()?.clone(), url);
+            match provider.send_tx_envelope(envelope.clone()).await {
+                Ok(_pending) => {
+                    transaction_id = Some(tx_hash.clone());
                     break;
                 }
                 Err(err) => {
-                    last_error = Some(format!("endpoint={endpoint} sendTransaction: {err}"));
+                    last_error = Some(format!(
+                        "endpoint={endpoint} sendRawTransaction outcome is unknown: {err}"
+                    ));
                 }
             }
         }
-
         let transaction_id = transaction_id.ok_or_else(|| {
-            PayError::network_error(format!(
-                "all evm rpc endpoints failed for withdraw: {}",
-                last_error.unwrap_or_default()
-            ))
+            PayError::submission_unknown(
+                format!(
+                    "all evm rpc endpoints failed to confirm the broadcast: {}",
+                    last_error.clone().unwrap_or_default()
+                ),
+                Some(tx_hash.clone()),
+            )
         })?;
 
         // Determine amount unit based on whether it's a token or native transfer
@@ -1598,6 +1662,7 @@ impl PayProvider for EvmProvider {
             },
             fee: fee_amount,
             preimage: None,
+            idempotency_finalize_failed: false,
         })
     }
 
@@ -1634,8 +1699,7 @@ impl PayProvider for EvmProvider {
                 &to_addr,
                 data.as_deref(),
             )
-            .await
-            .unwrap_or(0);
+            .await?;
 
         let amount_wei_u64 = u256_to_u64_checked(transfer_target.amount_wei, "amount_wei")?;
         let spend_debits = Self::spend_debits_for_target(&transfer_target, fee_gwei)?;
@@ -2142,5 +2206,33 @@ mod tests {
             error: None,
         };
         assert_eq!(EvmProvider::chain_id_for_wallet(&meta), CHAIN_ID_BASE);
+    }
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn rpc_timeout_advances_to_healthy_endpoint() {
+        let (endpoints, silent, healthy) =
+            super::super::timeout_test_endpoints(serde_json::json!("0x20")).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+        let provider = EvmProvider::new(
+            path,
+            std::sync::Arc::new(crate::store::StorageBackend::Redb(
+                crate::store::redb_store::RedbStore::new(path),
+            )),
+        );
+        let started = std::time::Instant::now();
+        let value = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            provider
+                .get_balance_raw(&endpoints, "0x0000000000000000000000000000000000000001")
+                .await
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, alloy::primitives::U256::from(32));
+        assert!(started.elapsed() >= std::time::Duration::from_secs(14));
+        assert!(started.elapsed() < std::time::Duration::from_secs(45));
+        silent.await.unwrap();
+        healthy.await.unwrap();
     }
 }

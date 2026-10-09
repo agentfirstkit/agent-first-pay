@@ -39,6 +39,11 @@
         "null"
       ]
     },
+    "idempotency_finalize_failed": {
+      "default": false,
+      "description": "Payment succeeded but at least one node could not persist its replay.",
+      "type": "boolean"
+    },
     "preimage": {
       "description": "Lightning payment preimage, when the backend returned one.",
       "type": [

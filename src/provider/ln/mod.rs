@@ -609,6 +609,11 @@ impl PayProvider for LnProvider {
         let resolved = self.resolve_wallet_id(wallet_id)?;
         let meta = self.load_ln_wallet(&resolved)?;
         let backend = self.resolve_backend(&meta)?;
+        let invoice_payment_hash = if is_bolt12_offer(to) {
+            None
+        } else {
+            Some(parse_bolt11_payment_hash(to)?)
+        };
 
         let result = if is_bolt12_offer(to) {
             let (offer, amount_opt) = parse_bolt12_offer_parts(to);
@@ -620,21 +625,31 @@ impl PayProvider for LnProvider {
             })?;
             backend.pay_offer(&offer, amount_sats, None).await?
         } else {
-            backend.pay_invoice(to, None).await?
+            backend.pay_invoice(to, None).await.map_err(|error| {
+                if error.retryable() || matches!(&error, PayError::SubmissionUnknown { .. }) {
+                    let recovery_id = error
+                        .submission_transaction_id()
+                        .map(str::to_string)
+                        .or_else(|| invoice_payment_hash.clone());
+                    PayError::submission_unknown(error.to_string(), recovery_id)
+                } else {
+                    error
+                }
+            })?
         };
 
         let transaction_id = if is_bolt12_offer(to) {
             wallet::generate_transaction_identifier().unwrap_or_else(|_| "tx_unknown".to_string())
         } else {
-            parse_bolt11_payment_hash(to).unwrap_or_else(|_| {
-                wallet::generate_transaction_identifier()
-                    .unwrap_or_else(|_| "tx_unknown".to_string())
-            })
+            invoice_payment_hash
+                .clone()
+                .ok_or_else(|| PayError::internal_error("invoice payment hash was not resolved"))?
         };
 
         if result.confirmed_amount_sats == 0 {
-            return Err(PayError::network_error(
-                "backend did not return confirmed payment amount".to_string(),
+            return Err(PayError::submission_unknown(
+                "backend did not return confirmed payment amount",
+                invoice_payment_hash,
             ));
         }
 
@@ -675,6 +690,7 @@ impl PayProvider for LnProvider {
             amount,
             fee: fee_amount,
             preimage: result.preimage,
+            idempotency_finalize_failed: false,
         })
     }
 

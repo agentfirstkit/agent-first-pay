@@ -559,7 +559,7 @@ enum Classified {
 ///
 /// Two of afpay's outputs are refusals the protocol carries as results:
 /// `limit_exceeded` (a spend rule said no) and `accounting_inconsistent`
-/// (money left but the ledger could not record it). Shipping either as a 200
+/// (submission is unknown or the ledger could not confirm it). Shipping either as a 200
 /// result would report a business outcome that did not happen, so both become
 /// error envelopes carrying their payload as typed detail.
 fn classify(mut event: Value) -> Classified {
@@ -595,10 +595,10 @@ fn classify(mut event: Value) -> Classified {
         "accounting_inconsistent" => Classified::Error(
             ApiError::new(
                 "accounting_inconsistent",
-                "the payment reached the network but the spend ledger could not record it",
+                "payment submission or spend accounting is unresolved",
             )
             .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .hint("do not retry: the money already moved. Reconcile the named reservations on the daemon host before sending again")
+            .hint("do not submit this payment again; inspect the provider outcome and reconcile the named reservations on the daemon host")
             .details(payload),
         ),
         _ => Classified::Result(payload),

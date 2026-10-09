@@ -7,8 +7,9 @@ use crate::types::BalanceInfo;
 use async_trait::async_trait;
 use nostr_wallet_connect::NWC;
 use nostr_wallet_connect::nostr::nips::nip47::{
-    ListTransactionsRequest, LookupInvoiceRequest, MakeInvoiceRequest, NostrWalletConnectURI,
-    PayInvoiceRequest, TransactionState, TransactionType,
+    ListTransactionsRequest, LookupInvoiceRequest, LookupInvoiceResponse, MakeInvoiceRequest,
+    NostrWalletConnectURI, PayInvoiceRequest, PayInvoiceResponse, TransactionState,
+    TransactionType,
 };
 
 pub(crate) struct NwcBackend {
@@ -25,6 +26,68 @@ impl NwcBackend {
     }
 }
 
+// Only the irreversible payment and its optional enrichment share this seam.
+#[async_trait]
+trait NwcInvoiceClient: Sync {
+    async fn pay(&self, request: PayInvoiceRequest) -> Result<PayInvoiceResponse, PayError>;
+    async fn lookup(
+        &self,
+        request: LookupInvoiceRequest,
+    ) -> Result<LookupInvoiceResponse, PayError>;
+}
+
+#[async_trait]
+impl NwcInvoiceClient for NWC {
+    async fn pay(&self, request: PayInvoiceRequest) -> Result<PayInvoiceResponse, PayError> {
+        self.pay_invoice(request)
+            .await
+            .map_err(|error| PayError::network_error(format!("nwc pay_invoice: {error}")))
+    }
+    async fn lookup(
+        &self,
+        request: LookupInvoiceRequest,
+    ) -> Result<LookupInvoiceResponse, PayError> {
+        self.lookup_invoice(request)
+            .await
+            .map_err(|error| PayError::network_error(format!("nwc lookup_invoice: {error}")))
+    }
+}
+
+async fn pay_invoice_with_client(
+    client: &impl NwcInvoiceClient,
+    bolt11: &str,
+    amount_msats: Option<u64>,
+) -> Result<LnPayResult, PayError> {
+    let fallback_amount_sats = parse_bolt11_amount_sats(bolt11)?;
+    let paid = client
+        .pay(PayInvoiceRequest {
+            id: None,
+            invoice: bolt11.to_owned(),
+            amount: amount_msats,
+        })
+        .await?;
+    let lookup = client
+        .lookup(LookupInvoiceRequest {
+            payment_hash: None,
+            invoice: Some(bolt11.to_owned()),
+        })
+        .await
+        .ok();
+    let confirmed_amount_sats = lookup
+        .filter(|lookup| lookup.amount > 0)
+        .map(|lookup| lookup.amount.saturating_add(999) / 1000)
+        .unwrap_or(fallback_amount_sats);
+    Ok(LnPayResult {
+        confirmed_amount_sats,
+        fee_msats: paid.fees_paid,
+        preimage: if paid.preimage.is_empty() {
+            None
+        } else {
+            Some(paid.preimage)
+        },
+    })
+}
+
 #[async_trait]
 impl LnBackend for NwcBackend {
     async fn pay_invoice(
@@ -32,39 +95,7 @@ impl LnBackend for NwcBackend {
         bolt11: &str,
         amount_msats: Option<u64>,
     ) -> Result<LnPayResult, PayError> {
-        let req = PayInvoiceRequest {
-            id: None,
-            invoice: bolt11.to_string(),
-            amount: amount_msats,
-        };
-        let res = self
-            .client
-            .pay_invoice(req)
-            .await
-            .map_err(|e| PayError::network_error(format!("nwc pay_invoice: {e}")))?;
-        let lookup_req = LookupInvoiceRequest {
-            payment_hash: None,
-            invoice: Some(bolt11.to_string()),
-        };
-        let lookup = self
-            .client
-            .lookup_invoice(lookup_req)
-            .await
-            .map_err(|e| PayError::network_error(format!("nwc lookup_invoice: {e}")))?;
-        let confirmed_amount_sats = if lookup.amount > 0 {
-            lookup.amount.saturating_add(999) / 1000
-        } else {
-            parse_bolt11_amount_sats(bolt11)?
-        };
-        Ok(LnPayResult {
-            confirmed_amount_sats,
-            fee_msats: res.fees_paid,
-            preimage: if res.preimage.is_empty() {
-                None
-            } else {
-                Some(res.preimage)
-            },
-        })
+        pay_invoice_with_client(&self.client, bolt11, amount_msats).await
     }
 
     async fn create_invoice(
@@ -160,5 +191,34 @@ impl LnBackend for NwcBackend {
                 preimage: t.preimage,
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct PaidWithoutLookup(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl NwcInvoiceClient for PaidWithoutLookup {
+        async fn pay(&self, _: PayInvoiceRequest) -> Result<PayInvoiceResponse, PayError> {
+            assert_eq!(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0);
+            Ok(PayInvoiceResponse {
+                preimage: "receipt-preimage".into(),
+                fees_paid: Some(2000),
+            })
+        }
+        async fn lookup(&self, _: LookupInvoiceRequest) -> Result<LookupInvoiceResponse, PayError> {
+            assert_eq!(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 1);
+            Err(PayError::network_error("lookup connection lost"))
+        }
+    }
+    #[tokio::test]
+    async fn paid_invoice_survives_nwc_lookup_failure() {
+        let client = PaidWithoutLookup(std::sync::atomic::AtomicUsize::new(0));
+        let result = pay_invoice_with_client(&client, "lnbc100n1p5z3a63pp56854ytysg7e5z9fl3w5mgvrlqjfcytnjv8ff5hm5qt6gl6alxesqdqqcqzzsxqyz5vqsp5p0x0dlhn27s63j4emxnk26p7f94u0lyarnfp5yqmac9gzy4ngdss9qxpqysgqne3v0hnzt2lp0hc69xpzckk0cdcar7glvjhq60lsrfe8gejdm8c564prrnsft6ctxxyrewp4jtezrq3gxxqnfjj0f9tw2qs9y0lslmqpfu7et9", None).await.unwrap();
+        assert_eq!(result.confirmed_amount_sats, 10);
+        assert_eq!(result.preimage.as_deref(), Some("receipt-preimage"));
+        assert_eq!(result.fee_msats, Some(2000));
+        assert_eq!(client.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

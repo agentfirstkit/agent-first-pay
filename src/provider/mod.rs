@@ -23,7 +23,7 @@ use std::fmt;
 // PayError
 // ═══════════════════════════════════════════
 //
-// All variants carry a structured `hint: Option<String>` so agents can recover
+// Every variant exposes an actionable hint so agents can recover
 // programmatically. Constructor helpers (`not_implemented`, `wallet_not_found`, …)
 // keep ergonomic call-sites short; pass an explicit struct literal when a call-site
 // has a more specific hint than the default returned by `hint()`.
@@ -47,6 +47,16 @@ pub enum PayError {
         message: String,
         hint: Option<String>,
         retry_after_ms: Option<u64>,
+    },
+    /// Preparation failed before signing or submission. It is safe to retry.
+    NetworkNotSubmitted {
+        message: String,
+    },
+    /// Submission began, but the provider cannot establish whether it completed.
+    /// A recovery identifier is included only when it is actually known.
+    SubmissionUnknown {
+        message: String,
+        transaction_id: Option<String>,
     },
     InternalError {
         message: String,
@@ -137,7 +147,10 @@ impl fmt::Display for PayError {
             Self::NotImplemented { message, .. } => write!(f, "{message}"),
             Self::WalletNotFound { wallet, .. } => write!(f, "wallet not found: {wallet}"),
             Self::InvalidAmount { message, .. } => write!(f, "{message}"),
-            Self::NetworkError { message, .. } => write!(f, "{message}"),
+            Self::NetworkError { message, .. } | Self::NetworkNotSubmitted { message } => {
+                write!(f, "{message}")
+            }
+            Self::SubmissionUnknown { message, .. } => write!(f, "{message}"),
             Self::InternalError { message, .. } => write!(f, "{message}"),
             Self::LimitExceeded {
                 scope,
@@ -196,7 +209,8 @@ impl PayError {
             Self::NotImplemented { .. } => "not_implemented",
             Self::WalletNotFound { .. } => "wallet_not_found",
             Self::InvalidAmount { .. } => "invalid_amount",
-            Self::NetworkError { .. } => "network_error",
+            Self::NetworkError { .. } | Self::NetworkNotSubmitted { .. } => "network_error",
+            Self::SubmissionUnknown { .. } => "submission_unknown",
             Self::InternalError { .. } => "internal_error",
             Self::LimitExceeded { .. } => "limit_exceeded",
             Self::ConfigureOnDaemon { .. } => "configure_on_daemon",
@@ -212,7 +226,17 @@ impl PayError {
     }
 
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::NetworkError { .. } | Self::Busy { .. })
+        matches!(
+            self,
+            Self::NetworkError { .. } | Self::NetworkNotSubmitted { .. } | Self::Busy { .. }
+        )
+    }
+
+    pub fn submission_transaction_id(&self) -> Option<&str> {
+        match self {
+            Self::SubmissionUnknown { transaction_id, .. } => transaction_id.as_deref(),
+            _ => None,
+        }
     }
 
     /// Optional retry-after hint for caller backoff. Returns Some only for
@@ -236,10 +260,11 @@ impl PayError {
                         .to_string(),
                 )
             }),
-            Self::WalletNotFound { hint, wallet } => hint.clone().or_else(|| {
-                Some(format!(
-                    "wallet `{wallet}` not found; list wallets with `afpay wallet list` or create one with `afpay wallet create`"
-                ))
+            Self::WalletNotFound { hint, .. } => hint.clone().or_else(|| {
+                Some(
+                    "list wallets with `afpay wallet list`, or create one with `afpay <network> wallet create`"
+                        .to_string(),
+                )
             }),
             Self::InvalidAmount { hint, .. } => hint.clone().or_else(|| {
                 Some(
@@ -250,6 +275,10 @@ impl PayError {
             Self::NetworkError { hint, .. } => hint.clone().or_else(|| {
                 Some("transient network failure; retry with exponential backoff".to_string())
             }),
+            Self::NetworkNotSubmitted { .. } => Some("payment was not submitted; retry with exponential backoff".to_owned()),
+            Self::SubmissionUnknown { .. } => Some(
+                "submission outcome is unknown; inspect the provider before reconciling the retained reservation, and do not submit this payment again".to_string(),
+            ),
             Self::InternalError { hint, .. } => hint.clone().or_else(|| {
                 Some(
                     "internal error; rerun with `--log debug` for diagnostics and report if reproducible"
@@ -335,6 +364,19 @@ impl PayError {
             message: message.into(),
             hint: None,
             retry_after_ms: None,
+        }
+    }
+
+    pub fn network_not_submitted(message: impl Into<String>) -> Self {
+        Self::NetworkNotSubmitted {
+            message: message.into(),
+        }
+    }
+
+    pub fn submission_unknown(message: impl Into<String>, transaction_id: Option<String>) -> Self {
+        Self::SubmissionUnknown {
+            message: message.into(),
+            transaction_id,
         }
     }
 
@@ -624,4 +666,54 @@ impl PayProvider for StubProvider {
     async fn history_status(&self, _transaction_id: &str) -> Result<HistoryStatusInfo, PayError> {
         Err(PayError::not_implemented("network not enabled".to_string()))
     }
+}
+
+#[cfg(any(
+    feature = "exchange-rate",
+    feature = "evm",
+    feature = "sol",
+    feature = "ln-phoenixd",
+    feature = "ln-lnbits"
+))]
+pub(crate) fn bounded_http_client(request_timeout: bool) -> Result<reqwest::Client, String> {
+    let mut builder =
+        reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10));
+    if request_timeout {
+        builder = builder.timeout(std::time::Duration::from_secs(15));
+    }
+    builder
+        .build()
+        .map_err(|error| format!("initialize HTTP client: {error}"))
+}
+
+#[cfg(all(test, feature = "redb", any(feature = "evm", feature = "sol")))]
+#[allow(clippy::unwrap_used)]
+async fn timeout_test_endpoints(
+    result: serde_json::Value,
+) -> (
+    Vec<String>,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let healthy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoints = vec![
+        format!("http://{}", silent.local_addr().unwrap()),
+        format!("http://{}", healthy.local_addr().unwrap()),
+    ];
+    let silent_task = tokio::spawn(async move {
+        let (mut stream, _) = silent.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        let _ = stream.read(&mut request).await;
+    });
+    let healthy_task = tokio::spawn(async move {
+        let (mut stream, _) = healthy.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        let body = serde_json::json!({"jsonrpc":"2.0", "id":1, "result":result}).to_string();
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    });
+    (endpoints, silent_task, healthy_task)
 }

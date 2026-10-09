@@ -87,11 +87,11 @@ impl RateLimiter {
             // rate, so no scaling is needed here.
             let add = elapsed * u64::from(self.rps);
             let max = u64::from(self.rps) * 1000;
-            let _ =
-                self.tokens_milli
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        Some(current.saturating_add(add).min(max))
-                    });
+            let _ = self
+                .tokens_milli
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_add(add).min(max))
+                });
         }
     }
 }

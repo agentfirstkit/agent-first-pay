@@ -535,6 +535,9 @@ pub enum Output {
         /// or cancel flows. Empty when no spend limits were enforced.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reservation_ids: Vec<u64>,
+        /// Token creation succeeded, but a node could not persist its replay.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        idempotency_finalize_failed: bool,
         trace: Trace,
     },
 
@@ -616,20 +619,18 @@ pub enum Output {
         trace: Trace,
     },
 
-    /// Emitted when a payment was broadcast to the network successfully but the
-    /// local spend-ledger failed to record its confirmation (e.g. storage I/O
-    /// error mid-flight). The funds left the wallet; the ledger does NOT reflect
-    /// them, so future limit checks under-count the spend. An operator must
-    /// reconcile manually. Agents should treat this as a hard failure and never
-    /// retry the original request — the side-effect already happened.
+    /// Submission is unresolved, or a successful payment could not be confirmed
+    /// in the spend ledger. Reservations remain retained for reconciliation.
+    /// Inspect the provider before deciding whether money moved; never resubmit.
     #[serde(rename = "accounting_inconsistent")]
     AccountingInconsistent {
         id: String,
-        /// The network transaction that succeeded.
-        transaction_id: String,
-        /// IDs of the ledger reservations that could not be confirmed.
+        /// Real transaction or recovery identifier, when the provider knows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transaction_id: Option<String>,
+        /// IDs retained because submission or ledger confirmation is unresolved.
         reservation_ids: Vec<u64>,
-        /// Concatenated error messages from confirm attempts (last error per id).
+        /// Submission uncertainty, or the last confirmation error per reservation.
         confirm_errors: Vec<String>,
         hint: String,
         trace: Trace,
@@ -677,6 +678,9 @@ pub enum Output {
         /// or cancel flows. Empty when no spend limits were enforced.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reservation_ids: Vec<u64>,
+        /// Payment succeeded, but a node could not persist its replay.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        idempotency_finalize_failed: bool,
         trace: Trace,
     },
 

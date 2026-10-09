@@ -1,4 +1,4 @@
-#![cfg(all(feature = "ui", feature = "sol", feature = "redb"))]
+#![cfg(all(unix, feature = "ui", feature = "sol", feature = "redb"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! A person replacing an afpay panel, driven as a real process.
@@ -117,7 +117,26 @@ async fn start_sol_rpc() -> String {
                 "getLatestBlockhash" => {
                     json!({ "value": { "blockhash": "11111111111111111111111111111111" } })
                 }
-                "sendTransaction" => json!("5tubStubStubStubStubStubStubStubStubStubStubStubStub"),
+                "sendTransaction" => {
+                    use base64::Engine as _;
+                    let encoded = request["params"][0]
+                        .as_str()
+                        .expect("submitted transaction bytes");
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .expect("base64 transaction");
+                    let transaction: solana_sdk::transaction::Transaction =
+                        wincode::deserialize(&bytes).expect("signed Solana transaction");
+                    // An accepting node returns the signature of these exact
+                    // bytes. A made-up identifier represents an unknown result.
+                    json!(
+                        transaction
+                            .signatures
+                            .first()
+                            .expect("payment signature")
+                            .to_string()
+                    )
+                }
                 "getBalance" => json!({ "value": 900_000_u64 }),
                 _ => Value::Null,
             };
@@ -699,10 +718,25 @@ async fn a_restructured_confirm_page_still_pays_the_plan_it_showed() {
 
     // The ledger: one payment, for the amount and fee the page showed, debited
     // from the budget the plan named.
+    let sent = drive
+        .events
+        .iter()
+        .filter(|event| event["result"]["code"] == "sent")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sent.len(),
+        1,
+        "payment terminal outputs: {:?}",
+        drive.events
+    );
     let history = panel.history();
     assert_eq!(history.len(), 1, "{history:?}");
     assert_eq!(history[0]["direction"], "send");
     assert_eq!(history[0]["amount"]["value"], 1000);
+    assert_eq!(
+        history[0]["transaction_id"],
+        sent[0]["result"]["transaction_id"]
+    );
     assert_eq!(panel.spent(), 6000);
 }
 

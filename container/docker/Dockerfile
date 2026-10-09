@@ -66,7 +66,7 @@ ARG INSTALL_PHOENIXD=false
 ARG INSTALL_BITCOIND=false
 # Both pins are `ARG NAME=version` lines so tests/check_container_third_party_versions.sh
 # can read them; keep that shape when adding a third-party install.
-ARG PHOENIXD_VERSION=0.9.0
+ARG PHOENIXD_VERSION=0.9.2
 ARG BITCOIND_VERSION=31.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

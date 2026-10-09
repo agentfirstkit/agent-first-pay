@@ -35,7 +35,7 @@ fn sol_wallet_summary(meta: WalletMetadata, address: String) -> WalletSummary {
 
 pub struct SolProvider {
     _data_dir: String,
-    http_client: reqwest::Client,
+    http_client: Result<reqwest::Client, String>,
     store: Arc<StorageBackend>,
 }
 
@@ -66,10 +66,16 @@ struct SolChainStatus {
 }
 
 impl SolProvider {
+    fn http_client(&self) -> Result<&reqwest::Client, PayError> {
+        self.http_client
+            .as_ref()
+            .map_err(|error| PayError::internal_error(error.clone()))
+    }
+
     pub fn new(data_dir: &str, store: Arc<StorageBackend>) -> Self {
         Self {
             _data_dir: data_dir.to_string(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::provider::bounded_http_client(true),
             store,
         }
     }
@@ -337,7 +343,7 @@ impl SolProvider {
         });
 
         let response = self
-            .http_client
+            .http_client()?
             .post(endpoint)
             .json(&payload)
             .send()
@@ -1383,8 +1389,11 @@ impl PayProvider for SolProvider {
             None
         };
 
+        // Fetching a blockhash has no side effects, so any endpoint may
+        // provide it. The transaction is then signed exactly once: every
+        // broadcast below carries the same bytes and the same signature.
         let mut last_error: Option<String> = None;
-        let mut transaction_id: Option<String> = None;
+        let mut recent_blockhash: Option<Hash> = None;
         for endpoint in &endpoints {
             let latest_blockhash: SolGetLatestBlockhashResult = match self
                 .rpc_call(
@@ -1400,53 +1409,75 @@ impl PayProvider for SolProvider {
                     continue;
                 }
             };
-
-            let recent_blockhash = match Hash::from_str(&latest_blockhash.value.blockhash) {
-                Ok(hash) => hash,
+            match Hash::from_str(&latest_blockhash.value.blockhash) {
+                Ok(hash) => {
+                    recent_blockhash = Some(hash);
+                    break;
+                }
                 Err(err) => {
                     last_error = Some(format!(
                         "endpoint={endpoint} invalid latest blockhash: {err}"
                     ));
-                    continue;
                 }
-            };
+            }
+        }
+        let recent_blockhash = recent_blockhash.ok_or_else(|| {
+            PayError::network_not_submitted(format!(
+                "all sol rpc endpoints failed for transfer: {}",
+                last_error
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".to_string())
+            ))
+        })?;
 
-            let mut instructions = Vec::new();
-            if let Some(ix) = memo_instruction.as_ref() {
-                instructions.push(ix.clone());
-            }
-            if let Some(ref spl_ixs) = spl_instructions {
-                instructions.extend(spl_ixs.iter().cloned());
-            } else {
-                let transfer_ix = system_instruction::transfer(
-                    &keypair.pubkey(),
-                    &recipient_pubkey,
-                    transfer_target.amount_lamports,
-                );
-                instructions.push(transfer_ix);
-            }
-            // Add reference key as read-only non-signer account on the transfer
-            // instruction (per strain-payment-method-solana convention).
-            if let Some(ref_key) = &transfer_target.reference
-                && let Some(last_ix) = instructions.last_mut()
-            {
-                last_ix
-                    .accounts
-                    .push(AccountMeta::new_readonly(*ref_key, false));
-            }
-            let transaction = Transaction::new_signed_with_payer(
-                &instructions,
-                Some(&keypair.pubkey()),
-                &[&keypair],
-                recent_blockhash,
+        let mut instructions = Vec::new();
+        if let Some(ix) = memo_instruction.as_ref() {
+            instructions.push(ix.clone());
+        }
+        if let Some(ref spl_ixs) = spl_instructions {
+            instructions.extend(spl_ixs.iter().cloned());
+        } else {
+            let transfer_ix = system_instruction::transfer(
+                &keypair.pubkey(),
+                &recipient_pubkey,
+                transfer_target.amount_lamports,
             );
-            let encoded_transaction = BASE64_STANDARD
+            instructions.push(transfer_ix);
+        }
+        // Add reference key as read-only non-signer account on the transfer
+        // instruction (per strain-payment-method-solana convention).
+        if let Some(ref_key) = &transfer_target.reference
+            && let Some(last_ix) = instructions.last_mut()
+        {
+            last_ix
+                .accounts
+                .push(AccountMeta::new_readonly(*ref_key, false));
+        }
+        let transaction = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&keypair.pubkey()),
+            &[&keypair],
+            recent_blockhash,
+        );
+        let submitted_signature = transaction
+            .signatures
+            .first()
+            .map(ToString::to_string)
+            .ok_or_else(|| PayError::internal_error("signed sol transaction has no signature"))?;
+        let encoded_transaction =
+            BASE64_STANDARD
                 .encode(wincode::serialize(&transaction).map_err(|e| {
                     PayError::internal_error(format!("serialize transaction: {e}"))
                 })?);
 
+        // Re-broadcasting identical signed bytes cannot create a second
+        // payment: the cluster accepts one transaction per signature. A
+        // failed call may still have reached its endpoint, so once any
+        // broadcast was attempted the outcome is unknown rather than failed.
+        let mut transaction_id: Option<String> = None;
+        for endpoint in &endpoints {
             match self
-                .rpc_call(
+                .rpc_call::<String>(
                     endpoint,
                     "sendTransaction",
                     serde_json::json!([
@@ -1459,20 +1490,33 @@ impl PayProvider for SolProvider {
                 )
                 .await
             {
-                Ok(signature) => {
-                    transaction_id = Some(signature);
+                Ok(signature) if signature == submitted_signature => {
+                    transaction_id = Some(submitted_signature.clone());
                     break;
                 }
+                Ok(_) => {
+                    return Err(PayError::submission_unknown(
+                        "sol rpc returned a different signature from the submitted transaction",
+                        Some(submitted_signature),
+                    ));
+                }
                 Err(err) => {
-                    last_error = Some(format!("endpoint={endpoint} sendTransaction: {err}"));
+                    last_error = Some(format!(
+                        "endpoint={endpoint} sendTransaction outcome is unknown: {err}"
+                    ));
                 }
             }
         }
         let transaction_id = transaction_id.ok_or_else(|| {
-            PayError::network_error(format!(
-                "all sol rpc endpoints failed for transfer: {}",
-                last_error.unwrap_or_else(|| "unknown error".to_string())
-            ))
+            PayError::submission_unknown(
+                format!(
+                    "all sol rpc endpoints failed to confirm the broadcast: {}",
+                    last_error
+                        .clone()
+                        .unwrap_or_else(|| "unknown error".to_string())
+                ),
+                Some(submitted_signature.clone()),
+            )
         })?;
 
         let (amount_value, amount_token) = if transfer_target.token_mint.is_some() {
@@ -1541,6 +1585,7 @@ impl PayProvider for SolProvider {
             },
             fee: fee_amount,
             preimage: None,
+            idempotency_finalize_failed: false,
         })
     }
 
@@ -2223,5 +2268,37 @@ mod tests {
         assert_eq!(quote.wallet, wallet.id);
         assert_eq!(quote.amount_native, 1000);
         assert_eq!(quote.fee_unit, "lamports");
+    }
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn rpc_timeout_advances_to_healthy_endpoint() {
+        let (endpoints, silent, healthy) =
+            super::super::timeout_test_endpoints(serde_json::json!(32)).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+        let provider = SolProvider::new(
+            path,
+            std::sync::Arc::new(crate::store::StorageBackend::Redb(
+                crate::store::redb_store::RedbStore::new(path),
+            )),
+        );
+        let started = std::time::Instant::now();
+        let value = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            provider
+                .rpc_call_with_failover::<serde_json::Value>(
+                    &endpoints,
+                    "getBalance",
+                    serde_json::json!([]),
+                )
+                .await
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, serde_json::json!(32));
+        assert!(started.elapsed() >= std::time::Duration::from_secs(14));
+        assert!(started.elapsed() < std::time::Duration::from_secs(45));
+        silent.await.unwrap();
+        healthy.await.unwrap();
     }
 }

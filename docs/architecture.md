@@ -61,12 +61,12 @@ All networks in one process. Simplest setup:
 
 ```bash
 # HTTP API server (curl-accessible, no specialized client needed)
-afpay --mode rest --rest-api-key-secret "my-secret"       # 127.0.0.1:9401 by default
+afpay --mode rest --rest-api-key-secret env:AFPAY_REST_API_KEY_SECRET # 127.0.0.1:9401 by default
 
 # Or selective features
-cargo build --features cashu
-cargo build --features cashu,rest   # with the HTTP API
-cargo build --features btc-esplora
+cargo build --no-default-features --features redb,cashu
+cargo build --no-default-features --features redb,cashu,rest # with the HTTP API
+cargo build --no-default-features --features redb,btc-esplora
 ```
 
 ### Multi-Level (Cascading Federation)
@@ -123,8 +123,8 @@ afpay ln send --to lnbc1...
 afpay pay confirm --plan-id plan_… --idempotency-key pay-invoice-1
 
 # On a peer (forwarded over its HTTP API) — both halves, same as local
-afpay ln send --to lnbc1... --peer-url http://10.0.1.5:9401 --peer-api-key-secret "abc..."
-afpay pay confirm --plan-id plan_… --peer-url http://10.0.1.5:9401 --peer-api-key-secret "abc..."
+afpay ln send --to lnbc1... --peer-url http://10.0.1.5:9401 --peer-api-key-secret env:AFPAY_PEER_KEY_SECRET
+afpay pay confirm --plan-id plan_… --peer-url http://10.0.1.5:9401 --peer-api-key-secret env:AFPAY_PEER_KEY_SECRET
 ```
 
 With `--peer-url`, the CLI forwards the request. Without it, the CLI executes locally. Transparent to the caller.
@@ -151,11 +151,47 @@ cluster. Unpinned, unclassifiable, and apparently mismatched plans therefore
 carry review warnings instead of pretending that a hostname is an on-chain
 attestation.
 
+A confirm fails in one of two distinguishable ways. `network_error` means the
+payment was never submitted — the failure happened before anything was signed,
+broadcast, or handed to a backend — so the reservations are cancelled, the plan
+is released, the idempotency key is cleared, and the same plan can be confirmed
+again with the same key. Once submission may have begun, a transport failure or
+a provider reply that does not identify the payment (including a success status
+with an unreadable body) is an unknown outcome, reported as
+`accounting_inconsistent` and never as a retryable error.
+
+On-chain Bitcoin takes its fee rate from the wallet's chain source at a
+six-block confirmation target, both when the plan is resolved and again at
+confirm. A source with no estimate, or one whose estimate exceeds a fixed
+safety ceiling of 1000 sat/vB, fails the payment with `network_error` before
+signing, so nothing is broadcast. The ceiling bounds the damage of a faulty or
+hijacked chain source; it is not a fee policy and is not configurable.
+
 If the network accepted a payment but the spend ledger could not confirm its
 reservation, the request has exactly one terminal outcome:
 `accounting_inconsistent`. It includes the transaction and reservation IDs,
 must not be retried, and is never followed by `sent` or `cashu_sent`. Reconcile
 the named reservations locally before making another payment.
+
+The same outcome also covers a request that may have been submitted but has no
+confirmed response. Its message distinguishes uncertainty from known success;
+`transaction_id` is omitted when no actual recovery ID is available. Before
+entering a provider, the ledger atomically protects Pending reservations and
+the Pending idempotency key from routine TTL expiry. A crash or missing response
+therefore cannot reopen the same reviewed plan or idempotency key. Normal spend
+windows still apply. Reconciliation changes the reservations to Confirmed or
+Cancelled after checking actual provider history; it leaves the uncertain key
+Pending because a reservation cannot supply a missing payment receipt.
+
+Review plans are atomically published private files under the confirming
+node's `{data_dir}/pay-plans/`, including with PostgreSQL storage. Plan creation
+and confirmation must reach that same workspace.
+
+If payment succeeds but replay-receipt finalization fails, `sent` or
+`cashu_sent` carries `idempotency_finalize_failed: true`. The warning survives
+federation layers. The successful payment is not retried or changed into an
+ordinary payment failure; the receipt and structured failure log provide the
+evidence needed to repair the affected node's local record.
 
 ## Federation
 
@@ -166,16 +202,21 @@ payload cipher: one command is one HTTP request.
 
 ```bash
 # Peer (the same daemon any HTTP client would talk to)
-afpay --mode rest --rest-api-key-secret "64-char-hex"
+afpay --mode rest --rest-api-key-secret env:AFPAY_REST_API_KEY_SECRET
 
 # A command run on that peer
 afpay ln send --wallet w_01 ... \
-  --peer-url http://vps-a:9401 --peer-api-key-secret "64-char-hex"
+  --peer-url http://vps-a:9401 --peer-api-key-secret env:AFPAY_PEER_KEY_SECRET
 ```
 
 For a coordinator, put the peers in `config.toml` instead (see Deployment
 Patterns above). Each peer can have a different key; keys use the `_secret`
 suffix and are auto-redacted in agent-first-data output.
+
+The named variables are supplied by a credential manager. Use the same bearer
+value on a peer and its client, with a distinct value per connection as needed.
+CLI flags also accept a protected file source such as
+`file:credentials.toml#peer_api_key_secret`; the value stays out of argv.
 
 ### What federation can and cannot ask for
 
@@ -273,7 +314,7 @@ Every domain response is a strict AFDATA envelope, redacted at the serialization
 
 The HTTP status and `error.code` are both load-bearing: `400` input, `401` credential, `403` operator policy, `404` resource, `405` method, `409` idempotency conflict, `413` body, `415` media type, `422` valid but inapplicable (a spend-limit refusal lands here), `429` rate limit, `500` internal or ledger failure, `503` provider unreachable.
 
-Two afpay outputs that the wire protocol carries as results become errors here, because reporting them as successes would misstate the business outcome: `limit_exceeded` (a spend rule refused the payment) and `accounting_inconsistent` (money left but the ledger could not record it). Both carry their payload as `error.details`.
+Two afpay outputs that the wire protocol carries as results become errors here, because reporting them as successes would misstate the business outcome: `limit_exceeded` (a spend rule refused the payment) and `accounting_inconsistent` (the payment outcome or its accounting requires reconciliation). The latter covers both a known successful payment with a ledger failure and a submitted payment whose outcome is unknown. Both carry their payload as `error.details`.
 
 ### Enforcement
 
@@ -281,7 +322,7 @@ Two afpay outputs that the wire protocol carries as results become errors here, 
 |------|----------|
 | Spend limits | Always enforced, through the same reserve/execute/confirm path as the CLI |
 | Plan/confirm | Money leaves a wallet only by confirming a plan afpay resolved and recorded. The confirm body carries the id and nothing else, so an approved payment and the payment made cannot differ |
-| Idempotency | `Idempotency-Key` becomes the ledger key `--idempotency-key` writes: same 24-hour window, same canonical body hash, same replay. Required on the four operations a retry could duplicate — both confirms, wallet creation, and receives |
+| Idempotency | `Idempotency-Key` becomes the ledger key `--idempotency-key` writes: same canonical body hash and replay. Completed records expire after 24 hours; submitted payments with an unknown outcome keep their Pending key until explicitly repaired. Required on the four operations a retry could duplicate — both confirms, wallet creation, and receives |
 | `is_local_only()` operations | Not routed at all — seeds, spend-limit rules, reservation repair and daemon config exist only on the local CLI |
 | Authentication | `Authorization: Bearer` only; credentials in the query string are refused |
 | CORS | No header emitted; a browser origin is authorized by same-host proxying, not by afpay |
@@ -322,8 +363,8 @@ All commands work with Podman — replace `docker compose` with `podman compose`
 ```bash
 podman compose -f container/docker/compose.yaml up --build
 
-# macOS Apple Container CLI launcher
-./container/apple-container/up.sh
+# macOS Apple Container CLI (bundle phoenixd and allow its endpoint)
+afpay container install --runtime apple --with phoenixd --allow ln=http://127.0.0.1:9740
 
 # Or build and run without compose
 podman build -t afpay -f container/docker/Dockerfile .
@@ -512,17 +553,17 @@ Supported units: `sats` (cashu/ln/btc), `lamports` (sol), `gwei`/`wei` (evm), `u
 Feature flags control which network SDKs and storage backends are compiled in:
 
 ```bash
-# Single-network VPS daemon (minimal binary size)
-cargo build --no-default-features --features ln,redb
+# Single-network Lightning client
+cargo build --no-default-features --features redb,ln-phoenixd
 
 # Full stack (all networks + all storage)
 cargo build
 
-# PostgreSQL-only server (no local redb)
-cargo build --no-default-features --features postgres,exchange-rate
+# PostgreSQL-only Lightning server
+cargo build --no-default-features --features postgres,ln-phoenixd,rest
 
-# Pure coordinator (only federation forwarding, no wallet SDK, no local storage)
-cargo build --no-default-features --features federation
+# Coordinator (federation forwarding and PostgreSQL accounting, no wallet SDK)
+cargo build --no-default-features --features postgres,federation
 ```
 
 ### SDK Dependencies

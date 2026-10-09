@@ -49,7 +49,8 @@ session modes are the exception: `--mode` and its listener flags belong to bare
   inferring either. A refusal is an answer — do not re-issue it as a `send`
   plus a `pay confirm`.
 - `afpay ui receive` shows what to scan; it does not watch for the payment.
-  When *you* need to know the money arrived, use `<network> receive --wait`.
+  When *you* need to know the money arrived, check
+  `afpay <network> receive --help`: not every network can wait for receipt.
 - A panel reaches the person three ways, and which are on offer differs by what
   the panel does. The two watch panels offer all three, including the LAN link —
   a receive code is *for* pointing a phone at. `afpay ui send` does not: that
@@ -88,7 +89,8 @@ session modes are the exception: `--mode` and its listener flags belong to bare
   that does. Pass `--idempotency-key` on every confirm.
 - A plan is single-use and expires (`expires_at_epoch_ms`). Confirming a spent
   one answers `plan_not_found`; that is not a reason to re-plan and pay again
-  unless you know the first confirm never ran — check `afpay history` first.
+  unless you know the first confirm never ran — refresh with
+  `afpay history update`, inspect `afpay history list`, and check the provider.
 - `plan_stale` means the workspace, daemon configuration, wallet, or spend
   rules changed after the plan was resolved. `error.hint` names which. Resolve
   a new plan and read it again; never treat this as a transient failure to
@@ -131,13 +133,15 @@ session modes are the exception: `--mode` and its listener flags belong to bare
 
 ## Receiving Funds
 
-- `receive` produces an invoice/address; add `--wait` (with `--wait-sync-limit`)
-  to block for incoming funds. For Cashu-over-Lightning, claiming may be a
-  separate step — follow the returned code rather than assuming one round-trip.
-- `receive` and `wallet create` take `--idempotency-key` too, and for the same
-  reason a payment does: a repeat mints a second invoice a payer may not be
-  looking at, or a second wallet you cannot tell from the first. Pass one and
-  re-send it verbatim on retry.
+- An invoice or address is a request for payment, not proof of receipt. Not
+  every network can wait, and the available matching conditions differ; read
+  `afpay <network> receive --help` before choosing a waiting shape. Cashu token
+  redemption is a separate operation from requesting a Lightning deposit and
+  claiming its proofs; follow the returned code.
+- Pass an idempotency key to wallet creation and invoice creation wherever
+  their help offers one, then preserve the exact arguments and key on retry.
+  A repeat without a key can create a second wallet or invoice. Do not assume
+  token redemption or quote claiming exposes the same retry controls.
 
 ## Secrets Are Redacted — Keep Them That Way
 
@@ -152,28 +156,59 @@ session modes are the exception: `--mode` and its listener flags belong to bare
 
 ## Recovery
 
-- A `pay confirm` that times out or returns an uncertain result is *not* a
-  signal to plan again — that risks double-paying. Re-send the **same**
-  `--idempotency-key` with the same `--plan-id`: if the first one ran, you get
-  its original result back. Only if that answers `plan_not_found` do you check
-  `afpay history` / `history status` and `limit reconcile` before deciding
-  anything.
+- After a `pay confirm` timeout, preserve the **same** `--idempotency-key`,
+  `--plan-id`, arguments, and workspace. One identical retry can recover a
+  stored terminal receipt; it cannot prove that an unfinished submission
+  failed. `idempotency_in_progress` means the key is still Pending: stop
+  submitting and inspect provider or chain history. Do not poll the key
+  indefinitely, change keys, or create a fresh plan to retry that payment.
+  `plan_not_found` also requires checking history; a consumed plan does not
+  prove whether payment succeeded.
 - `idempotency_conflict` means that key was already used for a *different*
-  plan. Pick a new key; do not retry with the same one.
-- `accounting_inconsistent` means the network side effect happened but one or
-  more spend-ledger reservations did not commit. It is the sole terminal
-  outcome, names the transaction and reservations, and is replayed by the same
-  idempotency key. Never retry or re-plan; run `limit reconcile` locally after
-  verifying the transaction.
-- `error` with `retryable:true` is safe to retry after any `retry_after_ms`
-  **for anything before a `pay confirm`**. After a confirm has been sent, a
-  network error is not a statement that nothing happened: the transaction may
-  have been broadcast, the mint may have advanced, the backend may have paid,
-  and only the reply was lost. Re-send the same `--idempotency-key` with the
-  same `--plan-id` as above, and if that cannot answer, check `afpay history`
-  and the chain or backend before doing anything else. Never plan again on the
-  strength of `retryable:true` alone. `retryable:false` means fix the inputs —
-  do not loop.
+  plan. Stop and inspect the original payment and the intended plan; changing
+  the key automatically can duplicate a payment.
+- `accounting_inconsistent` covers two outcomes. A known successful payment
+  can have failed spend-ledger confirmation; an unknown submission means the
+  provider may have completed the payment but afpay has no confirmed receipt.
+  Read `confirm_errors` and `hint`, then verify against provider or chain
+  history before reporting payment status. A `transaction_id` may be present
+  for either outcome or absent for an unknown submission, and
+  `reservation_ids` may be empty. Neither field alone proves success.
+  Use `afpay history status` when a recovery ID is available, and refresh with
+  `afpay history update` before trusting `afpay history list`. Missing local
+  history alone does not prove that no payment happened.
+- A known success with an accounting failure is replayable if its terminal
+  receipt was stored. An unknown submission consumes the plan but keeps the
+  key Pending, so the same key answers `idempotency_in_progress`, not a replay.
+  Neither outcome authorizes another payment. Run `limit reconcile` locally
+  only after verifying whether funds moved. Reconcile repairs spend-budget
+  reservations; it does not clear a Pending idempotency key or create a receipt.
+- `sent` or `cashu_sent` with `idempotency_finalize_failed: true` is a
+  successful payment whose replay receipt could not be stored at one or more
+  nodes. Keep that receipt and repair the affected node's local record; do
+  not repeat the payment even if an identical retry cannot replay it.
+- `error` with `retryable:true` is safe to retry after any `retry_after_ms`.
+  That holds for a `pay confirm` too, because of what afpay answers there: a
+  `network_error` **returned by** a confirm means the payment was not
+  submitted — nothing was signed, broadcast, or handed to a backend, the plan
+  was given back, and the key was cleared. Retry with the **same** `--plan-id`
+  and the **same** `--idempotency-key`; do not plan again or change the key.
+  `retryable:false` means fix the inputs — do not loop.
+- An outcome afpay cannot establish is never reported as `network_error`. Once
+  submission may have begun, a lost or unreadable provider reply — including a
+  success status whose body does not identify the payment — surfaces as
+  `accounting_inconsistent` with the plan consumed and the key Pending. That
+  is the unknown-submission case above: verify against provider or chain
+  history and never retry it blindly. The same applies when the confirm itself
+  got no answer at all (a timeout or dropped connection on your side): that is
+  not a `network_error` from afpay, so follow the timeout rule above.
+- On-chain Bitcoin asks the wallet's chain source for a fee rate at a
+  roughly six-block target, at plan time and again at confirm. If the source
+  has no estimate, or returns one above afpay's fixed safety ceiling
+  (1000 sat/vB — a guard against a faulty or hijacked source, not a fee
+  policy), the payment fails with a retryable `network_error` before signing
+  and nothing is broadcast. Retry later or point the wallet at a healthy
+  chain source; there is no flag to override the ceiling.
 - `restore` is destructive and requires `--dangerously-overwrite`; confirm the
   target data dir before running it, and prefer a fresh `--data-dir` when unsure.
 

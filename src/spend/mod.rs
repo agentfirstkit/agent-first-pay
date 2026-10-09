@@ -43,9 +43,13 @@ const NEXT_EVENT_ID_KEY: &str = "next_event_id";
 #[cfg(feature = "redb")]
 const SPEND_VERSION: u64 = 1;
 
-/// Idempotency records live for 24h. Long enough to cover a slow BTC settlement
-/// or a multi-hop LN retry; short enough that the key→hash table never balloons.
+/// Completed idempotency records live for 24h. Pending submissions are
+/// protected separately until a terminal outcome can be established.
 pub(crate) const IDEMPOTENCY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// Unknown submissions stay reserved until reconciliation. Fits PostgreSQL BIGINT.
+#[cfg(any(feature = "redb", feature = "postgres"))]
+const SUBMISSION_EXPIRY_MS: u64 = i64::MAX as u64;
 
 /// Max length of an agent-supplied idempotency key. Mirrors common payment APIs
 /// (Stripe, PayPal) and bounds the storage cost per record.
@@ -117,6 +121,8 @@ pub enum IdempotentReplayPayload {
         preimage: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reservation_ids: Vec<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        idempotency_finalize_failed: bool,
     },
     CashuSent {
         wallet: String,
@@ -127,9 +133,12 @@ pub enum IdempotentReplayPayload {
         token: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reservation_ids: Vec<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        idempotency_finalize_failed: bool,
     },
     AccountingInconsistent {
-        transaction_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transaction_id: Option<String>,
         reservation_ids: Vec<u64>,
         confirm_errors: Vec<String>,
         hint: String,
@@ -394,6 +403,31 @@ impl SpendLedger {
             SpendBackend::Postgres { .. } => self.confirm_postgres(_reservation_id).await,
             SpendBackend::None => Err(PayError::not_implemented(
                 "no storage backend for spend limits".to_string(),
+            )),
+        }
+    }
+
+    /// Persist crash protection before entering a provider. Existing spend
+    /// windows still bound accounting; only automatic Pending expiry is disabled.
+    pub async fn protect_submission(
+        &self,
+        reservation_ids: &[u64],
+        idempotency: Option<&(String, String)>,
+    ) -> Result<(), PayError> {
+        if reservation_ids.is_empty() && idempotency.is_none() {
+            return Ok(());
+        }
+        let _guard = self.mu.lock().await;
+        match &self.backend {
+            #[cfg(feature = "redb")]
+            SpendBackend::Redb { .. } => self.protect_submission_redb(reservation_ids, idempotency),
+            #[cfg(feature = "postgres")]
+            SpendBackend::Postgres { .. } => {
+                self.protect_submission_postgres(reservation_ids, idempotency)
+                    .await
+            }
+            SpendBackend::None => Err(PayError::not_implemented(
+                "no storage backend for submission protection",
             )),
         }
     }
@@ -841,6 +875,69 @@ impl SpendLedger {
             .commit()
             .map_err(|e| PayError::internal_error(format!("spend commit reserve: {e}")))?;
         Ok(reservation_id)
+    }
+
+    fn protect_submission_redb(
+        &self,
+        reservation_ids: &[u64],
+        idempotency: Option<&(String, String)>,
+    ) -> Result<(), PayError> {
+        let db = self.open_spend_db()?;
+        let tx = db
+            .begin_write()
+            .map_err(|e| PayError::internal_error(format!("spend protect begin: {e}")))?;
+        {
+            let mut table = tx
+                .open_table(RESERVATION_BY_ID)
+                .map_err(|e| PayError::internal_error(format!("spend protect table: {e}")))?;
+            for rid in reservation_ids {
+                let bytes = table
+                    .get(*rid)
+                    .map_err(|e| PayError::internal_error(format!("spend protect read: {e}")))?
+                    .map(|value| value.value().to_string())
+                    .ok_or_else(|| {
+                        PayError::internal_error(format!(
+                            "reservation {rid} not found before submission"
+                        ))
+                    })?;
+                let mut reservation: SpendReservation = decode(&bytes)?;
+                if !matches!(reservation.status, ReservationStatus::Pending) {
+                    return Err(PayError::internal_error(format!(
+                        "reservation {rid} is not pending before submission"
+                    )));
+                }
+                reservation.expires_at_epoch_ms = SUBMISSION_EXPIRY_MS;
+                let encoded = encode(&reservation)?;
+                table
+                    .insert(*rid, encoded.as_str())
+                    .map_err(|e| PayError::internal_error(format!("spend protect update: {e}")))?;
+            }
+        }
+        if let Some((key, hash)) = idempotency {
+            let mut table = tx
+                .open_table(IDEMPOTENCY_BY_KEY)
+                .map_err(|e| PayError::internal_error(format!("idem protect table: {e}")))?;
+            let bytes = table
+                .get(key.as_str())
+                .map_err(|e| PayError::internal_error(format!("idem protect read: {e}")))?
+                .map(|value| value.value().to_string())
+                .ok_or_else(|| {
+                    PayError::internal_error("idempotency claim missing before submission")
+                })?;
+            let mut record: IdempotencyRecord = decode(&bytes)?;
+            if record.input_hash != *hash || record.state != IdempotencyState::Pending {
+                return Err(PayError::internal_error(
+                    "idempotency claim changed before submission",
+                ));
+            }
+            record.expires_at_epoch_ms = SUBMISSION_EXPIRY_MS;
+            let encoded = encode(&record)?;
+            table
+                .insert(key.as_str(), encoded.as_str())
+                .map_err(|e| PayError::internal_error(format!("idem protect update: {e}")))?;
+        }
+        tx.commit()
+            .map_err(|e| PayError::internal_error(format!("spend protect commit: {e}")))
     }
 
     fn confirm_redb(&self, reservation_id: u64) -> Result<(), PayError> {
@@ -1519,6 +1616,65 @@ impl SpendLedger {
         Ok(reservation_id)
     }
 
+    async fn protect_submission_postgres(
+        &self,
+        reservation_ids: &[u64],
+        idempotency: Option<&(String, String)>,
+    ) -> Result<(), PayError> {
+        use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
+        let mut tx = self
+            .pg_pool()?
+            .begin()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg protect begin: {e}")))?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_ADVISORY_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg protect lock: {e}")))?;
+        for rid in reservation_ids {
+            let row: Option<(serde_json::Value,)> = sqlx::query_as(
+                "SELECT reservation FROM spend_reservations WHERE reservation_id = $1 FOR UPDATE",
+            )
+            .bind(*rid as i64)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg protect read: {e}")))?;
+            let (value,) = row.ok_or_else(|| {
+                PayError::internal_error(format!("reservation {rid} not found before submission"))
+            })?;
+            let mut reservation: SpendReservation = serde_json::from_value(value)
+                .map_err(|e| PayError::internal_error(format!("pg protect parse: {e}")))?;
+            if !matches!(reservation.status, ReservationStatus::Pending) {
+                return Err(PayError::internal_error(format!(
+                    "reservation {rid} is not pending before submission"
+                )));
+            }
+            reservation.expires_at_epoch_ms = SUBMISSION_EXPIRY_MS;
+            let value = serde_json::to_value(&reservation)
+                .map_err(|e| PayError::internal_error(format!("pg protect serialize: {e}")))?;
+            sqlx::query("UPDATE spend_reservations SET reservation = $1 WHERE reservation_id = $2")
+                .bind(value)
+                .bind(*rid as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PayError::internal_error(format!("pg protect update: {e}")))?;
+        }
+        if let Some((key, hash)) = idempotency {
+            let updated = sqlx::query("UPDATE afpay_idempotency SET expires_at_ms = $1 WHERE key = $2 AND input_hash = $3 AND state = 'pending'")
+                .bind(SUBMISSION_EXPIRY_MS as i64).bind(key).bind(hash).execute(&mut *tx).await
+                .map_err(|e| PayError::internal_error(format!("pg idem protect: {e}")))?;
+            if updated.rows_affected() != 1 {
+                return Err(PayError::internal_error(
+                    "idempotency claim changed before submission",
+                ));
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|e| PayError::internal_error(format!("pg protect commit: {e}")))
+    }
+
     async fn confirm_postgres(&self, reservation_id: u64) -> Result<(), PayError> {
         use crate::store::postgres_store::SPEND_ADVISORY_LOCK_KEY;
 
@@ -2179,7 +2335,10 @@ impl SpendLedger {
                     .map_err(|e| PayError::internal_error(format!("fx read quote: {e}")))?
             {
                 let cached: ExchangeRateQuote = decode(entry.value())?;
-                if cached.expires_at_epoch_ms > now {
+                if cached.expires_at_epoch_ms > now
+                    && cached.price.is_finite()
+                    && cached.price > 0.0
+                {
                     return Ok(cached);
                 }
             }
@@ -2197,7 +2356,10 @@ impl SpendLedger {
             if let Some((quote_json,)) = row {
                 let cached: ExchangeRateQuote = serde_json::from_value(quote_json)
                     .map_err(|e| PayError::internal_error(format!("pg fx parse cache: {e}")))?;
-                if cached.expires_at_epoch_ms > now {
+                if cached.expires_at_epoch_ms > now
+                    && cached.price.is_finite()
+                    && cached.price > 0.0
+                {
                     return Ok(cached);
                 }
             }
@@ -2275,7 +2437,8 @@ impl SpendLedger {
             ));
         }
 
-        let client = reqwest::Client::new();
+        let client =
+            crate::provider::bounded_http_client(true).map_err(PayError::internal_error)?;
         let mut last_err = String::new();
 
         for source in &cfg.sources {
@@ -2549,7 +2712,12 @@ async fn fetch_from_source(
         .await
         .map_err(|e| format!("parse failed: {e}"))?;
 
-    extract_fn(&value).ok_or_else(|| "could not extract price from response".to_string())
+    let price =
+        extract_fn(&value).ok_or_else(|| "could not extract price from response".to_string())?;
+    if !price.is_finite() || price <= 0.0 {
+        return Err("price must be positive and finite".to_owned());
+    }
+    Ok(price)
 }
 
 #[cfg(feature = "redb")]
@@ -2690,7 +2858,7 @@ fn expire_pending(_table: &mut redb::Table<u64, &str>, _now_ms: u64) -> Result<(
 
 /// Drop idempotency records whose `expires_at_epoch_ms` has passed. Called at
 /// the top of every `idempotency_claim` so the table size is bounded by the
-/// 24h TTL window and an expired Pending slot can never block a retry.
+/// completed-outcome TTL window. Protected submissions remain Pending.
 #[cfg(feature = "redb")]
 fn sweep_expired_idempotency_redb(
     table: &mut redb::Table<&str, &str>,
@@ -2834,6 +3002,130 @@ fn next_counter(write_txn: &redb::WriteTransaction, key: &str) -> Result<u64, Pa
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn submission_protection_survives_ttl_sweeping_but_obeys_spend_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+        let context = SpendContext {
+            network: "cashu".into(),
+            wallet: Some("w_test".into()),
+            amount_native: 50,
+            token: None,
+        };
+        let id = ledger
+            .reserve("protected-submission", &context)
+            .await
+            .unwrap();
+        let idem = ("protected-key".to_string(), "hash".to_string());
+        ledger.idempotency_claim(&idem.0, &idem.1).await.unwrap();
+        ledger.protect_submission(&[id], Some(&idem)).await.unwrap();
+        let (reservation, record) = {
+            let db = ledger.open_spend_db().unwrap();
+            let tx = db.begin_read().unwrap();
+            let reservations = tx.open_table(RESERVATION_BY_ID).unwrap();
+            let reservation: SpendReservation =
+                decode(reservations.get(id).unwrap().unwrap().value()).unwrap();
+            let keys = tx.open_table(IDEMPOTENCY_BY_KEY).unwrap();
+            let record: IdempotencyRecord =
+                decode(keys.get(idem.0.as_str()).unwrap().unwrap().value()).unwrap();
+            (reservation, record)
+        };
+        assert_eq!(reservation.expires_at_epoch_ms, i64::MAX as u64);
+        assert_eq!(record.expires_at_epoch_ms, i64::MAX as u64);
+        let rule = SpendLimit {
+            rule_id: None,
+            scope: SpendScope::Network,
+            network: Some("cashu".into()),
+            wallet: None,
+            window_s: 3600,
+            max_spend: 50,
+            token: None,
+        };
+        let created = reservation.created_at_epoch_ms;
+        assert_eq!(
+            spent_in_window(
+                &rule,
+                std::slice::from_ref(&reservation),
+                created + 90_000,
+                false
+            )
+            .unwrap()
+            .0,
+            50
+        );
+        assert_eq!(
+            spent_in_window(
+                &rule,
+                std::slice::from_ref(&reservation),
+                created + 3_600_001,
+                false
+            )
+            .unwrap()
+            .0,
+            0
+        );
+        let db = ledger.open_spend_db().unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(IDEMPOTENCY_BY_KEY).unwrap();
+            sweep_expired_idempotency_redb(&mut table, created + IDEMPOTENCY_TTL_MS + 1).unwrap();
+            assert!(table.get(idem.0.as_str()).unwrap().is_some());
+        }
+        tx.commit().unwrap();
+    }
+
+    #[cfg(feature = "redb")]
+    #[tokio::test]
+    async fn submission_protection_is_atomic_when_the_pending_key_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = SpendLedger::new(tmp.path().to_str().unwrap(), None);
+        let context = SpendContext {
+            network: "cashu".into(),
+            wallet: None,
+            amount_native: 50,
+            token: None,
+        };
+        let id = ledger.reserve("pre-submission", &context).await.unwrap();
+        ledger.idempotency_claim("key", "original").await.unwrap();
+        assert!(
+            ledger
+                .protect_submission(&[id], Some(&("key".into(), "different".into())))
+                .await
+                .is_err()
+        );
+        let db = ledger.open_spend_db().unwrap();
+        let tx = db.begin_read().unwrap();
+        let table = tx.open_table(RESERVATION_BY_ID).unwrap();
+        let reservation: SpendReservation =
+            decode(table.get(id).unwrap().unwrap().value()).unwrap();
+        assert_ne!(
+            reservation.expires_at_epoch_ms,
+            i64::MAX as u64,
+            "failed protection must roll back its reservation update"
+        );
+    }
+
+    #[test]
+    fn older_replay_payloads_default_the_finalize_warning_to_false() {
+        let payload: IdempotentReplayPayload = serde_json::from_value(serde_json::json!({
+            "kind": "sent", "wallet": "w_test", "transaction_id": "real-id", "amount": {"value": 1, "token": "sats"},
+        })).unwrap();
+        assert!(matches!(
+            payload,
+            IdempotentReplayPayload::Sent {
+                idempotency_finalize_failed: false,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::to_value(payload)
+                .unwrap()
+                .get("idempotency_finalize_failed")
+                .is_none()
+        );
+    }
 
     #[cfg(feature = "redb")]
     #[tokio::test]
@@ -2985,6 +3277,163 @@ mod tests {
         assert!(matches!(err, PayError::InvalidAmount { .. }));
     }
 
+    #[cfg(all(feature = "redb", feature = "exchange-rate"))]
+    #[tokio::test]
+    async fn exchange_rate_timeout_releases_ledger_for_pending_confirm() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (received, accepted) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            assert!(stream.read(&mut buffer).await.unwrap() > 0);
+            received.send(()).unwrap();
+            // Hold the accepted connection open without an HTTP response.
+            let _ = stream.read(&mut buffer).await;
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = std::sync::Arc::new(SpendLedger::new(
+            directory.path().to_str().unwrap(),
+            Some(ExchangeRateConfig {
+                ttl_s: 300,
+                sources: vec![crate::types::ExchangeRateSource {
+                    source_type: ExchangeRateSourceType::Generic,
+                    endpoint,
+                    api_key_secret: None,
+                }],
+            }),
+        ));
+        ledger
+            .set_limits(&[make_limit(SpendScope::Network, Some("btc"), None)])
+            .await
+            .unwrap();
+        let context = SpendContext {
+            network: "btc".into(),
+            wallet: Some("reviewer".into()),
+            amount_native: 1000,
+            token: None,
+        };
+        let previous = ledger.reserve("previous_payment", &context).await.unwrap();
+        ledger
+            .set_limits(&[SpendLimit {
+                rule_id: None,
+                scope: SpendScope::GlobalUsdCents,
+                network: None,
+                wallet: None,
+                window_s: 3600,
+                max_spend: 100_000,
+                token: None,
+            }])
+            .await
+            .unwrap();
+        let reserve_ledger = ledger.clone();
+        let started = std::time::Instant::now();
+        let reservation =
+            tokio::spawn(
+                async move { reserve_ledger.reserve("unresponsive_rate", &context).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(2), accepted)
+            .await
+            .unwrap()
+            .unwrap();
+        let confirm_ledger = ledger.clone();
+        let confirmation = tokio::spawn(async move { confirm_ledger.confirm(previous).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!confirmation.is_finished());
+        let error = tokio::time::timeout(std::time::Duration::from_secs(45), reservation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, PayError::NetworkError { .. }));
+        assert!(started.elapsed() >= std::time::Duration::from_secs(14));
+        assert!(started.elapsed() < std::time::Duration::from_secs(45));
+        tokio::time::timeout(std::time::Duration::from_secs(2), confirmation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[cfg(all(feature = "redb", feature = "exchange-rate"))]
+    #[tokio::test]
+    async fn exchange_rate_rejects_invalid_prices_without_caching_and_uses_next_source() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for price in ["0", "-1", "1e400"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = [0; 4096];
+                    let length = stream.read(&mut request).await.unwrap();
+                    let valid =
+                        String::from_utf8_lossy(&request[..length]).starts_with("GET /valid?");
+                    let body = format!("{{\"price\":{}}}", if valid { "100" } else { price });
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let source = |path: &str| crate::types::ExchangeRateSource {
+                source_type: ExchangeRateSourceType::Generic,
+                endpoint: format!("{endpoint}/{path}"),
+                api_key_secret: None,
+            };
+            let config = |sources| ExchangeRateConfig {
+                ttl_s: 300,
+                sources,
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            let ledger = SpendLedger::new(
+                tmp.path().to_str().unwrap(),
+                Some(config(vec![source("bad")])),
+            );
+            ledger
+                .set_limits(&[SpendLimit {
+                    rule_id: None,
+                    scope: SpendScope::GlobalUsdCents,
+                    network: None,
+                    wallet: None,
+                    window_s: 3600,
+                    max_spend: 100_000,
+                    token: None,
+                }])
+                .await
+                .unwrap();
+            let ctx = SpendContext {
+                network: "btc".to_owned(),
+                wallet: Some("reviewer".to_owned()),
+                amount_native: 1000,
+                token: None,
+            };
+            assert!(matches!(
+                ledger.reserve("bad_rate", &ctx).await,
+                Err(PayError::NetworkError { .. })
+            ));
+            {
+                let db = ledger.open_exchange_rate_db().unwrap();
+                let transaction = db.begin_read().unwrap();
+                if let Ok(table) = transaction.open_table(FX_QUOTE_BY_PAIR) {
+                    assert!(table.get("BTC/USD").unwrap().is_none());
+                }
+            }
+            drop(ledger);
+            let ledger = SpendLedger::new(
+                tmp.path().to_str().unwrap(),
+                Some(config(vec![source("bad"), source("valid")])),
+            );
+            let reservation = ledger.reserve("good_rate", &ctx).await.unwrap();
+            let quote = ledger.get_or_fetch_quote("BTC", "USD").await.unwrap();
+            assert_eq!(quote.price, 100.0);
+            assert_eq!(quote.source, format!("{endpoint}/valid"));
+            ledger.cancel(reservation).await.unwrap();
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
     #[tokio::test]
     async fn global_usd_cents_scope_requires_exchange_rate_config() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3059,6 +3508,7 @@ mod tests {
             fee: None,
             preimage: None,
             reservation_ids: vec![],
+            idempotency_finalize_failed: false,
         }
     }
 

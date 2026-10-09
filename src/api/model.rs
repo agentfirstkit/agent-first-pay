@@ -70,7 +70,9 @@ pub struct ApiErrorBody {
     pub retry_after_ms: Option<u64>,
     /// Typed conflict/recovery detail. Present on `limit_exceeded` and
     /// `accounting_inconsistent`, whose refusals carry ledger state the
-    /// caller needs in order to act.
+    /// caller needs in order to act. An unresolved submission carries retained
+    /// reservation_ids and confirm_errors; transaction_id is present only when
+    /// a real transaction or recovery identifier is known.
     pub details: Option<serde_json::Value>,
 }
 
@@ -567,6 +569,28 @@ pub struct SendResult {
     /// limit applied.
     #[serde(default)]
     pub reservation_ids: Vec<u64>,
+    /// Payment succeeded but at least one node could not persist its replay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(extend("default" = false))]
+    pub idempotency_finalize_failed: bool,
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::{CashuTokenResult, SendResult};
+
+    #[test]
+    fn receipts_accept_a_warning_and_older_receipts_default_to_false() {
+        let sent: SendResult = serde_json::from_value(serde_json::json!({
+            "wallet": "w_test", "transaction_id": "real-id", "amount": {"value": 1, "token": "sats"},
+        })).expect("older send receipt");
+        assert!(!sent.idempotency_finalize_failed);
+        let token: CashuTokenResult = serde_json::from_value(serde_json::json!({
+            "wallet": "w_test", "transaction_id": "real-mint-id", "status": "confirmed", "token": "cashuT_test",
+            "idempotency_finalize_failed": true,
+        })).expect("warning receipt");
+        assert!(token.idempotency_finalize_failed);
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -610,6 +634,10 @@ pub struct CashuTokenResult {
     pub token: String,
     #[serde(default)]
     pub reservation_ids: Vec<u64>,
+    /// Token creation succeeded but at least one node could not persist its replay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(extend("default" = false))]
+    pub idempotency_finalize_failed: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
